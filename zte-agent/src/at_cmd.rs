@@ -76,7 +76,7 @@ impl AtPort {
 /// commands ever share the node's receive queue.
 pub fn send(at_port: &AtPort, command: &str, timeout_secs: u64) -> Result<String, String> {
     let _g = lock_port();
-    exchange(at_port, command, timeout_secs, None)
+    exchange(at_port, command, timeout_secs, None, None)
 }
 
 /// Remote calls must be cancellable while waiting behind local AT traffic.
@@ -87,6 +87,25 @@ pub fn send_cancellable(
     command: &str,
     timeout_secs: u64,
     cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<String, String> {
+    send_cancellable_inner(at_port, command, timeout_secs, cancelled, None)
+}
+
+pub fn send_cancellable_tracked(
+    at_port: &AtPort,
+    command: &str,
+    timeout_secs: u64,
+    cancelled: &std::sync::atomic::AtomicBool,
+    submitted: &std::sync::atomic::AtomicBool,
+) -> Result<String, String> {
+    send_cancellable_inner(at_port, command, timeout_secs, cancelled, Some(submitted))
+}
+fn send_cancellable_inner(
+    at_port: &AtPort,
+    command: &str,
+    timeout_secs: u64,
+    cancelled: &std::sync::atomic::AtomicBool,
+    submitted: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<String, String> {
     use std::sync::{atomic::Ordering, TryLockError};
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -105,7 +124,7 @@ pub fn send_cancellable(
             }
         }
     };
-    exchange(at_port, command, timeout_secs, Some(cancelled))
+    exchange(at_port, command, timeout_secs, Some(cancelled), submitted)
 }
 
 fn exchange(
@@ -113,6 +132,7 @@ fn exchange(
     command: &str,
     timeout_secs: u64,
     cancelled: Option<&std::sync::atomic::AtomicBool>,
+    submitted: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<String, String> {
     let port = at_port.probe().ok_or("no serial port found")?;
     if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
@@ -124,6 +144,9 @@ fn exchange(
         cmd = command,
         t = timeout_secs
     );
+    if let Some(submitted) = submitted {
+        submitted.store(true, std::sync::atomic::Ordering::Release);
+    }
     let output = Command::new("sh")
         .args(["-c", &script])
         .output()
@@ -136,6 +159,21 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    #[test]
+    fn cancellation_while_waiting_for_the_port_cannot_commit_a_dial() {
+        let owner = lock_port();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let committed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (flag, marker) = (cancelled.clone(), committed.clone());
+        let task = std::thread::spawn(move || {
+            send_cancellable_tracked(&AtPort::new(), "ATD123;", 5, &flag, &marker)
+        });
+        std::thread::sleep(Duration::from_millis(40));
+        cancelled.store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(task.join().unwrap().unwrap_err(), "exchange_cancelled");
+        assert!(!committed.load(std::sync::atomic::Ordering::Acquire));
+        drop(owner);
+    }
     #[test]
     fn cancelled_exchange_does_not_wait_for_the_port_owner() {
         let _owner = lock_port();

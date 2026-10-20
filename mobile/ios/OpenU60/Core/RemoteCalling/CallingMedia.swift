@@ -14,7 +14,15 @@ struct CallingICEServer: Codable {
 }
 
 @MainActor
-final class CallingMedia: NSObject {
+protocol CallingMediaConnection: AnyObject {
+    func answer(sdp: String) async throws -> String
+    func add(_ value: CallingICECandidate) async throws
+    func mute(_ muted: Bool)
+    func close()
+}
+
+@MainActor
+final class CallingMedia: NSObject, CallingMediaConnection {
     private let factory = RTCPeerConnectionFactory()
     private var connection: RTCPeerConnection?
     private var audioTrack: RTCAudioTrack?
@@ -23,7 +31,7 @@ final class CallingMedia: NSObject {
     let send: (String, [String: Any]) -> Void
     let stateChanged: (RTCPeerConnectionState) -> Void
 
-    init(callId: UUID, servers: [CallingICEServer], send: @escaping (String, [String: Any]) -> Void,
+    init(callId: UUID, servers: [CallingICEServer], muted: Bool, send: @escaping (String, [String: Any]) -> Void,
          stateChanged: @escaping (RTCPeerConnectionState) -> Void) throws {
         self.callId = callId
         self.send = send
@@ -40,6 +48,7 @@ final class CallingMedia: NSObject {
         let source = factory.audioSource(with: RTCMediaConstraints(mandatoryConstraints: nil,
             optionalConstraints: ["googEchoCancellation": "true", "googNoiseSuppression": "true", "googAutoGainControl": "true"]))
         let track = factory.audioTrack(with: source, trackId: "microphone")
+        track.isEnabled = !muted
         audioTrack = track
         peer.add(track, streamIds: [callId.uuidString.lowercased()])
     }
@@ -78,6 +87,19 @@ final class CallingMedia: NSObject {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.add(candidate) { error in
                 if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+    }
+    func packetCounts() async throws -> (received: Int, sent: Int) {
+        guard let connection else { throw CallingError.media("peer_closed") }
+        return await withCheckedContinuation { continuation in
+            connection.statistics { report in
+                var received = 0, sent = 0
+                for value in report.statistics.values {
+                    if value.type == "inbound-rtp", let count = value.values["packetsReceived"] as? NSNumber { received += count.intValue }
+                    if value.type == "outbound-rtp", let count = value.values["packetsSent"] as? NSNumber { sent += count.intValue }
+                }
+                continuation.resume(returning: (received, sent))
             }
         }
     }

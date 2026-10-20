@@ -236,6 +236,7 @@ impl Media {
         }
         Ok(())
     }
+    pub(crate) fn audio_track(&self) -> Arc<TrackLocalStaticSample> { self.track.clone() }
     pub fn is_connected(&self) -> bool {
         *self.connected.borrow() == RTCPeerConnectionState::Connected
     }
@@ -249,7 +250,7 @@ impl Media {
         let mut bridge = AudioBridge::start()?;
         let mut inbound = self.inbound.take().ok_or("audio_already_started")?;
         while inbound.try_recv().is_ok() {}
-        let track = self.track.clone();
+        let track = self.audio_track();
         let ready = self.ready_sender.clone();
         let failure = self.failure.clone();
         let generation = self.generation;

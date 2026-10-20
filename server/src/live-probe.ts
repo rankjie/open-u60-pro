@@ -54,7 +54,10 @@ async function main() {
     const phone = new Peer(address, phoneToken); sockets.push(phone); await phone.next("hello");
     callId = randomUUID(); const requestId = randomUUID();
     phone.send({ type: "command", requestId, callId, action: "dial", number: "+999000001" });
-    if ((await router.next("command")).requestId !== requestId) throw new Error("Command identity changed");
+    const delivered = await router.next("command");
+    if (delivered.requestId !== requestId) throw new Error("Command identity changed");
+    const now = Math.floor(Date.now() / 1000);
+    if (typeof delivered.expiresAt !== "number" || delivered.expiresAt <= now || delivered.expiresAt > now + 21) throw new Error("Command deadline missing or invalid");
     router.send({ type: "result", requestId, callId, ok: true });
     if ((await phone.next("result")).ok !== true) throw new Error("Command result failed");
     router.send({ type: "signal", callId, description: { type: "offer", sdp: "v=0\r\n" } });

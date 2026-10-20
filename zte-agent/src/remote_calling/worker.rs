@@ -7,7 +7,7 @@ use super::{
 use crate::{at_cmd, handlers::AppState, telephony};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -30,6 +30,40 @@ enum Work {
     Command(Command, Result<(), &'static str>, bool),
     Cleanup(Result<(), &'static str>),
 }
+struct Execution {
+    cancelled: Arc<AtomicBool>,
+    deadline: JoinHandle<()>,
+}
+impl Execution {
+    fn new(remaining: Duration) -> Self {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let deadline = tokio::spawn(async move {
+            tokio::time::sleep(remaining).await;
+            flag.store(true, Ordering::Release);
+        });
+        Self {
+            cancelled,
+            deadline,
+        }
+    }
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+impl Drop for Execution {
+    fn drop(&mut self) {
+        self.cancel();
+        self.deadline.abort();
+    }
+}
+fn unix_now() -> Result<u64, &'static str> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .map_err(|_| "invalid_clock")
+}
+
 pub struct Worker {
     state: Arc<AppState>,
     manager: Arc<RemoteCalling>,
@@ -47,7 +81,8 @@ pub struct Worker {
     waiting: Option<(Command, Instant)>,
     queue: VecDeque<Command>,
     inflight: Option<Command>,
-    cancelled: Arc<AtomicBool>,
+    execution: Option<Execution>,
+    admitted: HashMap<Uuid, Instant>,
     work: Option<oneshot::Receiver<Work>>,
     next_poll: Instant,
     call_started: Instant,
@@ -83,7 +118,8 @@ impl Worker {
             waiting: None,
             queue: VecDeque::new(),
             inflight: None,
-            cancelled: Arc::new(AtomicBool::new(false)),
+            execution: None,
+            admitted: HashMap::new(),
             work: None,
             next_poll: Instant::now(),
             call_started: Instant::now(),
@@ -154,6 +190,7 @@ impl Worker {
         command: &Command,
         outcome: Result<(), &str>,
     ) -> Result<(), String> {
+        self.admitted.remove(&command.request_id);
         let value = result(command, outcome);
         self.journal.complete(command, value.clone())?;
         self.send(value).await
@@ -228,6 +265,11 @@ impl Worker {
                 match self.journal.begin(&command)? {
                     Begin::Replay(result) => self.send(result).await?,
                     Begin::Execute => {
+                        self.admitted.insert(command.request_id, Instant::now());
+                        if command.action == "hangup" {
+                            self.cancel_commands(command.call_id, "call_cancelled")
+                                .await?;
+                        }
                         if self.queue.len() >= 8 {
                             self.completed(&command, Err("command_queue_full")).await?;
                         } else {
@@ -261,12 +303,11 @@ impl Worker {
                 .journal
                 .acknowledge(value["eventId"].as_str().ok_or("invalid_event_ack")?)?,
             "call" => {
-                if value["state"] == "ended"
-                    && self.journal.call().is_some_and(|call| {
-                        value["callId"].as_str() == Some(call.id.to_string().as_str())
-                    })
-                {
-                    self.cleanup = Some("session_ended");
+                if value["state"] == "ended" {
+                    let id =
+                        Uuid::parse_str(value["callId"].as_str().ok_or("invalid_call_identity")?)
+                            .map_err(|_| "invalid_call_identity")?;
+                    self.cancel_commands(id, "session_ended").await?;
                 }
             }
             "error" => {
@@ -280,11 +321,44 @@ impl Worker {
         }
         Ok(())
     }
+    async fn cancel_commands(&mut self, id: Uuid, reason: &'static str) -> Result<(), String> {
+        if self
+            .inflight
+            .as_ref()
+            .is_some_and(|command| command.call_id == id)
+        {
+            if let Some(execution) = &self.execution {
+                execution.cancel();
+            }
+        }
+        let mut retained = VecDeque::new();
+        while let Some(command) = self.queue.pop_front() {
+            if command.call_id == id && command.action != "hangup" {
+                self.completed(&command, Err(reason)).await?;
+            } else {
+                retained.push_back(command);
+            }
+        }
+        self.queue = retained;
+        if let Some(command) = take_waiting_for_call(&mut self.waiting, id) {
+            self.completed(&command, Err(reason)).await?;
+        }
+        if self.journal.call().is_some_and(|call| call.id == id) {
+            self.cleanup = Some(reason);
+        }
+        Ok(())
+    }
     async fn tick(&mut self) -> Result<(), String> {
+        if self.cleanup.is_some() {
+            if let Some(execution) = &self.execution {
+                execution.cancel();
+            }
+        }
         if let Some(receiver) = self.work.as_mut() {
             match receiver.try_recv() {
                 Ok(work) => {
                     self.work = None;
+                    self.execution = None;
                     self.inflight = None;
                     self.work_done(work).await?;
                 }
@@ -322,8 +396,20 @@ impl Worker {
             return Ok(());
         }
         if let Some(command) = self.queue.pop_front() {
+            if command.action != "hangup" && self.remaining(&command).is_err() {
+                if matches!(command.action.as_str(), "dial" | "answer")
+                    && self
+                        .journal
+                        .call()
+                        .is_some_and(|call| call.id == command.call_id)
+                {
+                    self.cleanup = Some("operation_expired");
+                }
+                self.completed(&command, Err("operation_expired")).await?;
+                return Ok(());
+            }
             if command.action == "hangup" {
-                if let Some((pending, _)) = self.waiting.take() {
+                if let Some(pending) = take_waiting_for_call(&mut self.waiting, command.call_id) {
                     self.completed(&pending, Err("call_cancelled")).await?;
                 }
             }
@@ -385,8 +471,7 @@ impl Worker {
                     if current.as_ref().is_some_and(|c| {
                         c.id == command.call_id && c.state == "active" && c.media_ready
                     }) {
-                        self.execute(command.clone());
-                        Ok(false)
+                        self.execute(command.clone()).map(|()| false)
                     } else {
                         Err("call_not_active")
                     }
@@ -413,7 +498,10 @@ impl Worker {
             if self.media.as_ref().is_some_and(Media::is_connected) {
                 let command = command.clone();
                 self.waiting = None;
-                self.execute(command);
+                if let Err(error) = self.execute(command.clone()) {
+                    self.completed(&command, Err(error)).await?;
+                    self.cleanup = Some(error);
+                }
                 return Ok(());
             }
         }
@@ -444,9 +532,19 @@ impl Worker {
         }
         Ok(())
     }
-    fn execute(&mut self, command: Command) {
+    fn remaining(&self, command: &Command) -> Result<Duration, &'static str> {
+        let admitted = *self
+            .admitted
+            .get(&command.request_id)
+            .ok_or("command_admission_missing")?;
+        remaining_window(command, admitted, Instant::now(), unix_now()?)
+    }
+    fn execute(&mut self, command: Command) -> Result<(), &'static str> {
+        let remaining = self.remaining(&command)?;
+        let execution = Execution::new(remaining);
+        let cancelled = execution.cancelled.clone();
+        self.execution = Some(execution);
         let state = self.state.clone();
-        let cancelled = self.cancelled.clone();
         let (tx, rx) = oneshot::channel();
         self.work = Some(rx);
         self.inflight = Some(command.clone());
@@ -454,6 +552,7 @@ impl Worker {
             let (outcome, submitted) = execute(&state, &command, &cancelled);
             let _ = tx.send(Work::Command(command, outcome, submitted));
         });
+        Ok(())
     }
     async fn work_done(&mut self, work: Work) -> Result<(), String> {
         match work {
@@ -601,7 +700,9 @@ impl Worker {
         Ok(())
     }
     pub async fn shutdown(&mut self) -> Result<(), String> {
-        self.cancelled.store(true, Ordering::Release);
+        if let Some(execution) = &self.execution {
+            execution.cancel();
+        }
         if let Some(media) = self.media.take() {
             media.close().await;
         }
@@ -626,6 +727,7 @@ impl Worker {
                 _ => failure = Some("modem_shutdown_reconciliation_failed".into()),
             }
         }
+        self.execution = None;
         if self.journal.call().is_some() && self.physical_direction.is_some() {
             let state = self.state.clone();
             let id = self.physical_id;
@@ -650,6 +752,31 @@ impl Worker {
             None => Ok(()),
         }
     }
+}
+
+fn take_waiting_for_call(waiting: &mut Option<(Command, Instant)>, id: Uuid) -> Option<Command> {
+    if waiting
+        .as_ref()
+        .is_some_and(|(command, _)| command.call_id == id)
+    {
+        waiting.take().map(|(command, _)| command)
+    } else {
+        None
+    }
+}
+
+fn remaining_window(
+    command: &Command,
+    admitted: Instant,
+    now: Instant,
+    wall_now: u64,
+) -> Result<Duration, &'static str> {
+    let elapsed = now.saturating_duration_since(admitted);
+    let window = Duration::from_secs(20)
+        .checked_sub(elapsed)
+        .filter(|value| !value.is_zero())
+        .ok_or("operation_expired")?;
+    Ok(command.remaining(wall_now)?.min(window))
 }
 
 fn terminal_ok(response: &str) -> bool {
@@ -699,7 +826,7 @@ fn execute(
     command: &Command,
     cancelled: &AtomicBool,
 ) -> (Result<(), &'static str>, bool) {
-    let mut submitted = false;
+    let submitted = AtomicBool::new(false);
     let outcome = (|| {
         command.validate()?;
         if cancelled.load(Ordering::Acquire) {
@@ -729,9 +856,9 @@ fn execute(
         if cancelled.load(Ordering::Acquire) {
             return Err("command_cancelled");
         }
-        submitted = command.action == "dial";
-        let response = at_cmd::send_cancellable(&state.at_port, &code, 5, cancelled)
-            .map_err(|_| "modem_command_unavailable")?;
+        let response =
+            at_cmd::send_cancellable_tracked(&state.at_port, &code, 5, cancelled, &submitted)
+                .map_err(|_| "modem_command_unavailable")?;
         if !terminal_ok(&response) {
             return Err("modem_rejected_command");
         }
@@ -740,7 +867,10 @@ fn execute(
         }
         Ok(())
     })();
-    (outcome, submitted)
+    (
+        outcome,
+        command.action == "dial" && submitted.load(Ordering::Acquire),
+    )
 }
 fn owns_call(
     physical: &Value,
@@ -832,6 +962,66 @@ async fn connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancellation_preserves_a_different_call_waiting_for_media() {
+        let id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let command = Command {
+            kind: "command".into(),
+            request_id,
+            call_id: id,
+            action: "answer".into(),
+            expires_at: 1000,
+            number: None,
+            digits: None,
+        };
+        let mut waiting = Some((command, Instant::now()));
+        assert!(take_waiting_for_call(&mut waiting, Uuid::new_v4()).is_none());
+        assert_eq!(waiting.as_ref().unwrap().0.request_id, request_id);
+        assert_eq!(
+            take_waiting_for_call(&mut waiting, id).unwrap().request_id,
+            request_id
+        );
+        assert!(waiting.is_none());
+    }
+    #[test]
+    fn media_setup_and_queue_wait_cannot_restart_the_command_deadline() {
+        let command = Command {
+            kind: "command".into(),
+            request_id: Uuid::new_v4(),
+            call_id: Uuid::new_v4(),
+            action: "dial".into(),
+            expires_at: 1000,
+            number: Some("123".into()),
+            digits: None,
+        };
+        let admitted = Instant::now();
+        assert_eq!(
+            remaining_window(&command, admitted, admitted + Duration::from_secs(19), 100).unwrap(),
+            Duration::from_secs(1)
+        );
+        assert!(
+            remaining_window(&command, admitted, admitted + Duration::from_secs(20), 100).is_err()
+        );
+        assert!(remaining_window(&command, admitted, admitted, 1000).is_err());
+    }
+    #[tokio::test]
+    async fn execution_cancellation_is_durable_until_the_port_can_be_acquired() {
+        let execution = Execution::new(Duration::from_millis(20));
+        let marker = execution.cancelled.clone();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !marker.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(marker.load(Ordering::Acquire));
+        let execution = Execution::new(Duration::from_secs(30));
+        let marker = execution.cancelled.clone();
+        drop(execution);
+        assert!(marker.load(Ordering::Acquire));
+    }
     #[test]
     fn cleanup_requires_a_submitted_dial_or_the_original_modem_identity() {
         let physical = json!({"id":2,"dir":"mo","number":"12345"});

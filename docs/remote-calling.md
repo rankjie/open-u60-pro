@@ -6,9 +6,12 @@ needs a VPN or an overlay network. Both endpoints need internet access.
 
 The implementation includes the server, router call controller and audio adapter,
 and iPhone WebRTC, CallKit, and PushKit integration. **Cellular audio on the real
-router and background incoming calls on the iPhone still require device testing.**
-The inspected router had no SIM, and the router was unavailable when these builds
-were produced. A compiled adapter is not proof that its vendor audio path works.
+router and actual PushKit delivery still require device testing.** L17 has passed
+native CallKit incoming/outgoing, answer, mute, hangup, audio activation, and a
+synthetic incoming call reported while the app was in the background. That
+background fixture uses a short background task; it does not prove PushKit wakeup.
+The inspected router had no SIM. A compiled adapter is not proof that its vendor
+audio path works.
 
 ## Architecture
 
@@ -48,7 +51,9 @@ The app obtains a five-minute pairing code from the enrolled router, creates its
 own credential before pairing, and stores the completed pairing in the iPhone
 Keychain. After pairing, the original call-screen entry opens remote calling.
 The login screen also provides remote calling without requiring a local router
-login. Router management remains available separately.
+login. Its sheet has an explicit Close button. The standalone calling screen has
+a Back button for returning to router management. Returning does not end an
+ongoing CallKit call.
 
 Calls use CallKit for dialing, answering, ending, mute, DTMF, and audio-session
 activation. Speaker routing uses WebRTC's coordinated audio session. PushKit
@@ -75,6 +80,10 @@ only when the modem reports an active call. An active call is advertised with
 
 Each call and command has a stable UUID. The server persists a command before
 sending it. The agent persists its execution journal before touching the modem.
+The server includes the original 20-second expiry on every delivery. Retries keep
+that expiry. The agent subtracts queue and media setup time using a monotonic clock
+and cancels work still waiting for the shared AT port when the operation expires
+or its call ends. Cancellation only affects commands belonging to that call.
 An identical request replays its recorded result. After a process crash, an
 unfinished command becomes `execution_unknown`; it is never dialed again.
 The execution journal keeps bounded completed history and a durable event queue.
@@ -155,10 +164,34 @@ Verification on 2026-10-20 covered:
   token invalidation, and stale incoming events are exercised.
 - Four native adapter tests using synthetic PCM and private socket pairs.
 - AArch64 musl builds of the agent and native adapter, and a Beexio-signed iOS build.
+- Isolated Simulator regression checks against the production iOS manager: mute
+  survives renegotiation, stale media/ended events cannot affect a newer call,
+  a call arriving during microphone permission prevents a conflicting outgoing
+  call, local hangup completes before its network acknowledgment, and stale or
+  stalled signaling reconnects while retaining existing media.
+- Actual Google WebRTC M155 and Rust SDP/ICE/DTLS interoperability. The real
+  Simulator client receives synthetic G.711 RTP from the production Rust media
+  implementation. The microphone is disabled, so this is downlink evidence only.
+- Native CallKit on L17 with an in-memory synthetic gateway: incoming/outgoing,
+  answering, mute, hangup, activation/deactivation, and background call reporting.
 - Public HTTPS/WSS pairing, command/result, media routing, and event acknowledgment
   through nl1 using synthetic endpoints, followed by credential revocation.
 - Real two-peer DTLS-SRTP tests forced through nl1 TURN over UDP and TCP, verifying distinct G.711
   payloads in both directions. This tests the network media engine, not the modem.
+
+The lifecycle and native media checks use a dedicated booted Simulator:
+
+```sh
+sh mobile/ios/scripts/test_remote_calling.sh <simulator-uuid>
+sh mobile/ios/scripts/test_native_media.sh <simulator-uuid>
+```
+
+The optional native CallKit fixture is compiled only with both `DEBUG` and
+`OPENU60_NATIVE_CALLKIT_PROBE`. It preserves the complete app and opens a sheet
+only when explicitly launched with `--native-callkit-probe`; Back to OpenU60
+closes it. `build_native_callkit_probe.sh` builds this optional full app for an
+explicit private-LAN fixture URL. The distributed app has neither this build flag
+nor that URL. Do not replace the app with a standalone test shell.
 
 After the SIM arrives, install the built agent and app, pair the real devices,
 and verify outgoing and incoming calls with a voice-capable SIM and carrier IMS

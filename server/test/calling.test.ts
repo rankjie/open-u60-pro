@@ -106,7 +106,12 @@ describe("signaling over real WebSocket connections", () => {
     expect(hello.iceServers[0].username).toContain(f.router.id);
     const callId = randomUUID(), requestId = randomUUID();
     phone.send({ type: "command", requestId, callId, action: "dial", number: "+12345" });
-    expect((await router.next("command")).requestId).toBe(requestId);
+    const command = await router.next("command");
+    expect(command.requestId).toBe(requestId);
+    expect(command.expiresAt).toBe(f.store.now() + 20);
+    f.advance(1);
+    phone.send({ type: "command", requestId, callId, action: "dial", number: "+12345" });
+    expect((await router.next("command")).expiresAt).toBe(command.expiresAt);
     await phone.next("accepted");
     router.send({ type: "signal", callId, description: { type: "offer", sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 0\r\n" } });
     expect((await phone.next("signal")).description.type).toBe("offer");

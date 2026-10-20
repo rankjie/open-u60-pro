@@ -134,6 +134,8 @@ export class Store {
     if (digits && !/^[0-9*#ABCD]+$/.test(digits)) throw new Fault(400, "invalid_dtmf");
     const payload = JSON.stringify({ type: "command", requestId: id, callId, action, ...(number ? { number } : {}), ...(digits ? { digits } : {}) });
     const fingerprint = hash(payload);
+    const expiresAt = this.now() + 20;
+    const delivery = JSON.stringify({ ...JSON.parse(payload), expiresAt });
     return this.transaction(() => {
       const previous = this.one<Operation>("SELECT * FROM operations WHERE id=?", id);
       if (previous) {
@@ -151,11 +153,11 @@ export class Store {
         if (action === "dtmf" && call.state !== "active") throw new Fault(409, "call_not_active");
         if (action === "answer") this.run("UPDATE calls SET state='answering',updated_at=? WHERE id=?", this.now(), callId);
         if (action === "hangup" && call.state === "ended") {
-          this.run("INSERT INTO operations VALUES(?,?,?,?,?,'done',1,NULL,?)", id, callId, action, fingerprint, payload, this.now());
+          this.run("INSERT INTO operations VALUES(?,?,?,?,?,'done',1,NULL,?)", id, callId, action, fingerprint, delivery, this.now());
           return this.one<Operation>("SELECT * FROM operations WHERE id=?", id)!;
         }
       }
-      this.run("INSERT INTO operations VALUES(?,?,?,?,?,'pending',NULL,NULL,?)", id, callId, action, fingerprint, payload, this.now() + 20);
+      this.run("INSERT INTO operations VALUES(?,?,?,?,?,'pending',NULL,NULL,?)", id, callId, action, fingerprint, delivery, expiresAt);
       return this.one<Operation>("SELECT * FROM operations WHERE id=?", id)!;
     });
   }

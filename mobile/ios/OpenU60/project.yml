@@ -23,6 +23,7 @@ targets:
     platform: iOS
     sources:
       - path: OpenU60App.swift
+      - path: ../Tests/NativeCallKitProbeApp.swift
       - path: Core
       - path: Features
       - path: Navigation

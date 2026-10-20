@@ -6,6 +6,18 @@ import PushKit
 import WebRTC
 import os
 
+@MainActor
+protocol CallingSocket: AnyObject {
+    func resume()
+    func receive() async throws -> URLSessionWebSocketTask.Message
+    func send(_ message: URLSessionWebSocketTask.Message) async throws
+    func cancel(with code: URLSessionWebSocketTask.CloseCode, reason: Data?)
+}
+extension URLSessionWebSocketTask: CallingSocket {}
+
+typealias CallingMediaFactory = @MainActor (UUID, [CallingICEServer], Bool, @escaping (String, [String: Any]) -> Void,
+    @escaping (RTCPeerConnectionState) -> Void) throws -> any CallingMediaConnection
+
 enum RemoteCallState: String, Decodable { case dialing, ringing, answering, active, ended }
 enum RemoteCallDirection: String, Decodable { case incoming, outgoing }
 struct RemoteCall: Decodable, Identifiable {
@@ -39,11 +51,11 @@ final class RemoteCallingManager: NSObject {
     @ObservationIgnored private let http = CallingHTTPClient()
     @ObservationIgnored private var registry: PKPushRegistry?
     @ObservationIgnored private var credentials: CallingCredentials?
-    @ObservationIgnored private var socket: URLSessionWebSocketTask?
+    @ObservationIgnored private var socket: (any CallingSocket)?
     @ObservationIgnored private var session: URLSession
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
     @ObservationIgnored private var heartbeat: Task<Void, Never>?
-    @ObservationIgnored private var media: CallingMedia?
+    @ObservationIgnored private var media: (any CallingMediaConnection)?
     @ObservationIgnored private var iceServers: [CallingICEServer] = []
     @ObservationIgnored private var candidates: [CallingICECandidate] = []
     @ObservationIgnored private var pushToken: String?
@@ -52,24 +64,42 @@ final class RemoteCallingManager: NSObject {
     @ObservationIgnored private var reported: Set<UUID> = []
     @ObservationIgnored private var ended: Set<UUID> = []
     @ObservationIgnored private var connectionGeneration = UUID()
+    @ObservationIgnored private var mediaGeneration: UUID?
+    @ObservationIgnored private var lastSignalingReceipt: ContinuousClock.Instant?
     @ObservationIgnored private var requestedMedia: UUID?
     @ObservationIgnored private let logger = Logger(subsystem: "com.beexio.openu60", category: "RemoteCalling")
 
-    override init() {
+    @ObservationIgnored private let socketFactory: @MainActor (URLRequest) -> any CallingSocket
+    @ObservationIgnored private let mediaFactory: CallingMediaFactory
+    @ObservationIgnored private let requestMicrophone: @MainActor () async -> Bool
+
+    init(provider injectedProvider: CXProvider? = nil, credentials injectedCredentials: CallingCredentials? = nil,
+         bootstrap: Bool = true, socketFactory: (@MainActor (URLRequest) -> any CallingSocket)? = nil,
+         requestMicrophone: @escaping @MainActor () async -> Bool = { await AVAudioApplication.requestRecordPermission() },
+         mediaFactory: @escaping CallingMediaFactory = { try CallingMedia(callId: $0, servers: $1, muted: $2, send: $3, stateChanged: $4) }) {
         let configuration = CXProviderConfiguration()
         configuration.supportsVideo = false
         configuration.maximumCallGroups = 1
         configuration.maximumCallsPerCallGroup = 1
         configuration.supportedHandleTypes = [.phoneNumber, .generic]
-        provider = CXProvider(configuration: configuration)
+        provider = injectedProvider ?? CXProvider(configuration: configuration)
         let transport = URLSessionConfiguration.ephemeral
         transport.timeoutIntervalForRequest = 20
         transport.urlCache = nil
-        session = URLSession(configuration: transport)
+        let nativeSession = URLSession(configuration: transport)
+        session = nativeSession
+        self.socketFactory = socketFactory ?? { nativeSession.webSocketTask(with: $0) }
+        self.mediaFactory = mediaFactory
+        self.requestMicrophone = requestMicrophone
         super.init()
         provider.setDelegate(self, queue: .main)
         RTCAudioSession.sharedInstance().useManualAudio = true
         RTCAudioSession.sharedInstance().isAudioEnabled = false
+        if !bootstrap {
+            credentials = injectedCredentials
+            isPaired = injectedCredentials?.endpointId != nil
+            return
+        }
         let registry = PKPushRegistry(queue: .main)
         registry.delegate = self
         registry.desiredPushTypes = [.voIP]
@@ -79,7 +109,7 @@ final class RemoteCallingManager: NSObject {
 
     func foreground() {
         do { try reloadCredentials() } catch { present(error) }
-        connect()
+        resumeSignaling()
         if let call, call.state == .ended { finish(call.callId, reason: .remoteEnded) }
     }
     private func reloadCredentials() throws {
@@ -134,17 +164,19 @@ final class RemoteCallingManager: NSObject {
         try await pair(server: server, code: code)
     }
     func start(number: String) async throws {
+        guard call == nil else { throw CallingError.server("call_in_progress") }
         guard number.range(of: "^\\+?[0-9*#]{1,30}$", options: .regularExpression) != nil else { throw CallingError.server("invalid_number") }
-        let allowed = await AVAudioApplication.requestRecordPermission()
+        let allowed = await requestMicrophone()
         guard allowed else { throw CallingError.microphoneDenied }
         try await ready()
+        guard call == nil else { throw CallingError.server("call_in_progress") }
         let id = UUID()
         guard let credentials, let routerId = credentials.routerId else { throw CallingError.disconnected }
         call = RemoteCall(callId: id, routerId: routerId, direction: .outgoing, state: .dialing,
             number: number, reason: nil, mediaReady: false, updatedAt: Int(Date().timeIntervalSince1970), sequence: 0)
         errorMessage = nil
         do { try await controller.request(CXTransaction(action: CXStartCallAction(call: id, handle: CXHandle(type: .phoneNumber, value: number)))) }
-        catch { call = nil; throw error }
+        catch { if call?.callId == id { call = nil }; throw error }
     }
     func answer() async throws {
         guard let call else { throw CallingError.server("no_active_call") }
@@ -175,7 +207,11 @@ final class RemoteCallingManager: NSObject {
         else { errorMessage = "The calling operation failed. Please reconnect and check the call state." }
         logger.error("Calling operation failed: \(String(reflecting: type(of: error)), privacy: .public)")
     }
-    private func connect() {
+    func resumeSignaling(at now: ContinuousClock.Instant = .now) {
+        if connectionTask != nil && (socket == nil || lastSignalingReceipt.map { $0.duration(to: now) > .seconds(30) } == true) { disconnect() }
+        connect()
+    }
+    func connect() {
         guard connectionTask == nil, credentials != nil else { return }
         let generation = UUID()
         connectionGeneration = generation
@@ -191,8 +227,9 @@ final class RemoteCallingManager: NSObject {
                     url = websocketURL
                     var request = URLRequest(url: url)
                     request.setValue("Bearer \(credentials.phoneToken)", forHTTPHeaderField: "Authorization")
-                    let socket = self.session.webSocketTask(with: request)
+                    let socket = self.socketFactory(request)
                     self.socket = socket
+                    self.lastSignalingReceipt = .now
                     socket.resume()
                     while !Task.isCancelled {
                         let message = try await socket.receive()
@@ -204,6 +241,7 @@ final class RemoteCallingManager: NSObject {
                         @unknown default: throw CallingError.invalidResponse
                         }
                         guard data.count <= 65536, let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CallingError.invalidResponse }
+                        self.lastSignalingReceipt = .now
                         try await self.receive(value)
                         delay = 1
                     }
@@ -223,7 +261,7 @@ final class RemoteCallingManager: NSObject {
             }
         }
     }
-    private func disconnect() {
+    func disconnect() {
         connectionGeneration = UUID()
         connectionTask?.cancel(); connectionTask = nil
         heartbeat?.cancel(); heartbeat = nil
@@ -233,7 +271,7 @@ final class RemoteCallingManager: NSObject {
     }
     private func ready() async throws {
         guard credentials != nil else { throw CallingError.disconnected }
-        connect()
+        resumeSignaling()
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         while !isConnected {
             if ContinuousClock.now >= deadline { throw CallingError.disconnected }
@@ -244,6 +282,11 @@ final class RemoteCallingManager: NSObject {
         guard let socket, isConnected else { throw CallingError.disconnected }
         let bytes = try JSONSerialization.data(withJSONObject: value)
         guard let string = String(data: bytes, encoding: .utf8) else { throw CallingError.invalidResponse }
+        let watchdog = Task {
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            socket.cancel(with: .goingAway, reason: nil)
+        }
+        defer { watchdog.cancel() }
         try await socket.send(.string(string))
     }
     private func command(_ action: String, callId: UUID, number: String? = nil, digits: String? = nil) async throws {
@@ -291,8 +334,12 @@ final class RemoteCallingManager: NSObject {
             heartbeat?.cancel()
             heartbeat = Task { [weak self] in
                 while !Task.isCancelled {
-                    do { try await Task.sleep(for: .seconds(15)); try await self?.send(["type": "ping"]) }
-                    catch { return }
+                    do {
+                        try await Task.sleep(for: .seconds(15))
+                        guard let self else { return }
+                        if self.lastSignalingReceipt.map({ $0.duration(to: .now) > .seconds(30) }) == true { self.resumeSignaling(); return }
+                        try await self.send(["type": "ping"])
+                    } catch { return }
                 }
             }
             for value in calls { try await update(value) }
@@ -326,11 +373,12 @@ final class RemoteCallingManager: NSObject {
         guard next.routerId == credentials?.routerId else { throw CallingError.invalidResponse }
         if ended.contains(next.callId) { return }
         if let call, call.callId == next.callId, next.sequence < call.sequence { return }
-        call = next
         if next.state == .ended {
             finish(next.callId, reason: next.reason == "no_answer" ? .unanswered : next.reason == "remote_hangup" ? .remoteEnded : .failed)
             return
         }
+        if let current = call, current.callId != next.callId { finish(current.callId, reason: .failed) }
+        call = next
         if next.direction == .incoming, next.state == .ringing, !reported.contains(next.callId) {
             reportIncoming(id: next.callId, number: next.number, expired: false, completion: {})
         }
@@ -350,14 +398,17 @@ final class RemoteCallingManager: NSObject {
         guard call?.callId == id else { throw CallingError.invalidResponse }
         if let description = value["description"] as? [String: Any] {
             guard description["type"] as? String == "offer", let sdp = description["sdp"] as? String, sdp.count <= 32768 else { throw CallingError.invalidResponse }
-            media?.close()
-            media = try CallingMedia(callId: id, servers: iceServers, send: { [weak self] kind, payload in
+            let generation = UUID()
+            mediaGeneration = generation
+            media?.close(); media = nil
+            media = try mediaFactory(id, iceServers, muted, { [weak self] kind, payload in
                 Task { @MainActor in
-                    do { try await self?.send(["type": "signal", "callId": id.uuidString.lowercased(), kind: payload]) }
-                    catch { self?.present(error) }
+                    guard let self, self.mediaGeneration == generation, self.call?.callId == id, !self.ended.contains(id) else { return }
+                    do { try await self.send(["type": "signal", "callId": id.uuidString.lowercased(), kind: payload]) }
+                    catch { self.present(error) }
                 }
-            }, stateChanged: { [weak self] state in
-                guard let self else { return }
+            }, { [weak self] state in
+                guard let self, self.mediaGeneration == generation, self.call?.callId == id, !self.ended.contains(id) else { return }
                 self.audioConnected = state == .connected
                 if state == .failed {
                     self.present(CallingError.media("connection_failed"))
@@ -366,7 +417,12 @@ final class RemoteCallingManager: NSObject {
             })
             guard let media else { throw CallingError.media("peer_creation_failed") }
             let answer: String
-            do { answer = try await media.answer(sdp: sdp) } catch { throw CallingError.media("negotiation_failed") }
+            do { answer = try await media.answer(sdp: sdp) }
+            catch {
+                if mediaGeneration == generation { mediaGeneration = nil; media.close(); self.media = nil; requestedMedia = nil; candidates.removeAll() }
+                throw CallingError.media("negotiation_failed")
+            }
+            guard mediaGeneration == generation, call?.callId == id, !ended.contains(id) else { return }
             try await send(["type": "signal", "callId": id.uuidString.lowercased(), "description": ["type": "answer", "sdp": answer]])
             for candidate in candidates { try await media.add(candidate) }
             candidates.removeAll()
@@ -399,6 +455,7 @@ final class RemoteCallingManager: NSObject {
         if ended.count > 128 { ended = [id] }
         reported.remove(id)
         if call?.callId == id {
+            mediaGeneration = nil
             media?.close(); media = nil; call = nil; requestedMedia = nil
             audioConnected = false; muted = false; speaker = false; candidates.removeAll()
             RTCAudioSession.sharedInstance().isAudioEnabled = false
@@ -419,7 +476,7 @@ final class RemoteCallingManager: NSObject {
                 guard let self else { completion(); return }
                 if error != nil { self.reported.remove(id); self.errorMessage = "The system could not present the incoming call." }
                 else if expired { self.finish(id, reason: .unanswered) }
-                else { self.connect() }
+                else { self.resumeSignaling() }
                 completion()
             }
         }
@@ -442,6 +499,7 @@ extension RemoteCallingManager: @preconcurrency CXProviderDelegate {
                 reported.insert(action.callUUID)
                 provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: Date())
                 try await command("dial", callId: action.callUUID, number: action.handle.value)
+                guard call?.callId == action.callUUID, !ended.contains(action.callUUID) else { action.fail(); return }
                 action.fulfill()
             } catch { present(error); action.fail(); finish(action.callUUID, reason: .failed) }
         }
@@ -450,22 +508,21 @@ extension RemoteCallingManager: @preconcurrency CXProviderDelegate {
         guard call?.callId == action.callUUID, !ended.contains(action.callUUID) else { action.fail(); return }
         Task {
             do {
-                let allowed = await AVAudioApplication.requestRecordPermission()
+                let allowed = await requestMicrophone()
                 guard allowed else { throw CallingError.microphoneDenied }
                 try configureAudioSession()
-                try await command("answer", callId: action.callUUID); action.fulfill()
+                try await command("answer", callId: action.callUUID)
+                guard call?.callId == action.callUUID, !ended.contains(action.callUUID) else { action.fail(); return }
+                action.fulfill()
             }
             catch { present(error); action.fail(); finish(action.callUUID, reason: .failed) }
         }
     }
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
-        media?.close(); media = nil
-        RTCAudioSession.sharedInstance().isAudioEnabled = false
-        Task {
-            do { try await command("hangup", callId: action.callUUID) } catch { present(error) }
-            finish(action.callUUID, reason: .remoteEnded)
-            action.fulfill()
-        }
+        let id = action.callUUID
+        finish(id, reason: .remoteEnded)
+        action.fulfill()
+        Task { do { try await command("hangup", callId: id) } catch { present(error) } }
     }
     func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
         guard call?.callId == action.callUUID, let media else { action.fail(); return }
@@ -484,7 +541,7 @@ extension RemoteCallingManager: @preconcurrency CXProviderDelegate {
     }
     func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
         RTCAudioSession.sharedInstance().audioSessionDidActivate(audioSession)
-        RTCAudioSession.sharedInstance().isAudioEnabled = true
+        RTCAudioSession.sharedInstance().isAudioEnabled = call.map { !ended.contains($0.callId) } == true
     }
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
         RTCAudioSession.sharedInstance().isAudioEnabled = false

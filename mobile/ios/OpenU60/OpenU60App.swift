@@ -4,6 +4,9 @@ import SwiftUI
 struct OpenU60App: App {
     @State private var remoteCalling = RemoteCallingManager()
     @State private var showRemoteCalling = false
+#if DEBUG && OPENU60_NATIVE_CALLKIT_PROBE
+    @State private var showCallingProbe = Foundation.ProcessInfo.processInfo.arguments.contains("--native-callkit-probe")
+#endif
     @State private var showRouterLogin = false
     @State private var signalActivity: SignalActivityManager
     @Environment(\.scenePhase) private var scenePhase
@@ -36,6 +39,9 @@ struct OpenU60App: App {
     var body: some Scene {
         WindowGroup {
             rootView
+#if DEBUG && OPENU60_NATIVE_CALLKIT_PROBE
+                .sheet(isPresented: $showCallingProbe) { NativeCallKitProbeView() }
+#endif
                 .environment(signalActivity)
                 .environment(remoteCalling)
                 .task(id: authManager.isAuthenticated) {
@@ -64,7 +70,7 @@ struct OpenU60App: App {
         if remoteCalling.isPaired && !authManager.isAuthenticated && !showRouterLogin {
             NavigationStack {
                 RemoteCallingView(localClient: nil)
-                    .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Router management") { showRouterLogin = true } } }
+                    .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Back", systemImage: "chevron.left") { showRouterLogin = true } } }
             }
         } else if authManager.isAuthenticated {
             TabBarView(client: client, authManager: authManager)
@@ -91,7 +97,14 @@ struct OpenU60App: App {
                     Button("Remote calling") { showRemoteCalling = true }.padding()
                 }
                 .sheet(isPresented: $showRemoteCalling) {
-                    NavigationStack { RemoteCallingView(localClient: nil).environment(remoteCalling) }
+                    NavigationStack {
+                        RemoteCallingView(localClient: nil).environment(remoteCalling)
+                            .toolbar {
+                                ToolbarItem(placement: .cancellationAction) {
+                                    Button("Close") { showRemoteCalling = false }
+                                }
+                            }
+                    }
                 }
         }
     }

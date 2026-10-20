@@ -14,12 +14,22 @@ pub struct Command {
     pub request_id: Uuid,
     pub call_id: Uuid,
     pub action: String,
+    pub expires_at: u64,
     pub number: Option<String>,
     pub digits: Option<String>,
 }
 impl Command {
+    pub fn remaining(&self, now: u64) -> Result<std::time::Duration, &'static str> {
+        let seconds = self
+            .expires_at
+            .checked_sub(now)
+            .filter(|seconds| *seconds > 0)
+            .ok_or("operation_expired")?;
+        Ok(std::time::Duration::from_secs(seconds.min(20)))
+    }
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.kind != "command"
+        if self.expires_at == 0
+            || self.kind != "command"
             || !matches!(self.action.as_str(), "dial" | "answer" | "hangup" | "dtmf")
         {
             return Err("invalid_command");
@@ -242,10 +252,27 @@ mod tests {
             request_id: Uuid::new_v4(),
             call_id: Uuid::new_v4(),
             action: "dial".into(),
+            expires_at: 1_800_000_020,
             number: Some("+12345".into()),
             digits: None,
         };
         (directory, command)
+    }
+    #[test]
+    fn command_deadlines_expire_and_never_exceed_the_delivery_window() {
+        let (_, mut command) = fixture();
+        for (expires, expected) in [
+            (100, None),
+            (101, Some(1)),
+            (120, Some(20)),
+            (999, Some(20)),
+        ] {
+            command.expires_at = expires;
+            assert_eq!(
+                command.remaining(100).ok().map(|value| value.as_secs()),
+                expected
+            );
+        }
     }
     #[test]
     fn a_crash_after_start_never_reexecutes_a_dial() {
