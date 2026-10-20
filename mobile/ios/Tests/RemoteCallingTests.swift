@@ -8,6 +8,33 @@ import WebRTC
         func expect(_ condition: Bool, _ message: String) { if !condition { failures.append(message) } }
         do {
             let f = Fixture(); let id = UUID(); try await f.start(id)
+            f.socket.emit(["type":"ice_servers", "iceServers":[["urls":["turn:synthetic.invalid:3478"]]]])
+            f.socket.emit(f.snapshot(id, sequence: 2))
+            try await wait { f.manager.call?.sequence == 2 }
+            f.manager.provider(f.provider, perform: CXSetMutedCallAction(call:id, muted:true))
+            let before = f.socket.messages.filter { $0["type"] as? String == "media_request" }.count
+            f.media[0].changed(.failed)
+            try await wait { f.socket.messages.filter { $0["type"] as? String == "media_request" }.count == before + 1 }
+            expect(f.manager.call?.callId == id && f.media[0].closed, "a failed direct path must retain CallKit ownership while replacing its peer")
+            f.offer(id); try await wait { f.media.count == 2 }
+            expect(f.media[1].relayOnly && f.media[1].muted, "the recovery peer must require TURN and preserve mute")
+            f.media[1].changed(.connected)
+            f.media[0].changed(.failed)
+            expect(f.manager.audioConnected && !f.media[1].closed, "a stale direct failure must not close a recovered relay")
+            expect(!f.socket.messages.contains { $0["action"] as? String == "dial" || $0["action"] as? String == "hangup" }, "media recovery must neither redial nor hang up the existing call")
+            f.manager.disconnect()
+        }
+        do {
+            let f = Fixture(); let id = UUID()
+            try await f.connect(calls: [f.snapshot(id, state: "ringing")])
+            f.socket.emit(f.snapshot(id, state: "ringing", sequence: 2))
+            try await wait { f.manager.call?.sequence == 2 }
+            expect(f.socket.messages.filter { $0["type"] as? String == "media_request" }.count == 1,
+                   "a reconnect snapshot must request one peer, even before its offer arrives")
+            f.manager.disconnect()
+        }
+        do {
+            let f = Fixture(); let id = UUID(); try await f.start(id)
             f.manager.provider(f.provider, perform: CXSetMutedCallAction(call:id,muted:true))
             expect(f.media[0].muted, "mute must disable the existing microphone track")
             f.offer(id); try await wait { f.media.count == 2 }

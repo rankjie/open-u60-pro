@@ -3,11 +3,13 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(RemoteCallingManager.self) private var remoteCalling
     private let client: AgentClient
+    private let authManager: AuthManager
     @State private var viewModel: SettingsViewModel
     @FocusState private var gatewayFieldFocused: Bool
 
-    init(client: AgentClient) {
+    init(client: AgentClient, authManager: AuthManager) {
         self.client = client
+        self.authManager = authManager
         _viewModel = State(initialValue: SettingsViewModel(client: client))
     }
 
@@ -15,6 +17,45 @@ struct SettingsView: View {
         @Bindable var vm = viewModel
         NavigationStack {
             Form {
+                Section("Device") {
+                    NavigationLink {
+                        RouterSettingsListView(client: client, authManager: authManager, category: .cellular)
+                    } label: {
+                        Label("Cellular & SIM", systemImage: "simcard")
+                    }
+                    NavigationLink {
+                        RouterSettingsListView(client: client, authManager: authManager, category: .connectivity)
+                    } label: {
+                        Label("Wi-Fi & LAN", systemImage: "wifi")
+                    }
+                    NavigationLink {
+                        RouterSettingsListView(client: client, authManager: authManager, category: .security)
+                    } label: {
+                        Label("Security & QoS", systemImage: "shield")
+                    }
+                    NavigationLink {
+                        RouterSettingsListView(client: client, authManager: authManager, category: .system)
+                    } label: {
+                        Label("Power & system", systemImage: "power")
+                    }
+                }
+                Section("Utilities") {
+                    NavigationLink {
+                        ToolsListView(client: client, authManager: authManager, category: .automation)
+                    } label: {
+                        Label("Automation", systemImage: "clock.arrow.2.circlepath")
+                    }
+                    NavigationLink {
+                        ToolsListView(client: client, authManager: authManager, category: .diagnostics)
+                    } label: {
+                        Label("Network diagnostics", systemImage: "waveform.path.ecg")
+                    }
+                    NavigationLink {
+                        ToolsListView(client: client, authManager: authManager, category: .advanced)
+                    } label: {
+                        Label("Advanced", systemImage: "wrench.and.screwdriver")
+                    }
+                }
                 Section {
                     NavigationLink("Remote calling") { RemoteCallingView(localClient: client) }
                 }

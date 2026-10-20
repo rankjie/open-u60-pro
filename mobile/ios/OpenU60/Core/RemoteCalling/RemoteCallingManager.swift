@@ -5,6 +5,9 @@ import Observation
 import PushKit
 import WebRTC
 import os
+#if DEBUG && OPENU60_NATIVE_CALLKIT_PROBE
+import UIKit
+#endif
 
 @MainActor
 protocol CallingSocket: AnyObject {
@@ -15,7 +18,7 @@ protocol CallingSocket: AnyObject {
 }
 extension URLSessionWebSocketTask: CallingSocket {}
 
-typealias CallingMediaFactory = @MainActor (UUID, [CallingICEServer], Bool, @escaping (String, [String: Any]) -> Void,
+typealias CallingMediaFactory = @MainActor (UUID, [CallingICEServer], Bool, Bool, @escaping (String, [String: Any]) -> Void,
     @escaping (RTCPeerConnectionState) -> Void) throws -> any CallingMediaConnection
 
 enum RemoteCallState: String, Decodable { case dialing, ringing, answering, active, ended }
@@ -67,6 +70,8 @@ final class RemoteCallingManager: NSObject {
     @ObservationIgnored private var mediaGeneration: UUID?
     @ObservationIgnored private var lastSignalingReceipt: ContinuousClock.Instant?
     @ObservationIgnored private var requestedMedia: UUID?
+    @ObservationIgnored private var relayFallbackCall: UUID?
+    @ObservationIgnored private var mediaRecovery: Task<Void, Never>?
     @ObservationIgnored private let logger = Logger(subsystem: "com.beexio.openu60", category: "RemoteCalling")
 
     @ObservationIgnored private let socketFactory: @MainActor (URLRequest) -> any CallingSocket
@@ -76,7 +81,7 @@ final class RemoteCallingManager: NSObject {
     init(provider injectedProvider: CXProvider? = nil, credentials injectedCredentials: CallingCredentials? = nil,
          bootstrap: Bool = true, socketFactory: (@MainActor (URLRequest) -> any CallingSocket)? = nil,
          requestMicrophone: @escaping @MainActor () async -> Bool = { await AVAudioApplication.requestRecordPermission() },
-         mediaFactory: @escaping CallingMediaFactory = { try CallingMedia(callId: $0, servers: $1, muted: $2, send: $3, stateChanged: $4) }) {
+         mediaFactory: @escaping CallingMediaFactory = { try CallingMedia(callId: $0, servers: $1, muted: $2, relayOnly: $3, send: $4, stateChanged: $5) }) {
         let configuration = CXProviderConfiguration()
         configuration.supportsVideo = false
         configuration.maximumCallGroups = 1
@@ -108,6 +113,9 @@ final class RemoteCallingManager: NSObject {
     }
 
     func foreground() {
+#if DEBUG && OPENU60_NATIVE_CALLKIT_PROBE
+        if nativeProbeSnapshot != nil { resumeSignaling(); return }
+#endif
         do { try reloadCredentials() } catch { present(error) }
         resumeSignaling()
         if let call, call.state == .ended { finish(call.callId, reason: .remoteEnded) }
@@ -342,9 +350,11 @@ final class RemoteCallingManager: NSObject {
                     } catch { return }
                 }
             }
+            // Clear a request from the previous socket before snapshots can start
+            // negotiation. Clearing afterward requests two competing router peers.
+            if media == nil { requestedMedia = nil }
             for value in calls { try await update(value) }
             if calls.isEmpty, let call, reported.contains(call.callId) { finish(call.callId, reason: .remoteEnded) }
-            if media == nil { requestedMedia = nil }
             if let call { try await requestMediaIfNeeded(call) }
             Task { do { try await registerPushToken() } catch { present(error) } }
         case "ice_servers":
@@ -378,6 +388,7 @@ final class RemoteCallingManager: NSObject {
             return
         }
         if let current = call, current.callId != next.callId { finish(current.callId, reason: .failed) }
+        if call?.callId != next.callId { errorMessage = nil }
         call = next
         if next.direction == .incoming, next.state == .ringing, !reported.contains(next.callId) {
             reportIncoming(id: next.callId, number: next.number, expired: false, completion: {})
@@ -401,7 +412,7 @@ final class RemoteCallingManager: NSObject {
             let generation = UUID()
             mediaGeneration = generation
             media?.close(); media = nil
-            media = try mediaFactory(id, iceServers, muted, { [weak self] kind, payload in
+            media = try mediaFactory(id, iceServers, muted, relayFallbackCall == id, { [weak self] kind, payload in
                 Task { @MainActor in
                     guard let self, self.mediaGeneration == generation, self.call?.callId == id, !self.ended.contains(id) else { return }
                     do { try await self.send(["type": "signal", "callId": id.uuidString.lowercased(), kind: payload]) }
@@ -410,9 +421,9 @@ final class RemoteCallingManager: NSObject {
             }, { [weak self] state in
                 guard let self, self.mediaGeneration == generation, self.call?.callId == id, !self.ended.contains(id) else { return }
                 self.audioConnected = state == .connected
+                if state == .connected { self.mediaRecovery?.cancel(); self.mediaRecovery = nil }
                 if state == .failed {
-                    self.present(CallingError.media("connection_failed"))
-                    Task { do { try await self.hangup() } catch { self.present(error); self.finish(id, reason: .failed) } }
+                    self.recoverMedia(id)
                 }
             })
             guard let media else { throw CallingError.media("peer_creation_failed") }
@@ -432,10 +443,90 @@ final class RemoteCallingManager: NSObject {
             else { guard candidates.count < 64 else { throw CallingError.media("too_many_candidates") }; candidates.append(candidate) }
         } else { throw CallingError.invalidResponse }
     }
+    private func recoverMedia(_ id: UUID) {
+        guard call?.callId == id, !ended.contains(id) else { return }
+        let hasRelay = iceServers.contains { $0.urls.contains { $0.hasPrefix("turn:") || $0.hasPrefix("turns:") } }
+        guard relayFallbackCall != id, hasRelay else {
+            present(CallingError.media("connection_failed"))
+            Task { do { try await hangup() } catch { present(error); finish(id, reason: .failed) } }
+            return
+        }
+        relayFallbackCall = id
+        mediaGeneration = nil
+        media?.close(); media = nil; requestedMedia = nil; candidates.removeAll()
+        mediaRecovery?.cancel()
+        mediaRecovery = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await ready()
+                guard let call, call.callId == id, !ended.contains(id) else { return }
+                try await requestMediaIfNeeded(call)
+                try await Task.sleep(for: .seconds(12))
+                guard self.call?.callId == id, !audioConnected else { return }
+                throw CallingError.media("relay_connection_timeout")
+            } catch is CancellationError { return }
+            catch {
+                guard self.call?.callId == id, !ended.contains(id) else { return }
+                present(error)
+                do { try await hangup() } catch { present(error); finish(id, reason: .failed) }
+            }
+        }
+    }
     static func errorCode(_ value: Any?) throws -> String {
         guard let code = value as? String, code.range(of: "^[a-z0-9_]{1,80}$", options: .regularExpression) != nil else { throw CallingError.invalidResponse }
         return code
     }
+#if DEBUG && OPENU60_NATIVE_CALLKIT_PROBE
+    @ObservationIgnored private var nativeProbeSnapshot: (CallingCredentials?, String, Bool)?
+    private(set) var nativeProbePushReceipts = 0
+    private(set) var nativeProbePushInBackground = false
+    func beginNativeProbe(_ fixture: CallingCredentials) async throws {
+        guard call == nil, fixture.endpointId != nil, fixture.routerId != nil else {
+            throw CallingError.server("call_in_progress")
+        }
+        _ = try CallingCredentialStore.serverURL(fixture.serverURL.absoluteString)
+        if nativeProbeSnapshot != nil {
+            guard credentials?.endpointId == fixture.endpointId else {throw CallingError.server("verification_already_active")}
+        } else {
+            nativeProbeSnapshot = (credentials, serverAddress, provider.configuration.includesCallsInRecents)
+            disconnect()
+            credentials = fixture
+            serverAddress = fixture.serverURL.absoluteString
+            isPaired = true
+            muted = true
+            let config = provider.configuration
+            config.includesCallsInRecents = false
+            provider.configuration = config
+        }
+        let deadline = ContinuousClock.now.advanced(by:.seconds(15))
+        while pushToken == nil {
+            if ContinuousClock.now >= deadline {throw CallingError.server("push_token_unavailable")}
+            try await Task.sleep(for:.milliseconds(50))
+        }
+        try await registerPushToken()
+        connect()
+    }
+    func nativeProbePacketCounts() async throws -> (received: Int, sent: Int, route: String) {
+        guard let peer = media as? CallingMedia else {throw CallingError.media("peer_not_ready")}
+        return try await peer.packetCounts()
+    }
+    func endNativeProbe() async {
+        guard let saved = nativeProbeSnapshot else {return}
+        if let call {
+            do {try await command("hangup",callId:call.callId)} catch {present(error)}
+            finish(call.callId,reason:.remoteEnded)
+        }
+        disconnect()
+        credentials = saved.0
+        serverAddress = saved.1
+        isPaired = saved.0?.endpointId != nil
+        let config = provider.configuration
+        config.includesCallsInRecents = saved.2
+        provider.configuration = config
+        nativeProbeSnapshot = nil
+        if isPaired {connect()}
+    }
+#endif
     private func configureAudioSession() throws {
         let audio = RTCAudioSession.sharedInstance()
         audio.lockForConfiguration()
@@ -455,6 +546,7 @@ final class RemoteCallingManager: NSObject {
         if ended.count > 128 { ended = [id] }
         reported.remove(id)
         if call?.callId == id {
+            mediaRecovery?.cancel(); mediaRecovery = nil; relayFallbackCall = nil
             mediaGeneration = nil
             media?.close(); media = nil; call = nil; requestedMedia = nil
             audioConnected = false; muted = false; speaker = false; candidates.removeAll()
@@ -575,6 +667,12 @@ extension RemoteCallingManager: @preconcurrency PKPushRegistryDelegate {
             reportIncoming(id: UUID(), number: "OpenU60", expired: true, completion: completion)
             return
         }
+#if DEBUG && OPENU60_NATIVE_CALLKIT_PROBE
+        if nativeProbeSnapshot != nil {
+            nativeProbePushReceipts += 1
+            nativeProbePushInBackground = UIApplication.shared.applicationState != .active
+        }
+#endif
         let expired = expiry <= Int(Date().timeIntervalSince1970) || ended.contains(id)
         if call == nil, !expired {
             call = RemoteCall(callId: id, routerId: routerId, direction: .incoming, state: .ringing,

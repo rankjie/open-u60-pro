@@ -4,6 +4,17 @@ struct RouterSettingsListView: View {
     let client: AgentClient
     let authManager: AuthManager
 
+    enum Category { case cellular, connectivity, security, system }
+    let category: Category
+    private var title: String {
+        switch category {
+        case .cellular: "Cellular & SIM"
+        case .connectivity: "Wi-Fi & LAN"
+        case .security: "Security & QoS"
+        case .system: "Power & system"
+        }
+    }
+
     // MARK: - Routes
 
     private enum Route: Hashable {
@@ -25,99 +36,114 @@ struct RouterSettingsListView: View {
         case vpnPassthrough
         case qos
         case deviceControls
+        case usbMode
+        case deviceInfo
+        case clients
+        case bandLock
     }
 
     // MARK: - Body
 
     var body: some View {
-        NavigationStack {
+        Group {
             List {
-                Section("Cellular") {
-                    NavigationLink(value: Route.mobileNetwork) {
-                        Label("Mobile Network", systemImage: "cellularbars")
+                if category == .cellular {
+                    Section("Cellular") {
+                        NavigationLink { destination(for: .apn) } label: {
+                            Label("APN", systemImage: "simcard")
+                        }
+
+                        NavigationLink { destination(for: .bandLock) } label: { Label("Band Lock", systemImage: "lock.fill") }
+                        NavigationLink { destination(for: .mobileNetwork) } label: {
+                            Label("Mobile Network", systemImage: "cellularbars")
+                        }
+
+                        NavigationLink { destination(for: .networkMode) } label: {
+                            Label("Network Mode", systemImage: "antenna.radiowaves.left.and.right")
+                        }
+
+                        NavigationLink { destination(for: .cellLock) } label: {
+                            Label("Cell Lock", systemImage: "lock.fill")
+                        }
+
+                        NavigationLink { destination(for: .smartTowerConnect) } label: {
+                            Label("Smart Tower Connect", systemImage: "antenna.radiowaves.left.and.right")
+                        }
+
+                        NavigationLink { destination(for: .signalDetection) } label: {
+                            Label("Signal Detection", systemImage: "waveform.badge.magnifyingglass")
+                        }
+
+                        NavigationLink { destination(for: .sim) } label: {
+                            Label("SIM Card", systemImage: "simcard")
+                        }
+
+                        NavigationLink { destination(for: .routerESim) } label: {
+                            Label("eSIM Profiles", systemImage: "simcard.2")
+                        }
+
+                        NavigationLink { destination(for: .simServices) } label: {
+                            Label("SIM Services", systemImage: "phone.badge.waveform")
+                        }
                     }
 
-                    NavigationLink(value: Route.networkMode) {
-                        Label("Network Mode", systemImage: "antenna.radiowaves.left.and.right")
-                    }
-
-                    NavigationLink(value: Route.cellLock) {
-                        Label("Cell Lock", systemImage: "lock.fill")
-                    }
-
-                    NavigationLink(value: Route.smartTowerConnect) {
-                        Label("Smart Tower Connect", systemImage: "antenna.radiowaves.left.and.right")
-                    }
-
-                    NavigationLink(value: Route.signalDetection) {
-                        Label("Signal Detection", systemImage: "waveform.badge.magnifyingglass")
-                    }
-
-                    NavigationLink(value: Route.sim) {
-                        Label("SIM Card", systemImage: "simcard")
-                    }
-
-                    NavigationLink(value: Route.routerESim) {
-                        Label("eSIM Profiles", systemImage: "simcard.2")
-                    }
-
-                    NavigationLink(value: Route.simServices) {
-                        Label("SIM Services", systemImage: "phone.badge.waveform")
-                    }
                 }
+                if category == .connectivity {
+                    Section("Connectivity") {
+                        NavigationLink { destination(for: .clients) } label: {
+                            Label("Connected Devices", systemImage: "laptopcomputer.and.iphone")
+                        }
+                        NavigationLink { destination(for: .wifi) } label: {
+                            Label("WiFi", systemImage: "wifi")
+                        }
 
-                Section("Connectivity") {
-                    NavigationLink(value: Route.wifi) {
-                        Label("WiFi", systemImage: "wifi")
+                        NavigationLink { destination(for: .guestWiFi) } label: {
+                            Label("Guest WiFi", systemImage: "person.2")
+                        }
+
+                        NavigationLink { destination(for: .lan) } label: {
+                            Label("LAN / DHCP", systemImage: "network")
+                        }
+
+                        NavigationLink { destination(for: .dns) } label: {
+                            Label("DNS", systemImage: "globe")
+                        }
                     }
 
-                    NavigationLink(value: Route.guestWiFi) {
-                        Label("Guest WiFi", systemImage: "person.2")
-                    }
-
-                    NavigationLink(value: Route.apn) {
-                        Label("APN", systemImage: "simcard")
-                    }
-
-                    NavigationLink(value: Route.lan) {
-                        Label("LAN / DHCP", systemImage: "network")
-                    }
-
-                    NavigationLink(value: Route.dns) {
-                        Label("DNS", systemImage: "globe")
-                    }
                 }
+                if category == .security {
+                    Section("Security") {
+                        NavigationLink { destination(for: .firewall) } label: {
+                            Label("Firewall", systemImage: "shield.lefthalf.filled")
+                        }
 
-                Section("Security") {
-                    NavigationLink(value: Route.firewall) {
-                        Label("Firewall", systemImage: "shield.lefthalf.filled")
+                        NavigationLink { destination(for: .telemetryBlocker) } label: {
+                            Label("Telemetry Blocker", systemImage: "eye.slash")
+                        }
+
+                        NavigationLink { destination(for: .vpnPassthrough) } label: {
+                            Label("VPN Passthrough", systemImage: "lock.shield")
+                        }
                     }
 
-                    NavigationLink(value: Route.telemetryBlocker) {
-                        Label("Telemetry Blocker", systemImage: "eye.slash")
+                    Section("Quality") {
+                        NavigationLink { destination(for: .qos) } label: {
+                            Label("QoS", systemImage: "speedometer")
+                        }
                     }
 
-                    NavigationLink(value: Route.vpnPassthrough) {
-                        Label("VPN Passthrough", systemImage: "lock.shield")
-                    }
                 }
-
-                Section("Quality") {
-                    NavigationLink(value: Route.qos) {
-                        Label("QoS", systemImage: "speedometer")
-                    }
-                }
-
-                Section("System") {
-                    NavigationLink(value: Route.deviceControls) {
-                        Label("Device Controls", systemImage: "power")
+                if category == .system {
+                    Section("System") {
+                        NavigationLink { destination(for: .deviceInfo) } label: { Label("Device Info", systemImage: "info.circle") }
+                        NavigationLink { destination(for: .usbMode) } label: { Label("USB Mode", systemImage: "cable.connector") }
+                        NavigationLink { destination(for: .deviceControls) } label: {
+                            Label("Device Controls", systemImage: "power")
+                        }
                     }
                 }
             }
-            .navigationTitle("Router")
-            .navigationDestination(for: Route.self) { route in
-                destination(for: route)
-            }
+            .navigationTitle(title)
         }
     }
 
@@ -194,6 +220,14 @@ struct RouterSettingsListView: View {
             PushedModelHost(QoSViewModel(client: client, authManager: authManager)) {
                 QoSView(viewModel: $0)
             }
+        case .bandLock:
+            PushedModelHost(BandLockViewModel(client:client,authManager:authManager)) {BandLockView(viewModel:$0)}
+        case .clients:
+            PushedModelHost(ClientsViewModel(client:client,authManager:authManager)) {ClientsView(viewModel:$0)}
+        case .deviceInfo:
+            PushedModelHost(DeviceInfoViewModel(client:client,authManager:authManager)) {DeviceInfoView(viewModel:$0)}
+        case .usbMode:
+            PushedModelHost(USBConnectionViewModel(client:client,authManager:authManager)) {USBModeView(viewModel:$0)}
         case .deviceControls:
             PushedModelHost(DeviceControlViewModel(client: client, authManager: authManager)) {
                 DeviceControlView(viewModel: $0)

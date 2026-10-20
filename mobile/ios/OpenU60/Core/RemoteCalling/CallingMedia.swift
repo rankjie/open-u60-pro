@@ -31,7 +31,7 @@ final class CallingMedia: NSObject, CallingMediaConnection {
     let send: (String, [String: Any]) -> Void
     let stateChanged: (RTCPeerConnectionState) -> Void
 
-    init(callId: UUID, servers: [CallingICEServer], muted: Bool, send: @escaping (String, [String: Any]) -> Void,
+    init(callId: UUID, servers: [CallingICEServer], muted: Bool, relayOnly: Bool = false, send: @escaping (String, [String: Any]) -> Void,
          stateChanged: @escaping (RTCPeerConnectionState) -> Void) throws {
         self.callId = callId
         self.send = send
@@ -40,7 +40,11 @@ final class CallingMedia: NSObject, CallingMediaConnection {
         let config = RTCConfiguration()
         config.sdpSemantics = .unifiedPlan
         config.continualGatheringPolicy = .gatherContinually
+        config.iceTransportPolicy = relayOnly ? .relay : .all
         config.iceServers = servers.map { RTCIceServer(urlStrings: $0.urls, username: $0.username ?? "", credential: $0.credential ?? "") }
+#if DEBUG && OPENU60_NATIVE_CALLKIT_PROBE
+        if Foundation.ProcessInfo.processInfo.arguments.contains("--native-callkit-relay") { config.iceTransportPolicy = .relay }
+#endif
         guard let peer = factory.peerConnection(with: config, constraints: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil), delegate: self) else {
             throw CallingError.media("peer_creation_failed")
         }
@@ -90,7 +94,7 @@ final class CallingMedia: NSObject, CallingMediaConnection {
             }
         }
     }
-    func packetCounts() async throws -> (received: Int, sent: Int) {
+    func packetCounts() async throws -> (received: Int, sent: Int, route: String) {
         guard let connection else { throw CallingError.media("peer_closed") }
         return await withCheckedContinuation { continuation in
             connection.statistics { report in
@@ -99,7 +103,14 @@ final class CallingMedia: NSObject, CallingMediaConnection {
                     if value.type == "inbound-rtp", let count = value.values["packetsReceived"] as? NSNumber { received += count.intValue }
                     if value.type == "outbound-rtp", let count = value.values["packetsSent"] as? NSNumber { sent += count.intValue }
                 }
-                continuation.resume(returning: (received, sent))
+                let transport = report.statistics.values.first { $0.type == "transport" }
+                let pairID = transport?.values["selectedCandidatePairId"] as? String
+                let pair = pairID.flatMap { report.statistics[$0] }
+                let localID = pair?.values["localCandidateId"] as? String
+                let candidate = localID.flatMap { report.statistics[$0] }
+                let kind = candidate?.values["candidateType"] as? String ?? "checking"
+                let proto = candidate?.values["protocol"] as? String ?? "checking"
+                continuation.resume(returning: (received, sent, "\(kind)/\(proto)"))
             }
         }
     }

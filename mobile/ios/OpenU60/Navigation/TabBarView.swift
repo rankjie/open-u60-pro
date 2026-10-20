@@ -6,7 +6,7 @@ struct TabBarView: View {
     @AppStorage("poll_interval") private var pollInterval: Double = 2.0
     @Environment(\.scenePhase) private var scenePhase
 
-    private enum Tab: Hashable { case dashboard, sms, tools, router, settings }
+    private enum Tab: Hashable { case dashboard, calls, sms, settings }
     @State private var selectedTab: Tab = .dashboard
 
     @State private var dashboardVM: DashboardViewModel
@@ -29,11 +29,17 @@ struct TabBarView: View {
     var body: some View {
         TabView(selection: $selectedTab) {
             DashboardView(viewModel: dashboardVM, isAuthenticated: authManager.isAuthenticated,
-                         client: client, authManager: authManager)
+                         client: client, authManager: authManager, usbViewModel: usbVM)
                 .tabItem {
-                    Label("Dashboard", systemImage: "gauge.with.needle")
+                    Label("Home", systemImage: "gauge.with.needle")
                 }
                 .tag(Tab.dashboard)
+
+            NavigationStack {
+                RemoteCallingView(localClient: client, title: "Calls")
+            }
+                .tabItem { Label("Calls", systemImage: "phone.fill") }
+                .tag(Tab.calls)
 
             SMSListView(viewModel: smsVM, client: client, authManager: authManager)
                 .tabItem {
@@ -41,19 +47,7 @@ struct TabBarView: View {
                 }
                 .tag(Tab.sms)
 
-            ToolsListView(client: client, authManager: authManager)
-                .tabItem {
-                    Label("Tools", systemImage: "wrench.and.screwdriver")
-                }
-                .tag(Tab.tools)
-
-            RouterSettingsListView(client: client, authManager: authManager)
-                .tabItem {
-                    Label("Router", systemImage: "wifi.router")
-                }
-                .tag(Tab.router)
-
-            SettingsView(client: client)
+            SettingsView(client: client, authManager: authManager)
                 .tabItem {
                     Label("Settings", systemImage: "gearshape")
                 }
@@ -81,9 +75,6 @@ struct TabBarView: View {
         .onDisappear {
             dashboardVM.stopPolling()
             usbVM.stopPolling()
-        }
-        .sheet(isPresented: $usbVM.showModeSheet) {
-            USBModeSheetView(viewModel: usbVM)
         }
     }
 

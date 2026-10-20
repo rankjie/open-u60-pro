@@ -1,15 +1,15 @@
-//! Bounded loopback fixture for the real Google WebRTC client. No modem or credential store is opened.
+//! Bounded native WebRTC fixtures. No modem or real pairing credential store is opened.
 #[allow(dead_code)]
 #[path = "../src/remote_calling/audio.rs"]
 mod audio;
-#[path = "common/callkit_gateway.rs"]
-mod callkit_gateway;
 #[allow(dead_code)]
 #[path = "../src/remote_calling/codec.rs"]
 mod codec;
 #[allow(dead_code)]
 #[path = "../src/remote_calling/media.rs"]
 mod media;
+#[path = "common/server_gateway.rs"]
+mod server_gateway;
 #[allow(dead_code)]
 #[path = "../src/remote_calling/storage.rs"]
 mod storage;
@@ -34,8 +34,8 @@ async fn main() {
 }
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args.len() == 3 && args[0] == "--callkit" {
-        return callkit_gateway::run(args[1].parse()?, args[2].parse()?).await;
+    if args.len() == 2 && args[0] == "--server" {
+        return server_gateway::run(std::path::Path::new(&args[1])).await;
     }
     if !args.is_empty() {
         return Err("invalid_arguments".into());

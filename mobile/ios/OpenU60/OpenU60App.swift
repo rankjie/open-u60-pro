@@ -40,7 +40,7 @@ struct OpenU60App: App {
         WindowGroup {
             rootView
 #if DEBUG && OPENU60_NATIVE_CALLKIT_PROBE
-                .sheet(isPresented: $showCallingProbe) { NativeCallKitProbeView() }
+                .sheet(isPresented: $showCallingProbe) { NativeCallKitProbeView(manager: remoteCalling) }
 #endif
                 .environment(signalActivity)
                 .environment(remoteCalling)

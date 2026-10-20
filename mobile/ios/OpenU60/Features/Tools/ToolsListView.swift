@@ -4,6 +4,16 @@ struct ToolsListView: View {
     let client: AgentClient
     let authManager: AuthManager
 
+    enum Category { case automation, diagnostics, advanced }
+    let category: Category
+    private var title: String {
+        switch category {
+        case .automation: "Automation"
+        case .diagnostics: "Network diagnostics"
+        case .advanced: "Advanced"
+        }
+    }
+
     // MARK: - Routes
 
     private enum Route: Hashable {
@@ -12,11 +22,8 @@ struct ToolsListView: View {
         case speedTest
         case lanSpeedTest
         case enableADB
-        case usbMode
-        case bandLock
         case atTerminal
-        case deviceInfo
-        case clients
+        case modemCalls
         case config
         case ttlSettings
         case enableSSH
@@ -26,75 +33,66 @@ struct ToolsListView: View {
     // MARK: - Body
 
     var body: some View {
-        NavigationStack {
+        Group {
             List {
-                Section("Automation") {
-                    NavigationLink(value: Route.scheduler) {
-                        Label("Automations", systemImage: "clock.arrow.2.circlepath")
+                if category == .automation {
+                    Section("Automation") {
+                        NavigationLink { destination(for: .scheduler) } label: {
+                            Label("Automations", systemImage: "clock.arrow.2.circlepath")
+                        }
+                        NavigationLink { destination(for: .smsForwarding) } label: {
+                            Label("SMS Forwarding", systemImage: "envelope.arrow.triangle.branch")
+                        }
                     }
-                    NavigationLink(value: Route.smsForwarding) {
-                        Label("SMS Forwarding", systemImage: "envelope.arrow.triangle.branch")
-                    }
+
                 }
+                if category == .diagnostics {
+                    Section("Network tests") {
+                        NavigationLink { destination(for: .speedTest) } label: {
+                            Label("Speed Test", systemImage: "gauge.with.needle")
+                        }
 
-                Section("Network Tools") {
-                    NavigationLink(value: Route.speedTest) {
-                        Label("Speed Test", systemImage: "gauge.with.needle")
+                        NavigationLink { destination(for: .lanSpeedTest) } label: {
+                            Label("LAN Speed Test", systemImage: "wifi")
+                        }
+
                     }
 
-                    NavigationLink(value: Route.lanSpeedTest) {
-                        Label("LAN Speed Test", systemImage: "wifi")
-                    }
-
-                    NavigationLink(value: Route.enableADB) {
-                        Label("Enable ADB", systemImage: "cable.connector.horizontal")
-                    }
-
-                    NavigationLink(value: Route.usbMode) {
-                        Label("USB Mode", systemImage: "cable.connector")
-                    }
-
-                    NavigationLink(value: Route.bandLock) {
-                        Label("Band Lock", systemImage: "lock.fill")
-                    }
-
-                    NavigationLink(value: Route.atTerminal) {
-                        Label("AT Terminal", systemImage: "terminal.fill")
-                    }
-
-                    NavigationLink(value: Route.deviceInfo) {
-                        Label("Device Info", systemImage: "info.circle")
-                    }
-
-                    NavigationLink(value: Route.clients) {
-                        Label("Connected Devices", systemImage: "laptopcomputer.and.iphone")
-                    }
                 }
-
-                Section("Config") {
-                    NavigationLink(value: Route.config) {
-                        Label("Config Decrypt/Encrypt", systemImage: "doc.badge.gearshape")
+                if category == .advanced {
+                    Section("Device access") {
+                        NavigationLink { destination(for: .enableADB) } label: {
+                            Label("Enable ADB", systemImage: "cable.connector.horizontal")
+                        }
+                        NavigationLink { destination(for: .atTerminal) } label: {
+                            Label("AT Terminal", systemImage: "terminal.fill")
+                        }
+                        NavigationLink { destination(for: .modemCalls) } label: {
+                            Label("Modem call controls", systemImage: "phone")
+                        }
                     }
-                }
-
-                Section("Shell Access Required") {
-                    NavigationLink(value: Route.ttlSettings) {
-                        Label("TTL Settings", systemImage: "number")
+                    Section("Configuration") {
+                        NavigationLink { destination(for: .config) } label: {
+                            Label("Config Decrypt/Encrypt", systemImage: "doc.badge.gearshape")
+                        }
                     }
 
-                    NavigationLink(value: Route.enableSSH) {
-                        Label("Enable SSH", systemImage: "terminal")
-                    }
+                    Section("Shell Access Required") {
+                        NavigationLink { destination(for: .ttlSettings) } label: {
+                            Label("TTL Settings", systemImage: "number")
+                        }
 
-                    NavigationLink(value: Route.deviceExplorer) {
-                        Label("Device Explorer", systemImage: "folder")
+                        NavigationLink { destination(for: .enableSSH) } label: {
+                            Label("Enable SSH", systemImage: "terminal")
+                        }
+
+                        NavigationLink { destination(for: .deviceExplorer) } label: {
+                            Label("Device Explorer", systemImage: "folder")
+                        }
                     }
                 }
             }
-            .navigationTitle("Tools")
-            .navigationDestination(for: Route.self) { route in
-                destination(for: route)
-            }
+            .navigationTitle(title)
         }
     }
 
@@ -121,32 +119,24 @@ struct ToolsListView: View {
             }
         case .enableADB:
             EnableADBView(client: client, authManager: authManager)
-        case .usbMode:
-            PushedModelHost(USBConnectionViewModel(client: client, authManager: authManager)) {
-                USBModeView(viewModel: $0)
-            }
-        case .bandLock:
-            PushedModelHost(BandLockViewModel(client: client, authManager: authManager)) {
-                BandLockView(viewModel: $0)
-            }
         case .atTerminal:
             PushedModelHost(ATTerminalViewModel(client: client, authManager: authManager)) {
                 ATTerminalView(viewModel: $0)
             }
-        case .deviceInfo:
-            PushedModelHost(DeviceInfoViewModel(client: client, authManager: authManager)) {
-                DeviceInfoView(viewModel: $0)
-            }
-        case .clients:
-            PushedModelHost(ClientsViewModel(client: client, authManager: authManager)) {
-                ClientsView(viewModel: $0)
-            }
         case .config:
             ConfigToolView()
+        case .modemCalls:
+            PushedModelHost(CallViewModel(client: client, authManager: authManager)) {
+                CallView(viewModel: $0).navigationTitle("Modem controls")
+            }
         case .ttlSettings:
-            PlaceholderView(title: "TTL Settings", icon: "number", description: "Set TTL override via iptables. Requires shell access.")
+            PlaceholderView(
+                title: "TTL Settings", icon: "number",
+                description: "Set TTL override via iptables. Requires shell access.")
         case .enableSSH:
-            PlaceholderView(title: "Enable SSH", icon: "terminal", description: "Install and start dropbear SSH server. Requires ADB USB connection.")
+            PlaceholderView(
+                title: "Enable SSH", icon: "terminal",
+                description: "Install and start dropbear SSH server. Requires ADB USB connection.")
         case .deviceExplorer:
             PlaceholderView(title: "Device Explorer", icon: "folder", description: "Browse filesystem and collect device info. Requires ADB USB connection.")
         }

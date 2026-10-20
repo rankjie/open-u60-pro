@@ -28,21 +28,31 @@ struct USBModeView: View {
             }
 
             Section {
-                Toggle("Fast Charging (Powerbank)", isOn: Binding(
-                    get: { viewModel.usbStatus.powerbankActive },
-                    set: { newValue in
-                        Task {
-                            if newValue {
-                                await viewModel.enablePowerbank()
-                            } else {
-                                await viewModel.disablePowerbank()
+                if viewModel.powerStateUnknown {
+                    Button("Turn off phone charging") { Task { await viewModel.disablePowerbank() } }
+                        .disabled(viewModel.isLoading)
+                } else {
+                    Toggle(
+                        "Fast Charging (Powerbank)",
+                        isOn: Binding(
+                            get: { viewModel.usbStatus.powerbankActive },
+                            set: { newValue in
+                                Task {
+                                    if newValue {
+                                        await viewModel.enablePowerbank()
+                                    } else {
+                                        await viewModel.disablePowerbank()
+                                    }
+                                }
                             }
-                        }
-                    }
-                ))
-                .disabled(viewModel.isLoading || !viewModel.usbStatus.cableAttached)
+                        )
+                    )
+                    .disabled(viewModel.isLoading || !viewModel.usbStatus.showsPowerControl)
+                }
             } footer: {
-                Text("When enabled, the U60 Pro battery will charge your connected device. This will drain the router's battery faster.")
+                Text(
+                    "When enabled, the U60 Pro battery will charge your connected device. This will drain the router's battery faster."
+                )
             }
         }
         .task { await viewModel.refresh() }

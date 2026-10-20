@@ -151,12 +151,19 @@ struct SystemInfo: Equatable {
     static let empty = SystemInfo()
 }
 
+enum USBStatusError: LocalizedError {
+    case missingPowerState
+    var errorDescription: String? { "The router did not provide its USB power state. Update the device agent and retry." }
+}
+
 struct USBStatus: Equatable {
     var mode: String = ""
     var typecCC: String = "no_cc"
     var dataConnected: Bool = false
     var powerbankActive: Bool = false
     var cableAttached: Bool { typecCC != "no_cc" }
+    // Source mode can clear the firmware's CC flag while the cable is still in.
+    var showsPowerControl: Bool { cableAttached || powerbankActive }
 
     static let empty = USBStatus()
 }
@@ -407,12 +414,15 @@ enum DeviceParser {
 
     // MARK: - USB Parser
 
-    static func parseUSBStatus(_ usbData: [String: Any], chargerData: [String: Any]?) -> USBStatus {
-        USBStatus(
+    static func parseUSBStatus(_ usbData: [String: Any]) throws -> USBStatus {
+        guard let state = asInt(usbData["powerbank_state"]), state == 0 || state == 1 else {
+            throw USBStatusError.missingPowerState
+        }
+        return USBStatus(
             mode: usbData["mode"] as? String ?? "",
             typecCC: usbData["typec_cc"] as? String ?? "no_cc",
             dataConnected: asInt(usbData["connect"]) == 1,
-            powerbankActive: asInt(chargerData?["otg_powerbank_state"]) == 1
+            powerbankActive: state == 1
         )
     }
 

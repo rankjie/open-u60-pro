@@ -5,13 +5,13 @@ U60 Pro. The iPhone can use mobile data or any Wi-Fi connection. Neither endpoin
 needs a VPN or an overlay network. Both endpoints need internet access.
 
 The implementation includes the server, router call controller and audio adapter,
-and iPhone WebRTC, CallKit, and PushKit integration. **Cellular audio on the real
-router and actual PushKit delivery still require device testing.** L17 has passed
-native CallKit incoming/outgoing, answer, mute, hangup, audio activation, and a
-synthetic incoming call reported while the app was in the background. That
-background fixture uses a short background task; it does not prove PushKit wakeup.
-The inspected router had no SIM. A compiled adapter is not proof that its vendor
-audio path works.
+and iPhone WebRTC, CallKit, and PushKit integration. L17 has received real Apple
+VoIP notifications while the complete app was in the background with its signaling
+connection deliberately closed. Native CallKit activation, bidirectional PCMU
+traffic, mute, speaker/receiver routing and clean hangup have been observed against
+a synthetic router on the public service. **Cellular audio on the real U60 still
+requires a SIM and device testing.** Synthetic RTP does not verify its vendor PCM
+adapter or audible carrier speech.
 
 ## Architecture
 
@@ -100,6 +100,10 @@ or modem polling. Reconnect replays durable events and pending operations. The
 phone requests a new media session if it has no existing peer. Each negotiation
 receives fresh one-hour TURN credentials. Events include a sequence and observed
 time: an old incoming ring replay is recorded as ended without ringing again.
+If the phone's selected direct path fails, it replaces that peer once with a
+TURN-only peer while retaining CallKit ownership and mute. It requests media for
+the same call; it never issues a second dial. Recovery is bounded and a failed
+relay ends the call explicitly.
 
 Operation expiry, media failure, unsupported modem state, queue exhaustion,
 provider rejection, and storage failure are explicit outcomes. Temporary APNs
@@ -146,7 +150,7 @@ while the modem is idle. It verifies the helper and uploaded artifact hashes,
 installs atomically, retains `/data/zte-agent.before-remote-calling` for rollback,
 and restarts through the existing startup script. Startup, passwords, APNs files,
 and remote pairing files are preserved. Legacy adbd exit status is checked with
-a remote completion marker. Installation on the unavailable router was not run.
+a remote completion marker.
 
 Generate the Xcode project from `mobile/ios/OpenU60/project.yml`, then build the
 OpenU60 scheme. The configured Beexio profile and its extension signing must be
@@ -172,8 +176,11 @@ Verification on 2026-10-20 covered:
 - Actual Google WebRTC M155 and Rust SDP/ICE/DTLS interoperability. The real
   Simulator client receives synthetic G.711 RTP from the production Rust media
   implementation. The microphone is disabled, so this is downlink evidence only.
-- Native CallKit on L17 with an in-memory synthetic gateway: incoming/outgoing,
-  answering, mute, hangup, activation/deactivation, and background call reporting.
+- Native CallKit on L17: incoming/outgoing, answering, mute, hangup,
+  activation/deactivation, speaker and receiver routing. Real APNs/PushKit
+  background receipt used isolated synthetic endpoints on the deployed service;
+  a bidirectional call counted 3,899 PCMU packets sent and 3,007 received at the
+  Rust fixture. No microphone audio was saved.
 - Public HTTPS/WSS pairing, command/result, media routing, and event acknowledgment
   through nl1 using synthetic endpoints, followed by credential revocation.
 - Real two-peer DTLS-SRTP tests forced through nl1 TURN over UDP and TCP, verifying distinct G.711
@@ -189,17 +196,20 @@ sh mobile/ios/scripts/test_native_media.sh <simulator-uuid>
 The optional native CallKit fixture is compiled only with both `DEBUG` and
 `OPENU60_NATIVE_CALLKIT_PROBE`. It preserves the complete app and opens a sheet
 only when explicitly launched with `--native-callkit-probe`; Back to OpenU60
-closes it. `build_native_callkit_probe.sh` builds this optional full app for an
-explicit private-LAN fixture URL. The distributed app has neither this build flag
-nor that URL. Do not replace the app with a standalone test shell.
+closes it. `build_native_callkit_probe.sh` builds this optional full app. Isolated
+synthetic pairing inputs are transferred privately through USB; the test uses
+the production PushKit registry, CallKit provider, signaling and media manager.
+The real pairing Keychain is unchanged. The distributed app omits the verification
+build flag. Do not replace the app with a standalone test shell.
 
 After the SIM arrives, install the built agent and app, pair the real devices,
 and verify outgoing and incoming calls with a voice-capable SIM and carrier IMS
 registration. Check both audio directions, mute, speaker/Bluetooth routing, DTMF,
 lock-screen/background/terminated-app incoming calls, caller cancellation before
 answer, local and remote hangup, and recovery after losing signaling or internet.
-Native PushKit delivery with the installed app's real VoIP token is unverified.
-The server health flag indicates configuration, not Apple delivery success.
+Background PushKit delivery with the installed app's real VoIP token is verified;
+lock-screen and terminated-app answering still need acceptance testing. The server
+health flag alone indicates configuration, not Apple delivery success.
 
 This implementation supports one call at a time. Hold, conference calls, transfer,
 and call waiting control are explicitly unsupported. It does not provide offline

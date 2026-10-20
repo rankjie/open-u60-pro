@@ -1,12 +1,10 @@
 import SwiftUI
 
 struct SMSListView: View {
-    @Environment(RemoteCallingManager.self) private var remoteCalling
     var viewModel: SMSViewModel
     let client: AgentClient
     let authManager: AuthManager
     @State private var showCompose = false
-    @State private var showCall = false
     @State private var searchText = ""
 
     /// Reference point every row's relative timestamp is measured from.
@@ -97,12 +95,6 @@ struct SMSListView: View {
                 ToolbarItem(placement: .primaryAction) {
                     HStack(spacing: 24) {
                         Button {
-                            showCall = true
-                        } label: {
-                            Image(systemName: "phone")
-                        }
-                        .accessibilityLabel("Call")
-                        Button {
                             showCompose = true
                         } label: {
                             Image(systemName: "square.and.pencil")
@@ -128,14 +120,6 @@ struct SMSListView: View {
             }
             .sheet(isPresented: $showCompose) {
                 SMSComposeView(viewModel: viewModel)
-            }
-            .fullScreenCover(isPresented: $showCall) {
-                if remoteCalling.isPaired {
-                    NavigationStack {
-                        RemoteCallingView(localClient: client)
-                            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Close") { showCall = false } } }
-                    }
-                } else { CallView(viewModel: CallViewModel(client: client, authManager: authManager)) }
             }
             .onReceive(ticker) { now = $0 }
             .task { await viewModel.refresh() }

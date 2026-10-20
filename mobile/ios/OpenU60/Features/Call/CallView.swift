@@ -1,8 +1,7 @@
 import SwiftUI
 
 struct CallView: View {
-    /// Owned as `@State` so a re-evaluation of the presenting `fullScreenCover` closure cannot
-    /// swap in a fresh view model (and a fresh poll loop) mid-call.
+    /// Keep the model and its poll loop stable while navigation re-evaluates the view.
     @State private var viewModel: CallViewModel
     @Environment(\.dismiss) private var dismiss
 

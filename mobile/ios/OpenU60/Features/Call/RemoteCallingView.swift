@@ -3,6 +3,7 @@ import SwiftUI
 struct RemoteCallingView: View {
     @Environment(RemoteCallingManager.self) private var manager
     let localClient: AgentClient?
+    var title = "Remote calling"
     @State private var server = ""
     @State private var pairingCode = ""
     @State private var invitation = ""
@@ -80,7 +81,7 @@ struct RemoteCallingView: View {
                 footer: { Text("Enter the 8-digit code created by your router's owner. You do not need to join its Wi-Fi.") }
             }
         }
-        .navigationTitle("Remote calling")
+        .navigationTitle(title)
         .disabled(busy)
         .overlay { if busy { ProgressView().padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) } }
         .confirmationDialog("Forget this router's pairing?", isPresented: $confirmForget) {

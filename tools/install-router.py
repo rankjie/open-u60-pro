@@ -49,6 +49,7 @@ sleep 1
 sleep 2
 pidof zte-agent >/dev/null
 rm /tmp/openu60-agent.install /tmp/openu60-audio.install
+exit 0
 '''
     result = subprocess.run(adb + ["shell", "sh", "-s"], input=script, text=True, capture_output=True, timeout=30)
     # Legacy adbd can return transport success for a failing remote shell.

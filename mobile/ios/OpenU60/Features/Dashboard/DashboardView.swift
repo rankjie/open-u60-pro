@@ -5,6 +5,7 @@ struct DashboardView: View {
     let isAuthenticated: Bool
     let client: AgentClient
     let authManager: AuthManager
+    let usbViewModel: USBConnectionViewModel
 
     @State private var signalMonitorVM: SignalMonitorViewModel?
     @State private var networkModeVM: NetworkModeViewModel?
@@ -14,11 +15,12 @@ struct DashboardView: View {
     @State private var showAllDevices = true
     @State private var showWiFiShare = false
 
-    init(viewModel: DashboardViewModel, isAuthenticated: Bool, client: AgentClient, authManager: AuthManager) {
+    init(viewModel: DashboardViewModel, isAuthenticated: Bool, client: AgentClient, authManager: AuthManager, usbViewModel: USBConnectionViewModel) {
         self.viewModel = viewModel
         self.isAuthenticated = isAuthenticated
         self.client = client
         self.authManager = authManager
+        self.usbViewModel = usbViewModel
     }
 
     var body: some View {
@@ -27,6 +29,7 @@ struct DashboardView: View {
             ScrollView {
                 // Keep summary view identities stable while samples update and sheets open.
                 VStack(spacing: 12) {
+                    if usbViewModel.usbStatus.showsPowerControl { USBPowerControl(viewModel: usbViewModel) }
                     ForEach(banners) { config in
                         SIMAlertBanner(config: config)
                             .transition(.move(edge: .top).combined(with: .opacity))
@@ -75,7 +78,7 @@ struct DashboardView: View {
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
             }
-            .navigationTitle("Dashboard")
+            .navigationTitle("Home")
             .navigationBarTitleDisplayMode(.inline)
             .refreshable { await viewModel.refresh() }
             .toolbar {

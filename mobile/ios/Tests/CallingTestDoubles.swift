@@ -63,7 +63,8 @@ final class TestEndAction: CXEndCallAction {
     let sender: (String, [String: Any]) -> Void
     var muted = false
     var closed = false
-    init(muted: Bool, sender: @escaping (String,[String:Any]) -> Void, changed: @escaping (RTCPeerConnectionState) -> Void) { self.muted = muted; self.sender = sender; self.changed = changed }
+    let relayOnly: Bool
+    init(muted: Bool, relayOnly: Bool, sender: @escaping (String,[String:Any]) -> Void, changed: @escaping (RTCPeerConnectionState) -> Void) { self.muted = muted; self.relayOnly = relayOnly; self.sender = sender; self.changed = changed }
     func answer(sdp: String) async throws -> String { "v=0\r\n" }
     func add(_ value: CallingICECandidate) async throws {}
     func mute(_ muted: Bool) { self.muted = muted }
@@ -92,7 +93,7 @@ final class TestEndAction: CXEndCallAction {
             if self.holdPermission { return await withCheckedContinuation { self.permission = $0 } }
             return true
         },
-        mediaFactory: { [unowned self] _,_,muted,sender,changed in let value = TestMedia(muted:muted,sender:sender,changed: changed); self.media.append(value); return value })
+        mediaFactory: { [unowned self] _,_,muted,relayOnly,sender,changed in let value = TestMedia(muted:muted,relayOnly:relayOnly,sender:sender,changed: changed); self.media.append(value); return value })
     func snapshot(_ id: UUID, state: String = "active", sequence: Int = 1) -> [String: Any] {
         ["type":"call", "callId":id.uuidString, "routerId":router.uuidString, "direction":"incoming", "state":state,
          "number":"12345", "mediaReady":state == "active", "updatedAt":1_800_000_000, "sequence":sequence]
