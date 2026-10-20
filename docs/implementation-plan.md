@@ -31,24 +31,27 @@
    Verification uses a synthetic
    router on the existing public service. Synthetic credentials are isolated
    private USB-transfer inputs; the real pairing Keychain remains untouched.
-2. Implemented, awaiting integrated deployment: authenticated server JSON relay,
+2. Implemented and deployed: authenticated server JSON relay,
    the shared device execution journal and iOS LAN-first transport. A six-request
    client limit shares capacity with call control. Discovery checks the enrolled
    router identity before local reauthentication; a lost write response retains
    its UUID on relay fallback. Call control admits one operation centrally, then
    attempts the existing device worker over LAN before relay. The server and
-   device retain the original operation ID and expiry. U60's clock reports 2025;
-   the authenticated hello now supplies a monotonic server-time anchor, also
+   device retain the original operation ID and expiry. U60's incorrect 2025 clock
+   was corrected from the trusted Mac clock for TLS bootstrap. The authenticated
+   hello supplies a monotonic server-time anchor, also
    exposed as `agentTime` for local request expiry. Journal history uses admission
    order so a clock correction cannot forget a completed effect.
-3. Implemented, awaiting deployment and physical APNs verification: remote SMS
+3. Implemented and deployed, awaiting physical APNs verification: remote SMS
    uses the management transport. A firmware event subscription plus bounded
    database reconciliation identifies new received SMS, seeds historical messages
    without notifying, and persists pending events before sending. Notifications
    carry the sender and complete message, including codes, as requested. Long
    messages split into stable parts below APNs's 4,096-byte payload limit. The App
    registers its ordinary APNs token separately from PushKit and opens Messages
-   on a notification tap. Actual carrier receive/send awaits the SIM.
+   on a notification tap. Settings includes a durable synthetic SMS test that
+   follows the same device/server outbox and ordinary APNs path without changing
+   the SMS database. Actual carrier receive/send awaits the SIM.
 4. Installed and observed: four tabs, grouped Settings, and a compact Home USB
    charging switch. Turning it on detached router USB/ADB; turning it off restored
    ADB within nine seconds using the App switch, with the same
@@ -59,6 +62,27 @@
    switch stayed visible across multiple polls while enabled, then disabling it
    restored USB/ADB without unplugging. Controller readback was 0 and the port
    returned to sink. Normal complete App and the updated agent are installed.
+
+## Current deployment and acceptance boundary
+
+The server is running the management/SMS implementation on nl1. Its configured
+VoIP push, ordinary SMS push and TURN health checks pass. The updated agent is
+installed on the real U60; the complete Beexio-signed App was installed before
+the user stopped phone testing. No phone launches, installs, UI operations or
+test pushes are permitted until the user resumes that work.
+
+Real-router enrollment and phone pairing are unfinished. The first setup
+attempt exposed a rejected `serverURL` field: the Rust request used serde's
+`serverUrl` spelling. An explicit field name now matches the shipped iOS caller,
+with a failing-before/passing-after deserialization regression. That fixed agent
+is installed; setup was not retried after the user's phone hold. The final source
+uses the ordinary setup and "Pair with this router" UI, without the temporary
+operator launch hook. A fresh invitation will be required when setup resumes.
+
+The no-SIM router's temporary encrypted server route, hosts entry, port redirect,
+ADB forwarding and SSH tunnel were removed. Its corrected clock remains. Full
+SMS notification delivery to the phone, notification-tap navigation and the real
+paired device's LAN/off-LAN transition are still pending physical acceptance.
 
 Physical SIM calling, carrier registration, vendor PCM ABI/direction and audible
 cellular speech are deferred until the SIM arrives. Synthetic evidence does not
@@ -72,7 +96,7 @@ configured local agent and verifies its enrolled router identity. Successful
 local access is preferred; an unavailable local route falls back to the relay.
 Pairing grants remote administration for that one router, with revocation checked
 at request admission and response delivery. The server is a trusted relay; TLS
-protects both hops and plaintext bodies are never logged or persisted there.
+protects both hops and management bodies are never logged or persisted there.
 
 Writes carry one request UUID across both routes. A device-owned durable journal
 claims the UUID and request fingerprint before execution. A duplicate or interrupted

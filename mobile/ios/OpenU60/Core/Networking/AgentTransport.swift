@@ -133,7 +133,7 @@ final class AgentTransport {
         if let probe, probe.key == key { return try await probe.task.value }
         let load = load
         let task = Task<LocalIdentity?, Error> {
-            guard let url = URL(string: baseURL + "/api/identity") else { throw AgentError.serverUnreachable }
+            guard let url = URL(string: baseURL + "/api/identity") else { return nil }
             var request = URLRequest(url: url)
             request.timeoutInterval = 1.25
             do {

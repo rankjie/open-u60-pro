@@ -201,6 +201,7 @@ pub fn route(method: &Method, path: &str, state: &AppState, body: &[u8]) -> (u16
     match (method, path) {
         (&Method::Get, "/api/remote-calling/status") => (200, state.remote_calling.status()),
         (&Method::Get, "/api/sms/notifications/status") => (200, state.sms_notifications.status()),
+        (&Method::Post, "/api/sms/notifications/test") => state.sms_notifications.test_notification(),
         (&Method::Post, "/api/remote-calling/configure") => crate::remote_calling::configure(state, body),
         (&Method::Post, "/api/remote-calling/pairing") => crate::remote_calling::pairing(state),
         (&Method::Post, "/api/remote-calling/disable") => crate::remote_calling::disable(state),

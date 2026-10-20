@@ -284,15 +284,16 @@ fn enroll(mut config: Config) -> Result<Config, String> {
     config.invitation = None;
     Ok(config)
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ConfigureInput {
+    #[serde(rename = "serverURL")]
+    server_url: String,
+    invitation: Option<String>,
+}
 pub fn configure(state: &AppState, body: &[u8]) -> (u16, Value) {
     let _configure = state.remote_calling.configure_lock.lock().unwrap();
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields, rename_all = "camelCase")]
-    struct Input {
-        server_url: String,
-        invitation: Option<String>,
-    }
-    let input = match serde_json::from_slice::<Input>(body) {
+    let input = match serde_json::from_slice::<ConfigureInput>(body) {
         Ok(input) => input,
         Err(_) => return error(400, "invalid_configuration"),
     };
@@ -423,6 +424,13 @@ mod clock_tests {
         for invalid in [0, 1234, u64::MAX] { assert_eq!(manager.observe_time(invalid), Err("invalid_server_clock")); }
         assert!(manager.unix_time().unwrap() >= 1800000000);
         assert!(manager.unix_time().unwrap() < 1800000100);
+    }
+    #[test]
+    fn configuration_accepts_the_ios_server_url_field() {
+        let parsed = serde_json::from_value::<ConfigureInput>(json!({
+            "serverURL":"https://synthetic.invalid/openu60","invitation":"synthetic-test-input"
+        })).expect("The shipped iOS request must deserialize");
+        assert_eq!(parsed.server_url,"https://synthetic.invalid/openu60");
     }
     #[test]
     fn local_call_admission_waits_for_the_existing_command_owner() {

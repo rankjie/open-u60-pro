@@ -207,7 +207,7 @@ struct DashboardView: View {
         .padding(.vertical, 5)
         .background(
             Capsule()
-                .fill((isAuthenticated ? Color.green : Color.red).opacity(0.12))
+                .fill(connectionColor.opacity(0.12))
         )
     }
 

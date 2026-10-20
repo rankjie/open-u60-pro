@@ -184,6 +184,15 @@ final class RemoteCallingManager: NSObject {
         guard let code = pairing["code"] as? String else { throw CallingError.invalidResponse }
         try await pair(server: server, code: code)
     }
+    func pairLocalRouter(client: AgentClient) async throws {
+        let status = try await client.getJSON("/api/remote-calling/status")
+        guard status["enabled"] as? Bool == true, status["configured"] as? Bool == true,
+              let server = status["serverURL"] as? String, let router = status["routerId"] as? String,
+              UUID(uuidString:router) != nil else { throw CallingError.server("router_setup_required") }
+        let pairing = try await client.postJSON("/api/remote-calling/pairing")
+        guard pairing["routerId"] as? String == router, let code = pairing["code"] as? String else { throw CallingError.invalidResponse }
+        try await pair(server:server,code:code)
+    }
     func start(number: String) async throws {
         guard call == nil else { throw CallingError.server("call_in_progress") }
         guard number.range(of: "^\\+?[0-9*#]{1,30}$", options: .regularExpression) != nil else { throw CallingError.server("invalid_number") }
@@ -224,6 +233,7 @@ final class RemoteCallingManager: NSObject {
     }
     func present(_ error: Error) {
         if let error = error as? CallingError { errorMessage = error.localizedDescription }
+        else if let error = error as? AgentError { errorMessage = error.localizedDescription }
         else if let error = error as? URLError { errorMessage = "Calling service network error (\(error.code.rawValue))." }
         else { errorMessage = "The calling operation failed. Please reconnect and check the call state." }
         logger.error("Calling operation failed: \(String(reflecting: type(of: error)), privacy: .public)")

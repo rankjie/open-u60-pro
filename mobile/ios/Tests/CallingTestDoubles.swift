@@ -3,6 +3,7 @@ import CallKit
 import WebRTC
 
 @MainActor final class AgentClient {
+    func getJSON(_ path: String) async throws -> [String: Any] { throw CallingError.invalidResponse }
     func postJSON(_ path: String, body: [String: Any] = [:]) async throws -> [String: Any] { throw CallingError.invalidResponse }
 }
 

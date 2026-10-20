@@ -74,6 +74,11 @@ struct RemoteCallingView: View {
                     footer: { Text("Connect to your router once for setup. Use a one-time invitation from your calling server.") }
                 }
                 Section {
+                    if let localClient {
+                        Button("Pair with this router", systemImage:"wifi.router") {
+                            perform { try await manager.pairLocalRouter(client:localClient) }
+                        }
+                    }
                     SecureField("Router pairing code", text: $pairingCode).keyboardType(.numberPad)
                     Button("Pair this iPhone") { perform { try await manager.pair(server: server, code: pairingCode); pairingCode = "" } }
                         .disabled(pairingCode.count != 8)

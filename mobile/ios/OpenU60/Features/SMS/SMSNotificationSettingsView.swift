@@ -16,7 +16,18 @@ struct SMSNotificationSettingsView: View {
                     if let url = URL(string:UIApplication.openSettingsURLString) { openURL(url) }
                 }
             }
-            Section("Router") { Text(deviceStatus) }
+            Section("Router") {
+                Text(deviceStatus)
+                Button("Send test notification") {
+                    Task {
+                        do {
+                            let result = try await client.postJSON("/api/sms/notifications/test")
+                            guard result["queued"] as? Bool == true else { throw CallingError.invalidResponse }
+                            deviceStatus = "Test notification queued"
+                        } catch { deviceStatus = error.localizedDescription }
+                    }
+                }
+            }
             Section {
                 Text("Notifications show the sender and complete SMS text. Long messages are split when they exceed Apple's notification size limit.")
                     .font(.footnote).foregroundStyle(.secondary)

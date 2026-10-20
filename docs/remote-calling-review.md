@@ -21,16 +21,26 @@ adapter. Real PushKit background delivery has now been verified separately.
 | P1 | An installed standalone test shell prevents access to the app. | Restore the complete app; put the fixture behind explicit debug flags and a launch argument, in a sheet with Back to OpenU60. Add Back/Close to ordinary calling navigation. Normal and optional fixture builds pass; the normal app was installed and launched on L17. |
 | P1 | A reconnect snapshot requests two competing media peers before either offer arrives. | Reset the previous socket's media-request marker before applying the snapshot. A focused regression fails before the change and passes afterward. The real public-service fixture reproduced the duplicate requests and `answer_set` failure. |
 | P1 | A selected direct path can connect briefly, then lose connectivity and end an otherwise recoverable call. | Retry media once with TURN-only ICE while keeping the same call and mute. Simulator regression verifies no new dial or hangup, and L17 recovered a real background-push call onto `relay/udp` without completing the CallKit call. |
+| P1 | Real router setup rejects the iOS `serverURL` request before enrollment. | Explicitly deserialize the caller's field name. The focused request-contract test fails with the original mapping and passes with the fix. The fixed agent is installed; real setup has not been retried. |
 
 The server lockfile is compatible with deployed Bun 1.3.14; frozen installation
 and type checking were verified on nl1.
 
 ## Verification
 
-- Agent: 293 passed, 4 ignored in the default suite. The two external TURN cases
+- Agent: 308 passed, 4 ignored in the default suite. The two external TURN cases
   among those ignored tests passed separately earlier against the unchanged
   relay configuration.
-- Server: 24 passed, 89 assertions, and type checking locally and on nl1.
+- Server: 38 passed, 251 assertions, including management relay and full SMS
+  notification outboxes. Tests pass locally and in a credential-free container
+  using the deployed Bun 1.3.14; type checking passes.
+- iOS management transport: verified LAN preference, router identity and clock
+  checks, relay fallback, stable write IDs, explicit failures, remote revocation,
+  invalid saved LAN URLs and bounded concurrent dashboard reads.
+- SMS notification payload tests preserve complete text across Unicode, JSON
+  escapes and multi-part messages, each below the APNs byte limit. Device tests
+  cover durable queues, historical-message seeding, ID reuse and the synthetic
+  notification action. These checks do not establish physical APNs delivery.
 - Native PCM bridge: four synthetic frame/socket contract tests passed.
 - USB charging: four targeted agent regressions cover both directions, delayed
   hardware readback, rejection of unsupported states and readback failure. The
@@ -56,6 +66,13 @@ and type checking were verified on nl1.
   closable fixture build, and signature verification passed.
 
 ## Device acceptance still required
+
+The user has stopped phone testing. Do not operate the phone or send test pushes
+until that work is explicitly resumed. Real U60 enrollment/pairing, full SMS
+notification delivery and tap navigation, and the real paired device's LAN to
+server transition remain unfinished. Server health flags establish configuration
+only. The fixed agent and a complete signed App are available; no test shell is
+distributed.
 
 A voice-capable SIM, carrier registration and a real U60 call are required to
 verify the vendor helper ABI, PCM direction/format, cellular routing and audible

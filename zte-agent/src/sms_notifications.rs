@@ -114,6 +114,28 @@ impl SMSNotifications {
             .cloned()
             .collect())
     }
+    pub fn test_notification(&self) -> (u16, Value) {
+        let mut state = self.state.lock().unwrap();
+        let current = match state.as_mut() {
+            Ok(state) => state,
+            Err(code) => return (503, json!({"ok":false,"error":code})),
+        };
+        if current.pending.len() >= 128 {
+            return (503, json!({"ok":false,"error":"sms_notification_capacity"}));
+        }
+        let mut next = current.clone();
+        next.pending.push(Event {
+            event_id: Uuid::new_v4(),
+            message_id: "0".into(),
+            sender: "OpenU60 test".into(),
+            content: base64::engine::general_purpose::STANDARD
+                .encode("Test SMS 123456\n中文测试 🐼\nSent from your U60 Pro."),
+        });
+        match self.save(next, current) {
+            Ok(()) => (200, json!({"ok":true,"data":{"queued":true}})),
+            Err(code) => (503, json!({"ok":false,"error":code})),
+        }
+    }
     pub fn acknowledge(&self, id: Uuid) -> Result<(), &'static str> {
         let mut state = self.state.lock().unwrap();
         let current = state.as_mut().map_err(|code| *code)?;
@@ -341,5 +363,24 @@ mod tests {
         let next = parse_snapshot("1\t32303236\n").unwrap();
         assert_ne!(old.keys().next(), next.keys().next());
         assert!(parse_snapshot("not-an-id\txx\n").is_err());
+    }
+    #[test]
+    fn test_notification_uses_the_durable_delivery_queue() {
+        let directory = std::env::temp_dir().join(format!("openu60-sms-test-{}", Uuid::new_v4()));
+        let file = directory.join("notifications.json");
+        let manager = SMSNotifications::at(&file);
+        assert_eq!(manager.test_notification().0, 200);
+        let pending = SMSNotifications::at(&file).pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        let message = pending[0].message();
+        assert_eq!(message["sender"], "OpenU60 test");
+        let content = base64::engine::general_purpose::STANDARD
+            .decode(message["content"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(content).unwrap(),
+            "Test SMS 123456\n中文测试 🐼\nSent from your U60 Pro."
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

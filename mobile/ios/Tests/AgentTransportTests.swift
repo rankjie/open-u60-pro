@@ -78,6 +78,14 @@ private actor RouterFixture {
         let mismatchTransport = AgentTransport(load:{ request, _ in try await mismatch.load(request) })
         _ = try await mismatchTransport.send(method:"GET",path:"/api/battery",body:nil,baseURL:"http://foreign.invalid",access:access,
                                              token:{nil},reauthenticate:{preconditionFailure("Credential sent to unverified router")})
+        let invalidLocal = RouterFixture(router:router,mode:.local)
+        let invalidLocalTransport = AgentTransport(load:{ request, _ in try await invalidLocal.load(request) })
+        let relayed = try await invalidLocalTransport.send(method:"GET",path:"/api/battery",body:nil,baseURL:"http://[",access:access,
+            token:{nil},reauthenticate:{preconditionFailure("Invalid local URL must not trigger login")})
+        let invalidLocalRequests = await invalidLocal.requests
+        precondition(relayed.status == 200 && invalidLocalTransport.route == .relay)
+        precondition(invalidLocalRequests.count == 1 && invalidLocalRequests[0].url!.path == "/openu60/v1/agent",
+                     "An invalid saved LAN URL must still allow the paired server route")
         // Concurrent dashboard reads share one probe and stay below the router/server limit.
         let fixture = RouterFixture(router:router,mode:.offline)
         let transport = AgentTransport(load:{ request, _ in try await fixture.load(request) })
