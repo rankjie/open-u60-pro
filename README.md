@@ -80,7 +80,7 @@ cargo build --release --target aarch64-unknown-linux-musl -p zte-agent
 | Router | 29 | DNS, LAN/DHCP, firewall, NAT, DMZ, UPnP, port forwarding, QoS, domain filter, APN profiles, VPN/ALG |
 | WiFi | 4 | Status, SSID/password/channel/TX power, guest WiFi |
 | USB | 3 | USB mode switching, powerbank control |
-| Telephony | 11 | Voice calls (dial/hangup/answer/DTMF/mute), USSD codes, SIM Toolkit menus |
+| Telephony | 11 | Call control (dial/hangup/answer/DTMF/mute), USSD codes, SIM Toolkit menus |
 | eSIM | 13 | eSIM profiles (built-in SGP.22 LPA): list, switch (verified card → modem → data), rename, download from QR with preview/cancel, delete, operator receipts, card info |
 | Speed Test | 4 | Server list, run test, progress tracking |
 | DoH Proxy | 6 | DNS-over-HTTPS proxy, cache management |
@@ -88,6 +88,11 @@ cargo build --release --target aarch64-unknown-linux-musl -p zte-agent
 | SMS Forwarding | 9 | Auto-forward rules, CRUD, test, log management |
 | System | 2 | Process list, kill bloatware |
 | Scheduler | 5 | Scheduled/recurring jobs for any API action |
+
+The local call-control API does not stream audio. This fork adds remote calling,
+a firmware-specific audio adapter, and iPhone CallKit/PushKit integration; see the
+[remote calling guide](docs/remote-calling.md). The server and network media path
+are tested; cellular audio and native incoming push delivery await SIM/device tests.
 
 ### Mobile Companion Apps
 

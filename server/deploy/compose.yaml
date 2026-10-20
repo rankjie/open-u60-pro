@@ -1,0 +1,43 @@
+version: "3.7"
+services:
+  signaling:
+    image: oven/bun:1.3.14
+    container_name: openu60-calling
+    user: "65532:65532"
+    working_dir: /app/server
+    command: ["bun", "src/main.ts", "/etc/openu60-calling/calling-server.private.json"]
+    network_mode: host
+    read_only: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - /opt/openu60/current/server:/app/server:ro
+      - /etc/openu60-calling:/etc/openu60-calling:ro
+      - /var/lib/openu60-calling:/var/lib/openu60-calling
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r=await fetch('http://127.0.0.1:46170/health');if(!r.ok)process.exit(1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  turn:
+    image: openu60-turn:4.18.0-r0
+    build: {context: ., dockerfile: Turn.Dockerfile}
+    container_name: openu60-turn
+    user: "65532:65532"
+    command: ["-c", "/etc/openu60-turn.conf"]
+    network_mode: host
+    read_only: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - /etc/openu60-calling/coturn.private.conf:/etc/openu60-turn.conf:ro
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}

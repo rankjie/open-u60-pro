@@ -1,5 +1,6 @@
 [workspace]
 members = ["zte-agent", "euicc"]
+exclude = ["vendor/webrtc-ice"]
 resolver = "2"
 
 [profile.release]
@@ -7,3 +8,6 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true
+
+[patch.crates-io]
+webrtc-ice = { path = "vendor/webrtc-ice" }

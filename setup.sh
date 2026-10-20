@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+umask 077
 
 # ── Colors ───────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -9,10 +10,7 @@ warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 fail()  { echo -e "${RED}[-]${NC} $1" >&2; exit 1; }
 
 # ── Password input ──────────────────────────────────────────────────
-if [ $# -ge 2 ]; then
-    ROUTER_PASSWORD="$1"
-    AGENT_PASSWORD="$2"
-elif [ $# -eq 0 ]; then
+if [ $# -eq 0 ]; then
     echo -e "${CYAN}Router admin password:${NC} "
     read -rs ROUTER_PASSWORD; echo
     echo -e "${CYAN}Agent API password:${NC} "
@@ -33,7 +31,8 @@ BINARY=target/$TARGET/release/zte-agent
 REMOTE_BIN=/data/zte-agent
 STARTUP_SCRIPT=/data/local/tmp/start_zte_agent.sh
 BINARY_CHANGED=false
-DOWNLOAD_URL="https://github.com/jesther-ai/open-u60-pro/releases/latest/download/zte-agent"
+DOWNLOAD_URL="https://github.com/jesther-ai/open-u60-pro/releases/download/v2.2.0/zte-agent"
+EXPECTED_SHA="596bd0858e12128ef6ed64869b0512bd612266ba34aad0a693f8891372908eaf"
 
 # ── Binary source menu ──────────────────────────────────────────────
 echo ""
@@ -42,8 +41,8 @@ echo "  1) Download pre-built from GitHub (recommended — no dev tools needed)"
 echo "  2) Build from source (requires Rust toolchain)"
 echo ""
 echo -n "Choice [1]: "
-read -r BUILD_CHOICE
-BUILD_CHOICE="${BUILD_CHOICE:-1}"
+BUILD_CHOICE=1
+echo "$BUILD_CHOICE"
 
 if [ "$BUILD_CHOICE" != "1" ] && [ "$BUILD_CHOICE" != "2" ]; then
     fail "Invalid choice. Enter 1 or 2."
@@ -223,8 +222,11 @@ ubus_call() {
     local session="$1" object="$2" method="$3" params="$4"
     local ts
     ts=$(date +%s)
-    curl -sf "http://$GATEWAY/ubus/?t=$ts" \
+    curl --noproxy '*' --connect-timeout 5 --max-time 15 -sf "http://$GATEWAY/ubus/?t=$ts" \
         -H 'Content-Type: application/json' \
+        -H 'Z-Mode: 0' -H "Z-Tag: $method" \
+        -H 'X-Requested-With: XMLHttpRequest' \
+        -H "Origin: http://$GATEWAY" -H "Referer: http://$GATEWAY/" \
         -d "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"call\",\"params\":[\"$session\",\"$object\",\"$method\",$params]}]"
 }
 
@@ -302,11 +304,11 @@ except Exception:
         if [ -z "$SESSION" ] || [ "$SESSION" = "null" ]; then
             fail "Login failed. Check your router password."
         fi
-        ok "Logged in to router (session: ${SESSION:0:8}...)."
+        ok "Logged in to router."
 
         # Set USB mode to debug
         info "Enabling ADB (USB debug mode)..."
-        if ! ubus_call "$SESSION" "zwrt_bsp.usb" "set" '{"mode":"debug"}' >/dev/null; then
+        if ! ubus_call "$SESSION" "zwrt_bsp.usb" "set" '{"mode":"debug"}' | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d[0].get("result",[-1])[0] == 0 else 1)'; then
             fail "Failed to enable USB debug mode. Session may have expired."
         fi
         ok "USB debug mode enabled."
@@ -325,7 +327,25 @@ rcmd() {
     if [ "$USE_SSH" = true ]; then
         $SSH_CMD "$@"
     else
-        adb shell "$@"
+        # This firmware's legacy adbd returns 0 even when the remote command fails.
+        python3 - "$@" <<'PY'
+import re
+import subprocess
+import sys
+
+if len(sys.argv) != 2:
+    raise SystemExit("Expected one remote shell command.")
+command = sys.argv[1] + '\nresult=$?\nprintf "\\n__ZTE_REMOTE_EXIT__%s\\n" "$result"'
+result = subprocess.run(["adb", "shell", command], capture_output=True, text=True, timeout=30)
+if result.returncode:
+    raise SystemExit("ADB transport failed.")
+match = re.search(r"\n__ZTE_REMOTE_EXIT__(\d+)\n?$", result.stdout)
+if match is None:
+    raise SystemExit("ADB did not return a remote command status.")
+sys.stdout.write(result.stdout[:match.start()])
+sys.stderr.write(result.stderr)
+raise SystemExit(int(match.group(1)))
+PY
     fi
 }
 
@@ -334,9 +354,14 @@ rpush() {
     if [ "$USE_SSH" = true ]; then
         cat "$src" | $SSH_CMD "cat > $dst && chmod +x $dst"
     else
-        adb push "$src" "$dst" && adb shell "chmod +x $dst"
+        adb push "$src" "$dst" && rcmd "chmod 755 $dst"
     fi
 }
+
+# Confirm the target before writing to it; this setup is for MU5250 only.
+[ "$(rcmd 'uname -m' | tr -d '\r')" = aarch64 ] || fail "Device architecture is not aarch64."
+[ "$(rcmd 'uci -q get zwrt_common_info.common_config.model_name' | tr -d '\r')" = MU5250 ] || fail "Device is not MU5250."
+rcmd 'test -w /data && test -w /etc/rc.local' || fail "Required device paths are not writable."
 
 # ── Step 3: Get zte-agent binary ─────────────────────────────────────
 if [ "$BUILD_CHOICE" = "1" ]; then
@@ -352,6 +377,7 @@ if [ "$BUILD_CHOICE" = "1" ]; then
         fail "Downloaded file is too small ($FILE_SIZE bytes) — likely not a valid binary. Check the release page."
     fi
     chmod +x "$BINARY"
+    [ "$(sha256_file "$BINARY")" = "$EXPECTED_SHA" ] || fail "Release SHA-256 does not match."
     ok "Downloaded zte-agent ($FILE_SIZE bytes)."
 else
     info "Building zte-agent (this may take a few minutes on first run)..."
@@ -382,13 +408,16 @@ if rcmd "grep -qF '${SAFE_PASSWORD}' $STARTUP_SCRIPT 2>/dev/null"; then
     ok "Startup script already up to date."
 else
     info "Creating startup script..."
-    cat > /tmp/start_zte_agent.sh <<BOOT
+    LOCAL_STARTUP=$(mktemp)
+    cat > "$LOCAL_STARTUP" <<BOOT
 #!/bin/sh
+umask 077
 export ZTE_AGENT_PASSWORD='${SAFE_PASSWORD}'
 nohup /data/zte-agent >/tmp/zte-agent.log 2>&1 &
 BOOT
-    rpush /tmp/start_zte_agent.sh "$STARTUP_SCRIPT"
-    rm /tmp/start_zte_agent.sh
+    rpush "$LOCAL_STARTUP" "$STARTUP_SCRIPT"
+    rcmd "chmod 700 $STARTUP_SCRIPT"
+    rm "$LOCAL_STARTUP"
     ok "Startup script created at $STARTUP_SCRIPT."
 fi
 
@@ -407,7 +436,7 @@ fi
 # ── Step 7: Start agent ─────────────────────────────────────────────
 info "Checking agent status..."
 AGENT_RUNNING=false
-curl -sf "http://$GATEWAY:$AGENT_PORT/api/auth/login" \
+curl --noproxy '*' --connect-timeout 2 --max-time 5 -sf "http://$GATEWAY:$AGENT_PORT/api/auth/login" \
     -H 'Content-Type: application/json' \
     -d "{\"password\":\"$AGENT_PASSWORD\"}" >/dev/null 2>&1 && AGENT_RUNNING=true
 
@@ -415,7 +444,7 @@ if [ "$BINARY_CHANGED" = true ] || [ "$AGENT_RUNNING" = false ]; then
     info "Starting zte-agent..."
     rcmd "killall zte-agent 2>/dev/null; true"
     sleep 1
-    rcmd "sh $STARTUP_SCRIPT"
+    rcmd "sh $STARTUP_SCRIPT; sleep 2"
     ok "Agent (re)started."
 else
     ok "Agent already running with current binary, skipping restart."
@@ -432,17 +461,18 @@ else
     VERIFY_URL="http://127.0.0.1:19090/api/auth/login"
 fi
 
-TOKEN=$(curl -sf "$VERIFY_URL" \
+TOKEN=$(curl --noproxy '*' --connect-timeout 3 --max-time 10 -sf "$VERIFY_URL" \
     -H 'Content-Type: application/json' \
     -d "{\"password\":\"$AGENT_PASSWORD\"}" \
     | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"]["token"])')
 
-if [ "$USE_SSH" != true ]; then
-    adb forward --remove tcp:19090 2>/dev/null || true
-fi
-
 if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
     fail "Agent started but login verification failed."
+fi
+curl --noproxy '*' --connect-timeout 3 --max-time 10 -sf "${VERIFY_URL%/auth/login}/device" \
+    -H "Authorization: Bearer $TOKEN" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d["ok"] is True and d["data"]["kernel"], "Device API verification failed"'
+if [ "$USE_SSH" != true ]; then
+    adb forward --remove tcp:19090 2>/dev/null || true
 fi
 ok "Agent is running and authenticated."
 
@@ -452,7 +482,8 @@ if [ "$USE_SSH" = true ]; then
 else
 echo ""
 echo -e "${CYAN}Set up SSH for wireless deploys? (y/N)${NC}"
-read -r SETUP_SSH
+SETUP_SSH=n
+echo "$SETUP_SSH"
 
 if [ "$SETUP_SSH" = "y" ] || [ "$SETUP_SSH" = "Y" ]; then
     SSH_KEY="$HOME/.ssh/id_ed25519"
@@ -549,7 +580,6 @@ echo ""
 echo -e "${GREEN}Setup complete!${NC}"
 echo ""
 echo "  Agent API:  http://$GATEWAY:$AGENT_PORT"
-echo "  Password:   $AGENT_PASSWORD"
-echo "  Deploy:     ./deploy.sh $AGENT_PASSWORD"
+echo "  Password:   (the password entered at the local prompt)"
 echo ""
 echo "  Point the iOS/Android companion app at http://$GATEWAY:$AGENT_PORT"

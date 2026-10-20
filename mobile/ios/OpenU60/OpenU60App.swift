@@ -2,6 +2,9 @@ import SwiftUI
 
 @main
 struct OpenU60App: App {
+    @State private var remoteCalling = RemoteCallingManager()
+    @State private var showRemoteCalling = false
+    @State private var showRouterLogin = false
     @State private var signalActivity: SignalActivityManager
     @Environment(\.scenePhase) private var scenePhase
     @State private var authManager: AuthManager
@@ -34,11 +37,13 @@ struct OpenU60App: App {
         WindowGroup {
             rootView
                 .environment(signalActivity)
+                .environment(remoteCalling)
                 .task(id: authManager.isAuthenticated) {
                     if authManager.isAuthenticated { await signalActivity.resume() }
                     else if signalActivity.activity != nil { await signalActivity.stop() }
                 }
                 .onChange(of: scenePhase) { _, phase in
+                    if phase == .active { remoteCalling.foreground() }
                     if phase == .active && authManager.isAuthenticated {
                         Task { await signalActivity.resume() }
                     }
@@ -56,7 +61,12 @@ struct OpenU60App: App {
 
     @ViewBuilder
     private var rootView: some View {
-        if authManager.isAuthenticated {
+        if remoteCalling.isPaired && !authManager.isAuthenticated && !showRouterLogin {
+            NavigationStack {
+                RemoteCallingView(localClient: nil)
+                    .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Router management") { showRouterLogin = true } } }
+            }
+        } else if authManager.isAuthenticated {
             TabBarView(client: client, authManager: authManager)
         } else if isAttemptingAutoLogin {
             VStack(spacing: 16) {
@@ -77,6 +87,12 @@ struct OpenU60App: App {
             }
         } else {
             LoginView(authManager: authManager)
+                .safeAreaInset(edge: .bottom) {
+                    Button("Remote calling") { showRemoteCalling = true }.padding()
+                }
+                .sheet(isPresented: $showRemoteCalling) {
+                    NavigationStack { RemoteCallingView(localClient: nil).environment(remoteCalling) }
+                }
         }
     }
 

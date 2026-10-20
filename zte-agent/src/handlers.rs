@@ -12,6 +12,7 @@ use crate::system::{self, CpuTracker, ProcessTracker, SpeedTracker};
 use crate::ubus;
 
 pub struct AppState {
+    pub remote_calling: Arc<crate::remote_calling::RemoteCalling>,
     pub live_activity: Arc<crate::live_activity::LiveActivity>,
     pub auth: AuthState,
     pub cpu: CpuTracker,
@@ -42,6 +43,7 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
+            remote_calling: Arc::new(crate::remote_calling::RemoteCalling::new()),
             live_activity: Arc::new(crate::live_activity::LiveActivity::new()),
             auth: AuthState::new(),
             cpu: CpuTracker::new(),

@@ -76,7 +76,48 @@ impl AtPort {
 /// commands ever share the node's receive queue.
 pub fn send(at_port: &AtPort, command: &str, timeout_secs: u64) -> Result<String, String> {
     let _g = lock_port();
+    exchange(at_port, command, timeout_secs, None)
+}
+
+/// Remote calls must be cancellable while waiting behind local AT traffic.
+/// Once an exchange starts, its finite response window is allowed to complete
+/// so the call owner can reconcile and hang up a submitted dial.
+pub fn send_cancellable(
+    at_port: &AtPort,
+    command: &str,
+    timeout_secs: u64,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<String, String> {
+    use std::sync::{atomic::Ordering, TryLockError};
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let _guard = loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("exchange_cancelled".into());
+        }
+        match AT_LOCK.try_lock() {
+            Ok(guard) => break guard,
+            Err(TryLockError::Poisoned(error)) => break error.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err("port_busy".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    };
+    exchange(at_port, command, timeout_secs, Some(cancelled))
+}
+
+fn exchange(
+    at_port: &AtPort,
+    command: &str,
+    timeout_secs: u64,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<String, String> {
     let port = at_port.probe().ok_or("no serial port found")?;
+    if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+        return Err("exchange_cancelled".into());
+    }
     let script = format!(
         "cat {p} & PID=$! ; sleep 0.3 ; echo -e '{cmd}\\r' > {p} ; sleep {t} ; kill $PID 2>/dev/null",
         p = port,
@@ -94,6 +135,16 @@ pub fn send(at_port: &AtPort, command: &str, timeout_secs: u64) -> Result<String
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn cancelled_exchange_does_not_wait_for_the_port_owner() {
+        let _owner = lock_port();
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        assert_eq!(
+            send_cancellable(&AtPort::new(), "ATD123;", 5, &cancelled).unwrap_err(),
+            "exchange_cancelled"
+        );
+    }
 
     /// Tests run in parallel and another test may be inside `send` for a
     /// few microseconds, so poll rather than demand the lock is free *now*.

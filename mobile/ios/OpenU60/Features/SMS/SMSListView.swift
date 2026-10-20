@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct SMSListView: View {
+    @Environment(RemoteCallingManager.self) private var remoteCalling
     var viewModel: SMSViewModel
     let client: AgentClient
     let authManager: AuthManager
@@ -129,7 +130,12 @@ struct SMSListView: View {
                 SMSComposeView(viewModel: viewModel)
             }
             .fullScreenCover(isPresented: $showCall) {
-                CallView(viewModel: CallViewModel(client: client, authManager: authManager))
+                if remoteCalling.isPaired {
+                    NavigationStack {
+                        RemoteCallingView(localClient: client)
+                            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Close") { showCall = false } } }
+                    }
+                } else { CallView(viewModel: CallViewModel(client: client, authManager: authManager)) }
             }
             .onReceive(ticker) { now = $0 }
             .task { await viewModel.refresh() }

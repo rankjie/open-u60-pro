@@ -43,4 +43,15 @@ mobile/ios/**/*.xcuserstate
 zte-agent/docs/apns-deployment-*.md
 *.dtb
 __pycache__/
+node_modules/
+/server/data/
+**/remote-calling.private.json
+**/calling-server.private.json
+**/invitation.private
+**/turn-secret.private
 
+**/calls.private.json
+**/coturn.private.conf
+
+/vendor/webrtc-ice/target/
+/vendor/webrtc-ice/Cargo.lock

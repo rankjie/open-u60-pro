@@ -1,10 +1,13 @@
 import SwiftUI
 
 struct SettingsView: View {
+    @Environment(RemoteCallingManager.self) private var remoteCalling
+    private let client: AgentClient
     @State private var viewModel: SettingsViewModel
     @FocusState private var gatewayFieldFocused: Bool
 
     init(client: AgentClient) {
+        self.client = client
         _viewModel = State(initialValue: SettingsViewModel(client: client))
     }
 
@@ -12,6 +15,9 @@ struct SettingsView: View {
         @Bindable var vm = viewModel
         NavigationStack {
             Form {
+                Section {
+                    NavigationLink("Remote calling") { RemoteCallingView(localClient: client) }
+                }
                 Section {
                     HStack {
                         TextField("Gateway IP", text: $vm.gatewayIP)

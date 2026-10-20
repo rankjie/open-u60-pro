@@ -121,7 +121,7 @@ pub(crate) fn parse_clcc(raw: &str) -> Vec<Value> {
     let mut calls = Vec::new();
     for line in raw.lines() {
         // +CLCC: idx,dir,stat,mode,mpty[,"number",type]
-        let Some(rest) = line.strip_prefix("+CLCC:") else {
+        let Some(rest) = line.trim_start().strip_prefix("+CLCC:") else {
             continue;
         };
         let rest = rest.trim();
@@ -129,17 +129,22 @@ pub(crate) fn parse_clcc(raw: &str) -> Vec<Value> {
         if parts.len() < 5 {
             continue;
         }
-        let id: i64 = parts[0].trim().parse().unwrap_or(-1);
-        let dir_i: usize = parts[1].trim().parse().unwrap_or(0);
-        let stat_i: usize = parts[2].trim().parse().unwrap_or(0);
-        let mode: i64 = parts[3].trim().parse().unwrap_or(0);
+        let (Ok(id), Ok(dir_i), Ok(stat_i), Ok(mode), Ok(mpty)) = (
+            parts[0].trim().parse::<i64>(), parts[1].trim().parse::<usize>(),
+            parts[2].trim().parse::<usize>(), parts[3].trim().parse::<i64>(), parts[4].trim().parse::<u8>()
+        ) else { continue; };
+        if id < 0 || mpty > 1 { continue; }
+        let (Some(dir), Some(stat)) = (dir_names.get(dir_i), stat_names.get(stat_i)) else { continue; };
         let number = if parts.len() > 5 {
-            parts[5].trim().trim_matches('"').to_string()
+            let field = parts[5].trim();
+            if let Some(quoted) = field.strip_prefix('"') {
+                quoted.split('"').next().unwrap_or("").to_string()
+            } else {
+                field.split(',').next().unwrap_or("").trim().to_string()
+            }
         } else {
             String::new()
         };
-        let dir = dir_names.get(dir_i).unwrap_or(&"unknown");
-        let stat = stat_names.get(stat_i).unwrap_or(&"unknown");
         calls.push(json!({
             "id": id,
             "dir": dir,
@@ -415,4 +420,23 @@ pub fn stk_menu(state: &AppState) -> (u16, Value) {
 /// POST /api/stk/select — requires item_id and command_id from the current snapshot.
 pub fn stk_select(state: &AppState, body: &[u8]) -> (u16, Value) {
     state.stk.request("select", body)
+}
+
+#[cfg(test)]
+mod call_parser_tests {
+    use super::parse_clcc;
+    #[test]
+    fn caller_number_excludes_type_and_preserves_withheld_numbers() {
+        for (suffix, expected) in [(r#","+31612345678",145"#, "+31612345678"), (",0612345678,129", "0612345678"), (r#","",128"#, ""), ("", "")] {
+            let calls = parse_clcc(&format!("+CLCC: 1,1,4,0,0{suffix}\r\nOK\r\n"));
+            assert_eq!(calls.len(), 1); assert_eq!(calls[0]["number"], expected);
+            assert_eq!(calls[0]["dir"], "mt"); assert_eq!(calls[0]["stat"], "incoming");
+        }
+    }
+    #[test]
+    fn malformed_call_fields_cannot_become_active_outgoing_calls() {
+        for row in ["1,x,0,0,0", "1,0,x,0,0", "-1,0,0,0,0", "1,9,0,0,0", "1,0,9,0,0", "1,0,0,x,0", "1,0,0,0,x"] {
+            assert!(parse_clcc(&format!("+CLCC: {row}\r\nOK")).is_empty(), "{row}");
+        }
+    }
 }

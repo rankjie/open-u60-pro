@@ -1,0 +1,362 @@
+mod audio;
+mod codec;
+mod journal;
+mod media;
+mod storage;
+mod worker;
+
+use crate::handlers::AppState;
+use base64::Engine;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::path::Path;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::Notify;
+use uuid::Uuid;
+
+const CONFIG: &str = "/data/openu60-calling/remote-calling.private.json";
+const JOURNAL: &str = "/data/openu60-calling/calls.private.json";
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Config {
+    enabled: bool,
+    server_url: String,
+    device_token: String,
+    request_id: Uuid,
+    endpoint_id: Option<Uuid>,
+    invitation: Option<String>,
+}
+impl Config {
+    fn validate(&self) -> Result<(), String> {
+        server_url(&self.server_url)?;
+        if self.device_token.len() != 43
+            || !self
+                .device_token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        {
+            return Err("invalid_device_token".into());
+        }
+        if self.endpoint_id.is_none() && self.invitation.as_ref().is_none_or(|v| v.len() != 43) {
+            return Err("missing_invitation".into());
+        }
+        Ok(())
+    }
+}
+#[derive(Default)]
+struct Status {
+    connected: bool,
+    last_error: Option<String>,
+    call_state: Option<String>,
+}
+pub struct RemoteCalling {
+    configure_lock: Mutex<()>,
+    config: Mutex<Option<Config>>,
+    status: Mutex<Status>,
+    changed: Notify,
+}
+impl RemoteCalling {
+    pub fn new() -> Self {
+        let mut status = Status::default();
+        let config = if Path::new(CONFIG).exists() {
+            match storage::private_read(Path::new(CONFIG))
+                .and_then(|bytes| {
+                    serde_json::from_slice::<Config>(&bytes)
+                        .map_err(|_| "invalid_remote_config".into())
+                })
+                .and_then(|config| {
+                    config.validate()?;
+                    Ok(config)
+                }) {
+                Ok(config) => Some(config),
+                Err(error) => {
+                    status.last_error = Some(error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Self {
+            configure_lock: Mutex::new(()),
+            config: Mutex::new(config),
+            status: Mutex::new(status),
+            changed: Notify::new(),
+        }
+    }
+    pub fn status(&self) -> Value {
+        let config = self.config.lock().unwrap();
+        let status = self.status.lock().unwrap();
+        json!({"ok":true,"data":{"enabled":config.as_ref().is_some_and(|v|v.enabled),
+            "configured":config.as_ref().is_some_and(|v|v.endpoint_id.is_some()),"connected":status.connected,
+            "serverURL":config.as_ref().map(|v|&v.server_url),"routerId":config.as_ref().and_then(|v|v.endpoint_id),
+            "lastError":status.last_error,"callState":status.call_state,"audioAdapterError":audio::available().err()}})
+    }
+    fn set_status(&self, connected: bool, error: Option<&str>, call: Option<&str>) {
+        let mut status = self.status.lock().unwrap();
+        status.connected = connected;
+        status.last_error = error.map(String::from);
+        status.call_state = call.map(String::from);
+    }
+    fn persist(&self, config: Config) -> Result<(), String> {
+        let mut current = self.config.lock().unwrap();
+        storage::private_write(
+            Path::new(CONFIG),
+            &serde_json::to_vec(&config).map_err(|_| "config_serialize")?,
+        )?;
+        *current = Some(config);
+        Ok(())
+    }
+    fn persist_enrollment(&self, config: Config) -> Result<(), String> {
+        let mut current = self.config.lock().unwrap();
+        if current
+            .as_ref()
+            .is_none_or(|value| !value.enabled || value.request_id != config.request_id)
+        {
+            return Err("configuration_changed".into());
+        }
+        storage::private_write(
+            Path::new(CONFIG),
+            &serde_json::to_vec(&config).map_err(|_| "config_serialize")?,
+        )?;
+        *current = Some(config);
+        Ok(())
+    }
+    pub fn start(self: &Arc<Self>, state: Arc<AppState>) {
+        let manager = self.clone();
+        crate::system::spawn_named("remote-calling", move || {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+            {
+                Ok(value) => value,
+                Err(_) => {
+                    manager.set_status(false, Some("runtime_start_failed"), None);
+                    return;
+                }
+            };
+            runtime.block_on(async {
+                loop {
+                    let config=manager.config.lock().unwrap().clone();
+                    let Some(mut config)=config.filter(|config|config.enabled) else {manager.changed.notified().await;continue;};
+                    if !state.auth.has_password() {manager.set_status(false,Some("agent_password_required"),None);manager.changed.notified().await;continue;}
+                    if config.endpoint_id.is_none() {
+                        let candidate=config.clone();
+                        let enrolled=tokio::task::spawn_blocking(move ||enroll(candidate)).await;
+                        match enrolled {
+                            Ok(Ok(next))=>{
+                                let current=manager.config.lock().unwrap().clone();
+                                if current.as_ref().is_none_or(|c|!c.enabled || c.request_id!=next.request_id) {continue;}
+                                if let Err(error)=manager.persist_enrollment(next.clone()) {manager.set_status(false,Some(&error),None);if error!="configuration_changed" {manager.changed.notified().await;}continue;}
+                                config=next;
+                            },
+                            _=>{manager.set_status(false,Some("enrollment_failed"),None);tokio::select!{_=tokio::time::sleep(Duration::from_secs(10))=>{},_=manager.changed.notified()=>{}};continue;}
+                        }
+                    }
+                    let mut worker=match worker::Worker::new(state.clone(),manager.clone(),config) {Ok(worker)=>worker,Err(error)=>{manager.set_status(false,Some(&error),None);manager.changed.notified().await;continue;}};
+                    let outcome=worker.run().await;
+                    let cleanup=worker.shutdown().await;
+                    if let Err(error)=cleanup.and(outcome) {manager.set_status(false,Some(&error),None);manager.changed.notified().await;}
+                }
+            });
+        });
+    }
+}
+
+fn server_url(value: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(value).map_err(|_| "invalid_server_url")?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("https_server_required".into());
+    }
+    Ok(url)
+}
+fn url(config: &Config, path: &str) -> Result<String, String> {
+    Ok(format!(
+        "{}/{}",
+        config.server_url.trim_end_matches('/'),
+        path
+    ))
+}
+fn request(config: &Config, path: &str, body: Option<Value>) -> Result<Value, String> {
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|_| "server_transport")?;
+    let endpoint = url(config, path)?;
+    let request = if let Some(body) = body {
+        client.post(endpoint).json(&body)
+    } else {
+        client.get(endpoint)
+    };
+    let response = request
+        .bearer_auth(&config.device_token)
+        .send()
+        .map_err(|_| "calling_server_unreachable")?;
+    if !response.status().is_success() {
+        return Err("calling_server_rejected".into());
+    }
+    if response.content_length().is_some_and(|size| size > 8192) {
+        return Err("calling_server_response_too_large".into());
+    }
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    response
+        .take(8193)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "server_response_read_failed")?;
+    if bytes.len() > 8192 {
+        return Err("calling_server_response_too_large".into());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "invalid_server_response".into())
+}
+fn enroll(mut config: Config) -> Result<Config, String> {
+    let response = request(
+        &config,
+        "v1/enroll",
+        Some(
+            json!({"invitation":config.invitation,"deviceToken":config.device_token,"requestId":config.request_id}),
+        ),
+    )?;
+    let id = Uuid::parse_str(
+        response["endpointId"]
+            .as_str()
+            .ok_or("invalid_server_identity")?,
+    )
+    .map_err(|_| "invalid_server_identity")?;
+    if response["routerId"].as_str() != Some(id.to_string().as_str())
+        || response["role"] != "router"
+    {
+        return Err("invalid_server_identity".into());
+    }
+    config.endpoint_id = Some(id);
+    config.invitation = None;
+    Ok(config)
+}
+pub fn configure(state: &AppState, body: &[u8]) -> (u16, Value) {
+    let _configure = state.remote_calling.configure_lock.lock().unwrap();
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "camelCase")]
+    struct Input {
+        server_url: String,
+        invitation: Option<String>,
+    }
+    let input = match serde_json::from_slice::<Input>(body) {
+        Ok(input) => input,
+        Err(_) => return error(400, "invalid_configuration"),
+    };
+    if state.call_active.load(Ordering::Relaxed)
+        || state
+            .remote_calling
+            .status
+            .lock()
+            .unwrap()
+            .call_state
+            .is_some()
+    {
+        return error(409, "call_in_progress");
+    }
+    if let Err(code) = server_url(&input.server_url) {
+        return error(400, &code);
+    }
+    let previous = state.remote_calling.config.lock().unwrap().clone();
+    let mut config = match previous {
+        Some(config) if config.server_url == input.server_url => config,
+        Some(_) => return error(409, "server_change_requires_new_enrollment"),
+        None => {
+            use std::io::Read;
+            let mut bytes = [0; 32];
+            if std::fs::File::open("/dev/urandom")
+                .and_then(|mut file| file.read_exact(&mut bytes))
+                .is_err()
+            {
+                return error(500, "random_source_failed");
+            }
+            Config {
+                enabled: true,
+                server_url: input.server_url,
+                device_token: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),
+                request_id: Uuid::new_v4(),
+                endpoint_id: None,
+                invitation: None,
+            }
+        }
+    };
+    config.enabled = true;
+    if config.endpoint_id.is_none() {
+        config.invitation = input.invitation;
+    }
+    if config.validate().is_err() {
+        return error(400, "valid_invitation_required");
+    }
+    if let Err(code) = state.remote_calling.persist(config.clone()) {
+        return error(500, &code);
+    }
+    if config.endpoint_id.is_none() {
+        match enroll(config) {
+            Ok(enrolled) => {
+                if let Err(code) = state.remote_calling.persist_enrollment(enrolled) {
+                    return error(500, &code);
+                }
+            }
+            Err(code) => {
+                state.remote_calling.changed.notify_one();
+                return error(503, &code);
+            }
+        }
+    }
+    state.remote_calling.changed.notify_one();
+    (200, state.remote_calling.status())
+}
+pub fn pairing(state: &AppState) -> (u16, Value) {
+    let Some(config) = state
+        .remote_calling
+        .config
+        .lock()
+        .unwrap()
+        .clone()
+        .filter(|c| c.enabled && c.endpoint_id.is_some())
+    else {
+        return error(409, "remote_calling_not_configured");
+    };
+    match request(&config, "v1/pairings", Some(json!({}))) {
+        Ok(data) => (200, json!({"ok":true,"data":data})),
+        Err(code) => error(503, &code),
+    }
+}
+pub fn disable(state: &AppState) -> (u16, Value) {
+    let _configure = state.remote_calling.configure_lock.lock().unwrap();
+    if state.call_active.load(Ordering::Relaxed)
+        || state
+            .remote_calling
+            .status
+            .lock()
+            .unwrap()
+            .call_state
+            .is_some()
+    {
+        return error(409, "call_in_progress");
+    }
+    let config = state.remote_calling.config.lock().unwrap().clone();
+    if let Some(mut config) = config {
+        config.enabled = false;
+        if let Err(code) = state.remote_calling.persist(config) {
+            return error(500, &code);
+        }
+    }
+    state.remote_calling.changed.notify_one();
+    (200, state.remote_calling.status())
+}
+fn error(status: u16, code: &str) -> (u16, Value) {
+    (status, json!({"ok":false,"error":code}))
+}

@@ -20,6 +20,7 @@ mod network_ext;
 mod oos_policy;
 mod qrtr_uim;
 mod router;
+mod remote_calling;
 mod scheduler;
 mod server;
 mod sim;
@@ -107,6 +108,7 @@ fn main() {
     state.sim_identity.start(Arc::clone(&event_bus), Arc::clone(&state.cache), identity_events);
 
     state.live_activity.start(Arc::clone(&state), apns_events);
+    state.remote_calling.start(Arc::clone(&state));
     state.doh.auto_start();
     state.scheduler.start(Arc::clone(&state));
     state
