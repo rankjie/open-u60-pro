@@ -7,6 +7,8 @@ enum AgentError: LocalizedError {
     case decodingError(String)
     case serverUnreachable
     case timeout
+    case remoteUnauthorized
+    case outcomeUnknown
     /// The request was cancelled (task cancellation, tab switch, view dismissal).
     /// Callers should treat this as "no result" and leave existing state untouched —
     /// never as a failure worth surfacing, retrying, or re-authenticating against.
@@ -26,6 +28,10 @@ enum AgentError: LocalizedError {
             return "Cannot reach the agent"
         case .timeout:
             return "Request timed out"
+        case .remoteUnauthorized:
+            return "Remote access was revoked. Pair this iPhone with the router again."
+        case .outcomeUnknown:
+            return "The router may have completed this action. Refresh its state before trying again."
         case .cancelled:
             return "Request cancelled"
         }

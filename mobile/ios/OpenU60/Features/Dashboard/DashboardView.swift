@@ -195,12 +195,12 @@ struct DashboardView: View {
     private var connectionIndicator: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(isAuthenticated ? .green : .red)
+                .fill(connectionColor)
                 .frame(width: 10, height: 10)
-            Text(isAuthenticated ? "Connected" : "Offline")
+            Text(connectionLabel)
                 .font(.caption)
                 .fontWeight(.medium)
-                .foregroundStyle(isAuthenticated ? .green : .red)
+                .foregroundStyle(connectionColor)
         }
         .fixedSize()
         .padding(.horizontal, 10)
@@ -209,6 +209,24 @@ struct DashboardView: View {
             Capsule()
                 .fill((isAuthenticated ? Color.green : Color.red).opacity(0.12))
         )
+    }
+
+    private var connectionColor: Color {
+        guard isAuthenticated else { return .red }
+        switch client.connectionRoute {
+        case .local, .relay: return .green
+        case .connecting: return .orange
+        case .unavailable: return .red
+        }
+    }
+    private var connectionLabel: String {
+        guard isAuthenticated else { return "Offline" }
+        switch client.connectionRoute {
+        case .local: return "Connected"
+        case .relay: return "Via server"
+        case .connecting: return "Connecting"
+        case .unavailable: return "Offline"
+        }
     }
 }
 

@@ -10,6 +10,10 @@ final class TestEndAction: CXEndCallAction {
     private(set) var fulfilled = false
     override func fulfill() { fulfilled = true; super.fulfill() }
 }
+final class TestDTMFAction: CXPlayDTMFCallAction {
+    private(set) var fulfilled = false
+    override func fulfill() { fulfilled = true; super.fulfill() }
+}
 
 @MainActor final class TestProvider: CXProvider {
     var endedCalls: [UUID] = []

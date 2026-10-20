@@ -10,6 +10,11 @@ import Foundation
 final class AgentClient {
     var baseURL: String
     var token: String?
+    @ObservationIgnored var relayAccess: (@MainActor () -> AgentRelayAccess?)?
+    private let transport = AgentTransport()
+    var connectionRoute: AgentTransport.Route {
+        relayAccess?() == nil ? (token == nil ? .unavailable : .local) : transport.route
+    }
 
     /// Invoked when a request comes back 401. Returning `true` means a fresh session was
     /// established, and the request is replayed exactly once. `AuthManager` installs this so
@@ -114,6 +119,11 @@ final class AgentClient {
 
     // MARK: - Auth
 
+    func deliverLocalCall(_ command: [String:Any], routerID: UUID) async throws -> Bool {
+        try await transport.deliverCall(JSONSerialization.data(withJSONObject: command), baseURL: baseURL, routerID: routerID,
+            token: { self.token }, reauthenticate: { await self.onUnauthorized?() ?? false })
+    }
+
     /// Login with plaintext password. Returns the token string.
     @discardableResult
     func login(password: String) async throws -> String {
@@ -194,6 +204,11 @@ final class AgentClient {
         retryOnUnauthorized: Bool = true,
         parse: @escaping @Sendable (Data) throws -> T
     ) async throws -> T {
+        if authenticated, retryOnUnauthorized, Self.canRelay(path), let access = relayAccess?() {
+            let response = try await transport.send(method: method, path: path, body: body, baseURL: baseURL,
+                access: access, token: { self.token }, reauthenticate: { await self.onUnauthorized?() ?? false })
+            return try await Self.process(response, parse: parse).value
+        }
         do {
             let request = try makeRequest(method: method, path: path, body: body, authenticated: authenticated)
             return try await AgentClient.perform(request, on: session, parse: parse).value
@@ -245,14 +260,31 @@ final class AgentClient {
             throw AgentError.serverUnreachable
         }
 
-        switch httpResponse.statusCode {
+        return try await process(AgentHTTPResponse(status: httpResponse.statusCode, data: data), parse: parse)
+    }
+
+    private nonisolated static func process<T>(
+        _ response: AgentHTTPResponse, parse: @escaping @Sendable (Data) throws -> T
+    ) async throws -> UnsafeTransfer<T> {
+        switch response.status {
         case 200...299:
-            return UnsafeTransfer(value: try parse(data))
+            return UnsafeTransfer(value: try parse(response.data))
         case 401:
             throw AgentError.unauthorized
         default:
-            let message = String(data: data, encoding: .utf8) ?? "HTTP \(httpResponse.statusCode)"
+            let json = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any]
+            let code = json?["error"] as? String
+            if let code, ["agent_request_completed", "agent_request_in_progress", "agent_outcome_unknown",
+                "agent_journal_write_failed_outcome_unknown", "agent_journal_read_failed_outcome_unknown",
+                "agent_execution_unknown"].contains(code) { throw AgentError.outcomeUnknown }
+            let message = code ?? "HTTP \(response.status)"
             throw AgentError.serverError(message)
+        }
+    }
+
+    private static func canRelay(_ path: String) -> Bool {
+        !["auth", "remote-calling", "calling", "live-activity", "lan", "management", "identity"].contains {
+            path == "/api/\($0)" || path.hasPrefix("/api/\($0)/")
         }
     }
 

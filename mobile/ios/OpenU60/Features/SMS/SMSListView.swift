@@ -1,6 +1,9 @@
 import SwiftUI
+import Combine
 
 struct SMSListView: View {
+    @Environment(SMSNotificationManager.self) private var notifications
+    @State private var messagePath: [String] = []
     var viewModel: SMSViewModel
     let client: AgentClient
     let authManager: AuthManager
@@ -25,7 +28,7 @@ struct SMSListView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $messagePath) {
             List {
                 Picker("Storage", selection: Binding(
                     get: { viewModel.storageFilter },
@@ -122,7 +125,14 @@ struct SMSListView: View {
                 SMSComposeView(viewModel: viewModel)
             }
             .onReceive(ticker) { now = $0 }
-            .task { await viewModel.refresh() }
+            .task(id: notifications.revision) {
+                await viewModel.refresh()
+                guard !Task.isCancelled else { return }
+                if let id = notifications.takeOpenMessageID(), let messageID = Int(id),
+                   let conversation = viewModel.conversations.first(where: { $0.messages.contains { $0.id == messageID } }) {
+                    messagePath = [conversation.id]
+                }
+            }
         }
     }
 }

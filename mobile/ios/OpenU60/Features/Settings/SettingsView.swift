@@ -40,6 +40,7 @@ struct SettingsView: View {
                     }
                 }
                 Section("Utilities") {
+                    NavigationLink("SMS notifications") { SMSNotificationSettingsView(client:client) }
                     NavigationLink {
                         ToolsListView(client: client, authManager: authManager, category: .automation)
                     } label: {

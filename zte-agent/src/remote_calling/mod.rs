@@ -2,7 +2,7 @@ mod audio;
 mod codec;
 mod journal;
 mod media;
-mod storage;
+pub(crate) mod storage;
 mod worker;
 
 use crate::handlers::AppState;
@@ -53,6 +53,8 @@ struct Status {
     call_state: Option<String>,
 }
 pub struct RemoteCalling {
+    clock: Mutex<Option<(u64, std::time::Instant)>>,
+    local_commands: Mutex<Option<tokio::sync::mpsc::Sender<LocalCommand>>>,
     configure_lock: Mutex<()>,
     config: Mutex<Option<Config>>,
     status: Mutex<Status>,
@@ -81,6 +83,8 @@ impl RemoteCalling {
             None
         };
         Self {
+            clock: Mutex::new(None),
+            local_commands: Mutex::new(None),
             configure_lock: Mutex::new(()),
             config: Mutex::new(config),
             status: Mutex::new(status),
@@ -88,9 +92,10 @@ impl RemoteCalling {
         }
     }
     pub fn status(&self) -> Value {
+        let agent_time = match self.unix_time() { Ok(time) => time, Err(code) => return json!({"ok":false,"error":code}) };
         let config = self.config.lock().unwrap();
         let status = self.status.lock().unwrap();
-        json!({"ok":true,"data":{"enabled":config.as_ref().is_some_and(|v|v.enabled),
+        json!({"ok":true,"data":{"agentTime":agent_time,"enabled":config.as_ref().is_some_and(|v|v.enabled),
             "configured":config.as_ref().is_some_and(|v|v.endpoint_id.is_some()),"connected":status.connected,
             "serverURL":config.as_ref().map(|v|&v.server_url),"routerId":config.as_ref().and_then(|v|v.endpoint_id),
             "lastError":status.last_error,"callState":status.call_state,"audioAdapterError":audio::available().err()}})
@@ -100,6 +105,40 @@ impl RemoteCalling {
         status.connected = connected;
         status.last_error = error.map(String::from);
         status.call_state = call.map(String::from);
+    }
+    pub(crate) fn observe_time(&self, unix: u64) -> Result<(), &'static str> {
+        if !(946684800..4102444800).contains(&unix) { return Err("invalid_server_clock"); }
+        *self.clock.lock().unwrap() = Some((unix, std::time::Instant::now()));
+        Ok(())
+    }
+    pub(crate) fn unix_time(&self) -> Result<u64, &'static str> {
+        if let Some((unix, anchor)) = *self.clock.lock().unwrap() {
+            return unix.checked_add(anchor.elapsed().as_secs()).ok_or("invalid_server_clock");
+        }
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map(|time|time.as_secs()).map_err(|_|"invalid_device_clock")
+    }
+    pub fn local_command(&self, bytes: &[u8]) -> (u16, Value) {
+        let command: journal::Command = match serde_json::from_slice(bytes) {
+            Ok(command) => command,
+            Err(_) => return (400, json!({"ok":false,"error":"invalid_command"})),
+        };
+        let checked = command.validate().and_then(|_| {
+            let now = self.unix_time()?;
+            if command.expires_at > now.saturating_add(30) { return Err("operation_expiry_too_long"); }
+            command.remaining(now).map(|_| ())
+        });
+        if let Err(code) = checked { return (400, json!({"ok":false,"error":code})); }
+        let sender = self.local_commands.lock().unwrap().clone();
+        let Some(sender) = sender else { return (503, json!({"ok":false,"error":"calling_worker_unavailable"})); };
+        let id = command.request_id;
+        let (ack, receipt) = std::sync::mpsc::sync_channel(1);
+        if sender.try_send((command, ack)).is_err() { return (503, json!({"ok":false,"error":"calling_queue_unavailable"})); }
+        match receipt.recv_timeout(Duration::from_secs(2)) {
+            Ok(Ok(())) => (202, json!({"ok":true,"data":{"queued":true,"requestId":id}})),
+            Ok(Err(code)) => (503, json!({"ok":false,"error":code})),
+            Err(_) => (504, json!({"ok":false,"error":"calling_admission_unknown"})),
+        }
     }
     fn persist(&self, config: Config) -> Result<(), String> {
         let mut current = self.config.lock().unwrap();
@@ -166,6 +205,8 @@ impl RemoteCalling {
         });
     }
 }
+
+type LocalCommand = (journal::Command, std::sync::mpsc::SyncSender<Result<(), String>>);
 
 fn server_url(value: &str) -> Result<reqwest::Url, String> {
     let url = reqwest::Url::parse(value).map_err(|_| "invalid_server_url")?;
@@ -359,4 +400,49 @@ pub fn disable(state: &AppState) -> (u16, Value) {
 }
 fn error(status: u16, code: &str) -> (u16, Value) {
     (status, json!({"ok":false,"error":code}))
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    fn manager() -> RemoteCalling {
+        // An isolated manager avoids opening the router's normal configuration.
+        RemoteCalling { clock: Mutex::new(None), local_commands: Mutex::new(None), configure_lock: Mutex::new(()),
+            config: Mutex::new(None), status: Mutex::new(Status::default()), changed: Notify::new() }
+    }
+    #[test]
+    fn authenticated_server_time_advances_without_the_device_wall_clock() {
+        let manager = manager();
+        manager.observe_time(1800000000).unwrap();
+        *manager.clock.lock().unwrap() = Some((1800000000, std::time::Instant::now() - Duration::from_secs(5)));
+        assert!(manager.unix_time().unwrap() >= 1800000005);
+    }
+    #[test]
+    fn invalid_time_does_not_replace_the_last_trusted_anchor() {
+        let manager = manager(); manager.observe_time(1800000000).unwrap();
+        for invalid in [0, 1234, u64::MAX] { assert_eq!(manager.observe_time(invalid), Err("invalid_server_clock")); }
+        assert!(manager.unix_time().unwrap() >= 1800000000);
+        assert!(manager.unix_time().unwrap() < 1800000100);
+    }
+    #[test]
+    fn local_call_admission_waits_for_the_existing_command_owner() {
+        let manager = manager(); manager.observe_time(1800000000).unwrap();
+        let id = Uuid::new_v4();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<LocalCommand>(8);
+        *manager.local_commands.lock().unwrap() = Some(sender);
+        let owner = std::thread::spawn(move || {
+            let (command, receipt) = receiver.blocking_recv().unwrap();
+            assert_eq!(command.request_id, id);
+            assert_eq!(command.action, "dial");
+            receipt.send(Ok(())).unwrap();
+        });
+        let bytes = serde_json::to_vec(&json!({"type":"command","requestId":id,"callId":Uuid::new_v4(),
+            "action":"dial","number":"12345","expiresAt":1800000020})).unwrap();
+        let (status, value) = manager.local_command(&bytes);
+        owner.join().unwrap();
+        assert_eq!(status, 202); assert_eq!(value["data"]["requestId"], id.to_string());
+        assert_eq!(manager.local_command(&bytes).0, 503);
+        let mut expired: Value = serde_json::from_slice(&bytes).unwrap(); expired["expiresAt"] = json!(1700000000);
+        assert_eq!(manager.local_command(&serde_json::to_vec(&expired).unwrap()).0, 400);
+    }
 }

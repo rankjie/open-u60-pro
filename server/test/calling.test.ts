@@ -3,7 +3,7 @@ import { generateKeyPairSync, randomUUID, verify } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { APNs, type PushProvider, type PushOutcome } from "../src/apns";
+import { APNs, smsPushRequests, type PushProvider, type PushOutcome } from "../src/apns";
 import { Fault, secret, snapshot, type Endpoint } from "../src/protocol";
 import { Store } from "../src/store";
 import { CallingService } from "../src/service";
@@ -41,6 +41,7 @@ class Peer {
     });
   }
   send(value: unknown) { this.socket.send(JSON.stringify(value)); }
+  queued(type: string) { return this.queue.some(value => value.type === type); }
   async next(type: string, predicate: (value: any) => boolean = () => true): Promise<any> {
     const matches = (v: any) => v.type === type && predicate(v);
     const index = this.queue.findIndex(matches);
@@ -52,6 +53,160 @@ class Peer {
     });
   }
 }
+
+describe("authenticated agent relay", () => {
+  function relayRequest(f: ReturnType<typeof fixture>, overrides: Record<string, unknown> = {}) {
+    return { requestId: randomUUID(), method: "GET", path: "/api/battery", body: "", expiresAt: f.store.now() + 20, ...overrides };
+  }
+  function relayFetch(f: ReturnType<typeof fixture>, body: unknown, token = f.phoneToken) {
+    return fetch(f.url + "/v1/agent", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+  }
+  test("reads traverse the authenticated router and preserve large JSON responses", async () => {
+    const f = fixture(), router = new Peer(f.url, f.routerToken); await router.next("hello");
+    const request = relayRequest(f), pending = relayFetch(f, request);
+    const delivered = await router.next("agent_request");
+    expect(delivered).toEqual({ type: "agent_request", ...request });
+    const body = Buffer.from(JSON.stringify({ ok: true, data: "synthetic".repeat(14000) })).toString("base64");
+    router.send({ type: "agent_result", requestId: request.requestId, status: 200, body });
+    const response = await pending;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ requestId: request.requestId, status: 200, body });
+    expect(f.store.one("SELECT 1 FROM agent_operations WHERE id=?", request.requestId)).toBeUndefined();
+  });
+  test("SMS writes are immutable and their content is not persisted in the relay ledger", async () => {
+    const f = fixture(), router = new Peer(f.url, f.routerToken); await router.next("hello");
+    const content = "Synthetic SMS body for the isolated test";
+    const request = relayRequest(f, { method: "POST", path: "/api/sms/send", body: Buffer.from(JSON.stringify({ message_body: content })).toString("base64") });
+    const pending = relayFetch(f, request); await router.next("agent_request");
+    const ledger = f.store.one<Record<string, unknown>>("SELECT * FROM agent_operations WHERE id=?", request.requestId)!;
+    expect(Object.keys(ledger).sort()).toEqual(["expires_at", "fingerprint", "id", "phone_id", "router_id", "status"]);
+    expect(JSON.stringify(ledger)).not.toContain(content);
+    router.send({ type: "agent_result", requestId: request.requestId, status: 503, body: Buffer.from('{"ok":false,"error":"no_sim"}').toString("base64") });
+    expect((await (await pending).json() as any).status).toBe(503);
+    expect((await relayFetch(f, request)).status).toBe(409);
+    const conflict = await relayFetch(f, { ...request, body: Buffer.from("different").toString("base64") });
+    expect(await conflict.json()).toEqual({ error: "agent_request_conflict" });
+  });
+  test("disconnect after delivery reports an unknown outcome and never replays the write", async () => {
+    const f = fixture(), router = new Peer(f.url, f.routerToken); await router.next("hello");
+    const request = relayRequest(f, { method: "PUT", path: "/api/usb/powerbank", body: Buffer.from('{"state":0}').toString("base64") });
+    const pending = relayFetch(f, request); await router.next("agent_request"); router.socket.close();
+    const failed = await pending;
+    expect(failed.status).toBe(504);
+    expect(await failed.json()).toEqual({ error: "agent_outcome_unknown" });
+    const replacement = new Peer(f.url, f.routerToken); await replacement.next("hello");
+    expect(await (await relayFetch(f, request)).json()).toEqual({ error: "agent_outcome_unknown" });
+    expect(f.store.one<any>("SELECT status FROM agent_operations WHERE id=?", request.requestId).status).toBe("unknown");
+  });
+  test("revoking the phone while a read is in progress withholds the response", async () => {
+    const f = fixture(), router = new Peer(f.url, f.routerToken); await router.next("hello");
+    const request = relayRequest(f), pending = relayFetch(f, request); await router.next("agent_request");
+    f.store.revoke(f.router);
+    router.send({ type: "agent_result", requestId: request.requestId, status: 200, body: Buffer.from('{"ok":true,"data":{}}').toString("base64") });
+    const response = await pending;
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "pairing_revoked" });
+  });
+  test.each(["/api/auth/login", "/api/remote-calling/configure", "/api/lan/download", "/api/../auth/login", "/api//sms/send"])("rejects a non-relay endpoint %s", async path => {
+    const f = fixture();
+    const response = await relayFetch(f, relayRequest(f, { path }));
+    expect(response.status).toBe(403);
+  });
+  test("router credentials cannot act as a phone and expired work never reaches a device", async () => {
+    const f = fixture();
+    expect((await relayFetch(f, relayRequest(f), f.routerToken)).status).toBe(403);
+    expect((await relayFetch(f, relayRequest(f, { expiresAt: f.store.now() }))).status).toBe(408);
+    expect((await relayFetch(f, relayRequest(f))).status).toBe(503);
+  });
+});
+
+describe("local call command admission", () => {
+  test("LAN admission and relay retry retain one canonical operation and expiry", async () => {
+    const f = fixture(), router = new Peer(f.url, f.routerToken), phone = new Peer(f.url, f.phoneToken);
+    await router.next("hello"); await phone.next("hello");
+    const body = { requestId: randomUUID(), callId: randomUUID(), action: "dial", number: "12345" };
+    const submit = (delivery: string, token = f.phoneToken) => fetch(f.url + "/v1/call-operation", {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ ...body, delivery }),
+    });
+    const admitted = await submit("local"), local = await admitted.json() as any;
+    expect(admitted.status).toBe(200); expect(local.status).toBe("pending");
+    expect(local.command).toEqual({ type: "command", ...body, expiresAt: f.store.now() + 20 });
+    router.send({ type: "ping" }); await router.next("pong");
+    expect(router.queued("command")).toBe(false);
+    await phone.next("accepted");
+    f.advance(3);
+    const relayed = await (await submit("relay")).json() as any;
+    expect(relayed.command).toEqual(local.command);
+    expect(await router.next("command")).toEqual(local.command);
+    router.send({ type: "result", requestId: body.requestId, callId: body.callId, ok: true });
+    expect((await phone.next("result")).ok).toBe(true);
+    const replay = await (await submit("relay")).json() as any;
+    expect(replay.status).toBe("done"); expect(replay.ok).toBe(true);
+    expect(f.store.one<any>("SELECT count(*) AS n FROM operations WHERE id=?", body.requestId).n).toBe(1);
+    expect((await submit("local", f.routerToken)).status).toBe(403);
+    expect((await submit("invalid")).status).toBe(400);
+  });
+});
+
+describe("full SMS notifications", () => {
+  test("APNs carries sender and complete text, splitting only at the real payload limit", () => {
+    for (const text of ["Your code is 123456", "中文 🐼\n\\\"".repeat(1500), "\u0000".repeat(8000)]) {
+      const event = { id: randomUUID(), routerId: randomUUID(), messageId: "42", sender: "Synthetic Sender", text, expiresAt: 1800086400 };
+      const requests = smsPushRequests("com.beexio.openu60", event);
+      expect(requests.map(request => request.payload.aps.alert.body).join("")).toBe(text);
+      expect(new Set(requests.map(request => request.headers["apns-id"])).size).toBe(requests.length);
+      for (const request of requests) {
+        expect(Buffer.byteLength(JSON.stringify(request.payload))).toBeLessThanOrEqual(4096);
+        expect(request.payload.aps.alert.title).toBe(event.sender);
+        expect(request.headers["apns-push-type"]).toBe("alert");
+        expect(request.headers["apns-topic"]).toBe("com.beexio.openu60");
+        expect(request.payload.messageId).toBe("42");
+      }
+      expect(smsPushRequests("com.beexio.openu60", event)).toEqual(requests);
+    }
+  });
+  test("durable SMS admission acknowledges once and retries the full content without repeating VoIP", async () => {
+    const sent: any[] = []; let attempt = 0;
+    const f = fixture({ close() {}, async send() { throw new Error("SMS cannot use PushKit"); },
+      async sendSMS(_token, environment, event) {
+        sent.push({ environment, ...event });
+        return ++attempt === 1 ? { kind: "retry", code: "apns_transport" } : { kind: "accepted", code: "accepted" };
+      } });
+    const register = await fetch(f.url + "/v1/notification-token", { method: "PUT",
+      headers: { authorization: `Bearer ${f.phoneToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ token: "ab".repeat(32), environment: "sandbox" }) });
+    expect(register.status).toBe(200);
+    const router = new Peer(f.url, f.routerToken), phone = new Peer(f.url, f.phoneToken);
+    await router.next("hello"); await phone.next("hello");
+    const text = "Synthetic code 123456 中文 🐼", event = { type: "sms_event", eventId: randomUUID(), messageId: "42",
+      sender: "Synthetic", content: Buffer.from(text).toString("base64") };
+    router.send(event); await router.next("sms_ack"); await phone.next("sms_received");
+    await new Promise(resolve => setTimeout(resolve, 5));
+    expect(sent).toHaveLength(1); expect(sent[0].text).toBe(text);
+    expect(f.store.one<any>("SELECT status FROM sms_events WHERE event_id=?", event.eventId).status).toBe("pending");
+    f.advance(2); await f.service.tick();
+    expect(sent).toHaveLength(2); expect(sent[1]).toEqual(sent[0]);
+    const persisted = f.store.one<any>("SELECT * FROM sms_events WHERE event_id=?", event.eventId);
+    expect(persisted.status).toBe("accepted"); expect(persisted.payload).toBeNull();
+    router.send(event); await router.next("sms_ack");
+    await f.service.tick(); expect(sent).toHaveLength(2);
+    router.send({ ...event, content: Buffer.from("altered").toString("base64") });
+    expect((await router.next("error")).error).toBe("sms_event_conflict");
+    phone.send(event); expect((await phone.next("error")).error).toBe("router_required");
+  });
+  test("expired or revoked SMS outboxes clear content and never send to another pairing", async () => {
+    let pushes = 0;
+    const f = fixture({ close() {}, async send() { throw new Error("Unexpected call"); },
+      async sendSMS() { pushes++; return { kind: "accepted", code: "accepted" }; } });
+    const router = new Peer(f.url, f.routerToken); await router.next("hello");
+    router.send({ type:"sms_event", eventId:randomUUID(), messageId:"1",sender:"Synthetic",content:Buffer.from("Synthetic text").toString("base64") });
+    await router.next("sms_ack");
+    f.advance(86400); await f.service.tick();
+    expect(f.store.one<any>("SELECT status,payload FROM sms_events")).toEqual({ status:"expired",payload:null });
+    f.store.revoke(f.router); await f.service.tick(); expect(pushes).toBe(0);
+  });
+});
 
 describe("pairing and durable authorization", () => {
   test("an invitation is single use, but an identical enrollment retry recovers its identity", () => {
@@ -162,7 +317,7 @@ describe("signaling over real WebSocket connections", () => {
 describe("incoming-call delivery and recovery", () => {
   test("an old ring replay ends without notifying the phone", async () => {
     let pushes = 0;
-    const f = fixture({ close() {}, async send() { pushes++; return { kind: "accepted", code: "accepted" }; } });
+    const f = fixture({ close() {}, async sendSMS() { throw new Error("Unexpected SMS push"); }, async send() { pushes++; return { kind: "accepted", code: "accepted" }; } });
     f.store.pushToken(f.phone, { token: "cd".repeat(32), environment: "sandbox" });
     const call = f.store.event(f.router, { eventId: randomUUID(), callId: randomUUID(), sequence: 1,
       observedAt: f.store.now() - 46, state: "ringing", mediaReady: false });
@@ -201,7 +356,7 @@ describe("incoming-call delivery and recovery", () => {
   });
   test("a failed push retries durably, while a caller hangup cancels further attempts", async () => {
     const sent: string[] = [];
-    const push: PushProvider = { close() {}, async send(_token, _environment, call) { sent.push(call.id); return { kind: "retry", code: "apns_transport" }; } };
+    const push: PushProvider = { close() {}, async sendSMS() { throw new Error("Unexpected SMS push"); }, async send(_token, _environment, call) { sent.push(call.id); return { kind: "retry", code: "apns_transport" }; } };
     const f = fixture(push);
     f.store.pushToken(f.phone, { token: "ab".repeat(32), environment: "sandbox" });
     const callId = randomUUID(), event = { eventId: randomUUID(), callId, sequence: 1, observedAt: 1800000000, mediaReady: false, state: "ringing", number: "123" };
@@ -220,7 +375,7 @@ describe("incoming-call delivery and recovery", () => {
   });
   test("invalid device tokens are disabled without retrying every ringing event", async () => {
     let attempts = 0;
-    const push: PushProvider = { close() {}, async send() { attempts++; return { kind: "reject", code: "BadDeviceToken" }; } };
+    const push: PushProvider = { close() {}, async sendSMS() { throw new Error("Unexpected SMS push"); }, async send() { attempts++; return { kind: "reject", code: "BadDeviceToken" }; } };
     const f = fixture(push); f.store.pushToken(f.phone, { token: "ab".repeat(32), environment: "sandbox" });
     f.store.event(f.router, { eventId: randomUUID(), callId: randomUUID(), sequence: 1, observedAt: 1800000000, mediaReady: false, state: "ringing" });
     await f.service.tick(); f.advance(3); await f.service.tick(); expect(attempts).toBe(1);

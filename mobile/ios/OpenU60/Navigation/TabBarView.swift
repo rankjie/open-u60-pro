@@ -5,6 +5,7 @@ struct TabBarView: View {
     let authManager: AuthManager
     @AppStorage("poll_interval") private var pollInterval: Double = 2.0
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(SMSNotificationManager.self) private var notifications
 
     private enum Tab: Hashable { case dashboard, calls, sms, settings }
     @State private var selectedTab: Tab = .dashboard
@@ -59,6 +60,9 @@ struct TabBarView: View {
             } else {
                 dashboardVM.stopPolling()
             }
+        }
+        .onChange(of: notifications.openRevision, initial: true) { _, revision in
+            if revision > 0 { selectedTab = .sms }
         }
         .onChange(of: isForeground, initial: true) { _, foreground in
             if foreground {

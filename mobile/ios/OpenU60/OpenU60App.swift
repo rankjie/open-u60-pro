@@ -2,12 +2,13 @@ import SwiftUI
 
 @main
 struct OpenU60App: App {
-    @State private var remoteCalling = RemoteCallingManager()
+    @UIApplicationDelegateAdaptor(OpenU60Delegate.self) private var appDelegate
+    @State private var smsNotifications = SMSNotificationManager.shared
+    @State private var remoteCalling: RemoteCallingManager
     @State private var showRemoteCalling = false
 #if DEBUG && OPENU60_NATIVE_CALLKIT_PROBE
     @State private var showCallingProbe = Foundation.ProcessInfo.processInfo.arguments.contains("--native-callkit-probe")
 #endif
-    @State private var showRouterLogin = false
     @State private var signalActivity: SignalActivityManager
     @Environment(\.scenePhase) private var scenePhase
     @State private var authManager: AuthManager
@@ -20,9 +21,22 @@ struct OpenU60App: App {
     init() {
         let savedIP = UserDefaults.standard.string(forKey: "gateway_ip") ?? "192.168.0.1"
         let agentClient = AgentClient(baseURL: "http://\(savedIP):9090")
+        let calling = RemoteCallingManager()
+        SMSNotificationManager.shared.access = { [weak calling] in calling?.managementAccess }
+        calling.onSMSReceived = { eventID, routerID, messageID in
+            SMSNotificationManager.shared.receive(eventID:eventID,routerID:routerID,messageID:messageID)
+        }
+        let auth = AuthManager(client: agentClient)
+        agentClient.relayAccess = { [weak calling] in calling?.managementAccess }
+        calling.localCommandDelivery = { [weak agentClient] command, routerID in
+            guard let agentClient else { throw CallingError.disconnected }
+            return try await agentClient.deliverLocalCall(command, routerID: routerID)
+        }
+        auth.hasRemoteAccess = { [weak calling] in calling?.isPaired == true }
+        _remoteCalling = State(initialValue: calling)
         self.client = agentClient
         _signalActivity = State(initialValue: SignalActivityManager(client: agentClient))
-        _authManager = State(initialValue: AuthManager(client: agentClient))
+        _authManager = State(initialValue: auth)
 
         let navAppearance = UINavigationBarAppearance()
         navAppearance.configureWithTransparentBackground()
@@ -44,12 +58,15 @@ struct OpenU60App: App {
 #endif
                 .environment(signalActivity)
                 .environment(remoteCalling)
+                .environment(smsNotifications)
+                .task(id: remoteCalling.isPaired) { await smsNotifications.refresh(requestPermission:true) }
                 .task(id: authManager.isAuthenticated) {
                     if authManager.isAuthenticated { await signalActivity.resume() }
                     else if signalActivity.activity != nil { await signalActivity.stop() }
                 }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active { remoteCalling.foreground() }
+                    if phase == .active { Task { await smsNotifications.refresh() } }
                     if phase == .active && authManager.isAuthenticated {
                         Task { await signalActivity.resume() }
                     }
@@ -67,12 +84,7 @@ struct OpenU60App: App {
 
     @ViewBuilder
     private var rootView: some View {
-        if remoteCalling.isPaired && !authManager.isAuthenticated && !showRouterLogin {
-            NavigationStack {
-                RemoteCallingView(localClient: nil)
-                    .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Back", systemImage: "chevron.left") { showRouterLogin = true } } }
-            }
-        } else if authManager.isAuthenticated {
+        if authManager.isAuthenticated {
             TabBarView(client: client, authManager: authManager)
         } else if isAttemptingAutoLogin {
             VStack(spacing: 16) {

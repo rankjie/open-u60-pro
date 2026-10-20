@@ -31,8 +31,24 @@
    Verification uses a synthetic
    router on the existing public service. Synthetic credentials are isolated
    private USB-transfer inputs; the real pairing Keychain remains untouched.
-2. Next: local/relay management transport and switching behavior.
-3. Next: remote SMS and ordinary APNs notification delivery.
+2. Implemented, awaiting integrated deployment: authenticated server JSON relay,
+   the shared device execution journal and iOS LAN-first transport. A six-request
+   client limit shares capacity with call control. Discovery checks the enrolled
+   router identity before local reauthentication; a lost write response retains
+   its UUID on relay fallback. Call control admits one operation centrally, then
+   attempts the existing device worker over LAN before relay. The server and
+   device retain the original operation ID and expiry. U60's clock reports 2025;
+   the authenticated hello now supplies a monotonic server-time anchor, also
+   exposed as `agentTime` for local request expiry. Journal history uses admission
+   order so a clock correction cannot forget a completed effect.
+3. Implemented, awaiting deployment and physical APNs verification: remote SMS
+   uses the management transport. A firmware event subscription plus bounded
+   database reconciliation identifies new received SMS, seeds historical messages
+   without notifying, and persists pending events before sending. Notifications
+   carry the sender and complete message, including codes, as requested. Long
+   messages split into stable parts below APNs's 4,096-byte payload limit. The App
+   registers its ordinary APNs token separately from PushKit and opens Messages
+   on a notification tap. Actual carrier receive/send awaits the SIM.
 4. Installed and observed: four tabs, grouped Settings, and a compact Home USB
    charging switch. Turning it on detached router USB/ADB; turning it off restored
    ADB within nine seconds using the App switch, with the same
@@ -65,10 +81,24 @@ Reads can fall back automatically; uncertain writes must reconcile rather than
 silently replay. Request bodies, response sizes, concurrency and waits are bounded.
 Raw LAN throughput tests stay local because a relay would measure another link.
 
-New-message notifications use ordinary APNs with a generic, privacy-preserving
-alert and a device event identifier. The actual messages remain on the router and
-are fetched through the same transport when the app opens. SMS sends use write
-deduplication. PushKit is reserved for real incoming call reporting. Notification
-outboxes persist identifiers and delivery state before attempting Apple delivery;
-expired/revoked tokens stop retries. No new SMS text/OTP copy is stored on the
-server.
+The iOS transport probes router identity/time, uses the local
+`/api/management` endpoint when reachable and send the same effect UUID through
+`/v1/agent` on fallback. Expiry is expressed in the selected transport's time
+domain with the original remaining deadline; only method/path/body define the
+device effect fingerprint. The last 1,024 outcomes are retained by admission
+order; unfinished effects are never evicted to make them executable again.
+
+Call control retains server admission and the existing single call journal:
+admit a stable call-operation UUID centrally, deliver its canonical command over
+the verified local path first, then relay the same command/expiry if needed.
+Local delivery only acknowledges queue admission; the existing server result
+still completes the CallKit action. It must not create a second dial or a separate
+modem execution path. Offline cellular-call acceptance remains outside this work.
+
+New-message notifications use ordinary APNs with the full sender and message,
+including verification codes. Device and server outboxes retain content while
+delivery is pending; a server acceptance removes the device copy, and an Apple
+acceptance, rejection, expiry or revocation clears the server payload. A pending
+notification expires after one day or twelve provider attempts. Stable event and
+part identifiers deduplicate retries; no exactly-once Apple delivery is claimed.
+SMS sends use device write deduplication. PushKit is reserved for incoming calls.

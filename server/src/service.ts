@@ -3,6 +3,8 @@ import { createHmac } from "node:crypto";
 import { Fault, object, signal, snapshot, text, uuid, type Call, type Endpoint, type Operation } from "./protocol";
 import { Store } from "./store";
 import type { PushProvider } from "./apns";
+import { AgentRelay } from "./agent-relay";
+import { SMSNotifications } from "./sms-notifications";
 
 interface SocketData { endpoint: Endpoint; generation: string }
 export interface ServiceOptions {
@@ -17,22 +19,29 @@ export class CallingService {
   private buckets = new Map<string, { count: number; until: number }>();
   private pushing = new Set<string>();
   private maintenance?: ReturnType<typeof setInterval>;
+  private relay: AgentRelay;
+  private sms: SMSNotifications;
   constructor(readonly options: ServiceOptions) {
     const store = options.store;
     // The phone deduplicates an APNs retry by the stable CallKit call UUID.
     store.run("UPDATE push_outbox SET status='pending' WHERE status='inflight'");
+    this.sms = new SMSNotifications(store, options.push);
+    this.relay = new AgentRelay(store, id => this.sockets.has(id), (id, value) => {
+      const socket = this.sockets.get(id);
+      return !!socket && socket.send(JSON.stringify(value)) !== 0;
+    });
     this.server = Bun.serve<SocketData>({ hostname: options.hostname ?? "127.0.0.1", port: options.port ?? 46170,
-      maxRequestBodySize: 8192,
+      maxRequestBodySize: 98304,
       fetch: (request, server) => this.fetch(request, server),
       websocket: {
-        maxPayloadLength: 65536, idleTimeout: 30, sendPings: true, backpressureLimit: 262144,
+        maxPayloadLength: 786432, idleTimeout: 30, sendPings: true, backpressureLimit: 1048576,
         closeOnBackpressureLimit: true,
         open: socket => this.open(socket),
         message: (socket, message) => this.message(socket, message),
         close: socket => {
           if (this.sockets.get(socket.data.endpoint.id) === socket) {
             this.sockets.delete(socket.data.endpoint.id);
-            if (socket.data.endpoint.role === "router") this.presence(socket.data.endpoint.id, false);
+            if (socket.data.endpoint.role === "router") { this.relay.offline(socket.data.endpoint.id); this.presence(socket.data.endpoint.id, false); }
           }
         },
       },
@@ -40,7 +49,7 @@ export class CallingService {
     if (options.maintenance !== false) this.maintenance = setInterval(() => { void this.tick(); }, 1000);
   }
   get store() { return this.options.store; }
-  stop() { clearInterval(this.maintenance); this.options.push?.close(); this.server.stop(true); }
+  stop() { clearInterval(this.maintenance); this.relay.close(); this.options.push?.close(); this.server.stop(true); }
   private limit(key: string, maximum: number) {
     const now = this.store.now();
     const old = this.buckets.get(key);
@@ -57,7 +66,8 @@ export class CallingService {
       const url = new URL(request.url);
       const path = url.pathname.replace(/^\/openu60(?=\/)/, "");
       if (request.headers.has("origin")) throw new Fault(403, "browser_origin_forbidden");
-      if (request.method === "GET" && path === "/health") return Response.json({ ok: true, protocol: 1, voipPushConfigured: !!this.options.push, turnConfigured: !!this.options.turn });
+      if (request.method === "GET" && path === "/health") return Response.json({ ok: true, protocol: 1, voipPushConfigured: !!this.options.push,
+        smsPushConfigured: !!this.options.push, turnConfigured: !!this.options.turn });
       const ip = server.requestIP(request)?.address ?? "unavailable";
       if (request.method === "POST" && (path === "/v1/enroll" || path === "/v1/pair")) {
         this.limit(`enroll:${ip}`, 10);
@@ -70,7 +80,24 @@ export class CallingService {
         return Response.json({ endpointId: endpoint.id, routerId: endpoint.router_id, role: endpoint.role });
       }
       const endpoint = this.store.authenticate(request.headers.get("authorization"));
+      if (request.method === "POST" && path === "/v1/agent") {
+        this.limit(`agent:${endpoint.id}`, 1200);
+        return Response.json(await this.relay.request(endpoint, await this.json(request)));
+      }
       this.limit(`api:${endpoint.id}`, 120);
+      if (path === "/v1/notification-token" && request.method === "PUT") {
+        this.sms.token(endpoint, object(await this.json(request))); return Response.json({ ok: true });
+      }
+      if (path === "/v1/notification-token" && request.method === "DELETE") {
+        this.sms.remove(endpoint); return Response.json({ ok: true });
+      }
+      if (request.method === "POST" && path === "/v1/call-operation") {
+        const body = object(await this.json(request));
+        if (body.delivery !== "local" && body.delivery !== "relay") throw new Fault(400, "invalid_delivery");
+        const operation = this.command(endpoint, body, body.delivery === "relay");
+        return Response.json({ command: JSON.parse(operation.payload), status: operation.status,
+          ok: operation.ok === null ? null : operation.ok === 1, error: operation.error });
+      }
       if (request.method === "GET" && path === "/v1/socket") {
         if (url.search) throw new Fault(400, "query_credentials_forbidden");
         if (server.upgrade(request, { data: { endpoint, generation: crypto.randomUUID() } })) return;
@@ -88,6 +115,7 @@ export class CallingService {
         this.store.transaction(() => {
           this.store.run("UPDATE phones SET push_token=NULL,push_disabled=1 WHERE endpoint_id IN (SELECT id FROM endpoints WHERE router_id=?)", endpoint.id);
           this.store.run("UPDATE endpoints SET revoked=1 WHERE router_id=?", endpoint.id);
+          this.store.run("DELETE FROM notification_tokens WHERE endpoint_id IN (SELECT id FROM endpoints WHERE router_id=?)", endpoint.id);
           this.store.run("DELETE FROM pairings WHERE router_id=?", endpoint.id);
         });
         for (const socket of this.sockets.values()) if (socket.data.endpoint.router_id === endpoint.id) socket.close(4001, "enrollment_revoked");
@@ -99,6 +127,7 @@ export class CallingService {
         this.store.transaction(() => {
           this.store.run("UPDATE endpoints SET revoked=1 WHERE id=?", endpoint.id);
           this.store.run("UPDATE phones SET push_token=NULL,push_disabled=1 WHERE endpoint_id=?", endpoint.id);
+          this.sms.remove(endpoint);
         });
         this.send(endpoint.router_id, { type: "unpaired" });
         this.sockets.get(endpoint.id)?.close(4001, "pairing_revoked");
@@ -162,7 +191,7 @@ export class CallingService {
     this.sockets.set(endpoint.id, socket);
     previous?.close(4000, "connection_replaced");
     const call = this.store.currentCall(endpoint.router_id);
-    this.send(endpoint.id, { type: "hello", protocol: 1, endpointId: endpoint.id, routerId: endpoint.router_id,
+    this.send(endpoint.id, { type: "hello", protocol: 1, serverTime: this.store.now(), endpointId: endpoint.id, routerId: endpoint.router_id,
       role: endpoint.role, calls: call ? [snapshot(call)] : [], iceServers: this.ice(endpoint),
       paired: !!this.store.one("SELECT 1 FROM endpoints WHERE router_id=? AND role='phone' AND revoked=0", endpoint.router_id),
       routerOnline: this.sockets.has(endpoint.router_id), voipPushConfigured: !!this.options.push });
@@ -180,22 +209,24 @@ export class CallingService {
     try {
       if (this.sockets.get(endpoint.id) !== socket) throw new Fault(401, "connection_replaced");
       this.store.endpoint(endpoint.id);
-      this.limit(`ws:${endpoint.id}`, 600);
+      this.limit(`ws:${endpoint.id}`, endpoint.role === "router" ? 1800 : 600);
       let value: unknown;
       try { value = JSON.parse(input.toString()); }
       catch (error) { if (error instanceof SyntaxError) throw new Fault(400, "invalid_json"); throw error; }
       const body = object(value);
       if (body.requestId !== undefined) requestId = uuid(body.requestId);
       switch (body.type) {
+        case "sms_event": {
+          const event = this.sms.accept(endpoint, body);
+          this.send(endpoint.id, { type: "sms_ack", eventId: event.event_id });
+          this.send(event.phone_id, { type: "sms_received", eventId: event.event_id, routerId: event.router_id, messageId: event.message_id });
+          void this.sms.deliver(event).catch(() => console.error("sms_notification_delivery_failed"));
+          return;
+        }
+        case "agent_result": this.relay.result(endpoint, body); return;
         case "ping": this.send(endpoint.id, { type: "pong" }); return;
         case "command": {
-          if (!this.sockets.has(endpoint.router_id)) throw new Fault(503, "router_offline");
-          const operation = this.store.command(endpoint, body);
-          if (operation.action === "dial" && operation.status === "pending") this.refreshICE(this.store.call(operation.call_id));
-          this.send(endpoint.id, { type: "accepted", requestId: operation.id, callId: operation.call_id });
-          this.broadcast(this.store.call(operation.call_id));
-          if (operation.status === "pending") this.send(endpoint.router_id, JSON.parse(operation.payload));
-          else this.operationResult(operation);
+          this.command(endpoint, body, true);
           return;
         }
         case "result": {
@@ -232,6 +263,17 @@ export class CallingService {
       socket.close(1011, "internal_error");
     }
   }
+  private command(endpoint: Endpoint, body: Record<string, unknown>, relay: boolean) {
+    if (!this.sockets.has(endpoint.router_id)) throw new Fault(503, "router_offline");
+    const operation = this.store.command(endpoint, body);
+    const call = this.store.call(operation.call_id);
+    if (operation.action === "dial" && operation.status === "pending") this.refreshICE(call);
+    this.send(endpoint.id, { type: "accepted", requestId: operation.id, callId: operation.call_id });
+    this.broadcast(call);
+    if (operation.status !== "pending") this.operationResult(operation);
+    else if (relay) this.send(endpoint.router_id, JSON.parse(operation.payload));
+    return operation;
+  }
   private operationResult(operation: Operation) {
     const call = this.store.call(operation.call_id);
     this.send(call.phone_id, { type: "result", requestId: operation.id, callId: call.id,
@@ -264,6 +306,7 @@ export class CallingService {
     } finally { this.pushing.delete(callId); }
   }
   async tick() {
+    const sms = this.sms.tick().catch(() => console.error("sms_notification_maintenance_failed"));
     const expired = this.store.all<Operation>("SELECT * FROM operations WHERE status='pending' AND expires_at<=?", this.store.now());
     for (const operation of expired) {
       this.store.transaction(() => {
@@ -280,5 +323,6 @@ export class CallingService {
     await Promise.allSettled(pending.map(row => this.push(row.call_id))).then(results => {
       for (const result of results) if (result.status === "rejected") console.error("push_maintenance_failed");
     });
+    await sms;
   }
 }

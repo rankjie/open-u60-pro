@@ -18,6 +18,8 @@ xcrun --sdk iphonesimulator swiftc -swift-version 5 -parse-as-library -sdk "$ope
     -target "$openu60_arch-apple-ios17.0-simulator" -F "$openu60_framework" \
     -Xlinker -rpath -Xlinker "$openu60_framework" -framework WebRTC \
     "$openu60_root/mobile/ios/OpenU60/Core/RemoteCalling/CallingCredentials.swift" \
+    "$openu60_root/mobile/ios/OpenU60/Core/Networking/AgentTransport.swift" \
+    "$openu60_root/mobile/ios/OpenU60/Core/Networking/AgentError.swift" \
     "$openu60_root/mobile/ios/OpenU60/Core/RemoteCalling/CallingMedia.swift" \
     "$openu60_root/mobile/ios/OpenU60/Core/RemoteCalling/RemoteCallingManager.swift" \
     "$openu60_root/mobile/ios/Tests/CallingTestDoubles.swift" \

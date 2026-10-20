@@ -106,7 +106,7 @@ final class SMSViewModel {
                 "id": "-1",
                 "encode_type": encodeType
             ])
-            logger.info("SMS sent to \(number)")
+            logger.info("SMS send confirmed")
             isSending = false
             await refresh()
             return true

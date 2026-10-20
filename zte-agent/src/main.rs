@@ -15,6 +15,7 @@ mod event_bus;
 mod handlers;
 mod lan_test;
 mod live_activity;
+mod management;
 mod modem_ext;
 mod network_ext;
 mod oos_policy;
@@ -27,6 +28,7 @@ mod sim;
 mod sim_identity;
 mod sms;
 mod sms_forward;
+mod sms_notifications;
 mod speedtest;
 mod stk;
 mod system;
@@ -69,6 +71,7 @@ fn main() {
     // Event bus: single `ubus listen` process dispatches to subscribers
     let event_bus = Arc::new(EventBus::new());
     let sms_rx = event_bus.subscribe("zwrt_wms_status_event");
+    let sms_notification_rx = event_bus.subscribe("zwrt_wms_status_event");
     let charger_rx = event_bus.subscribe("BSP_CHARGER_EVENT");
     let service_rx = event_bus.subscribe("zwrt_servicestatus");
     let wan_status_rx = event_bus.subscribe("router_event_wan_connect_status");
@@ -109,6 +112,7 @@ fn main() {
 
     state.live_activity.start(Arc::clone(&state), apns_events);
     state.remote_calling.start(Arc::clone(&state));
+    state.sms_notifications.start(sms_notification_rx);
     state.doh.auto_start();
     state.scheduler.start(Arc::clone(&state));
     state

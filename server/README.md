@@ -81,8 +81,11 @@ Pairing another phone revokes the old phone; re-pairing during a call is refused
 
 ## Protocol and failure behavior
 
-- Router administrative APIs never pass through the service. WebSocket
-  credentials live in the Authorization header, not URL query parameters.
+- Paired phones may relay bounded JSON management requests through the router's
+  authenticated socket. A device journal protects writes across LAN/relay
+  switching. Authentication, enrollment, Live Activity configuration and raw LAN
+  throughput endpoints stay local. WebSocket credentials use the Authorization
+  header, never URL query parameters.
 - Calls and commands have stable UUIDs. A command is persisted before delivery;
   the device writes its execution journal before touching the modem. A repeated
   command replays its result or reports an unknown outcome, never redials.
@@ -96,6 +99,11 @@ Pairing another phone revokes the old phone; re-pairing during a call is refused
   device tokens are disabled. A CallKit UUID deduplicates retry delivery.
 - Provider rejection, modem errors, media timeouts, expired commands, revoked
   pairing, and unsupported modem state are explicit outcomes.
+- SMS notifications use the ordinary app APNs topic, separate from `.voip`.
+  Pending outboxes contain the full sender/text for retry; terminal outcomes clear
+  that payload. Oversized messages split below Apple's 4,096-byte limit, preserving
+  Unicode and all text. Revoked pairings and invalid tokens stop delivery.
+  See [Apple's notification request contract](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns).
 - HTTP payloads, SDP, ICE candidates, push payloads, and credentials are not
   application log fields. The private database contains call metadata and push
   tokens; back it up and restrict access as a credential-bearing service store.

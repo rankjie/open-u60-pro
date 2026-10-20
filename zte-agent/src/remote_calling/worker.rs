@@ -57,12 +57,6 @@ impl Drop for Execution {
         self.deadline.abort();
     }
 }
-fn unix_now() -> Result<u64, &'static str> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|value| value.as_secs())
-        .map_err(|_| "invalid_clock")
-}
 
 pub struct Worker {
     state: Arc<AppState>,
@@ -85,12 +79,14 @@ pub struct Worker {
     admitted: HashMap<Uuid, Instant>,
     work: Option<oneshot::Receiver<Work>>,
     next_poll: Instant,
+    next_sms: Instant,
     call_started: Instant,
     cleanup: Option<&'static str>,
     modem_seen: bool,
     modem_active: bool,
     physical_id: Option<i64>,
     physical_direction: Option<String>,
+    local_commands: mpsc::Receiver<super::LocalCommand>,
 }
 impl Worker {
     pub fn new(
@@ -101,6 +97,8 @@ impl Worker {
         let journal = Journal::open(std::path::Path::new(super::JOURNAL))?;
         let (signals, outgoing) = mpsc::channel(64);
         let (failures, failure_rx) = mpsc::channel(8);
+        let (local_sender, local_commands) = mpsc::channel(8);
+        *manager.local_commands.lock().unwrap() = Some(local_sender);
         Ok(Self {
             state,
             manager,
@@ -122,12 +120,14 @@ impl Worker {
             admitted: HashMap::new(),
             work: None,
             next_poll: Instant::now(),
+            next_sms: Instant::now(),
             call_started: Instant::now(),
             cleanup: None,
             modem_seen: false,
             modem_active: false,
             physical_id: None,
             physical_direction: None,
+            local_commands,
         })
     }
     pub async fn run(&mut self) -> Result<(), String> {
@@ -139,7 +139,7 @@ impl Worker {
         // hang up an unidentified physical call when recovering an old session.
         if self.journal.call().is_some() {
             self.journal
-                .event("ended", false, Some("agent_restarted"))?;
+                .event("ended", false, Some("agent_restarted"), self.manager.unix_time()?)?;
             self.journal.finish()?;
         }
         let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -149,6 +149,17 @@ impl Worker {
                 message = incoming.recv() => match message.ok_or("network_worker_stopped")? {
                     Network::Offline(error) => { self.connected = false; self.status(Some(error)); },
                     Network::Message(value) => self.message(value).await?,
+                },
+                local = self.local_commands.recv() => {
+                    let (command, ack) = local.ok_or("local_command_channel_closed")?;
+                    if !self.connected {
+                        let _ = ack.send(Err("calling_server_disconnected".into()));
+                    } else {
+                        let value = serde_json::to_value(command).map_err(|_| "invalid_local_command")?;
+                        let outcome = self.message(value).await;
+                        let _ = ack.send(outcome.clone());
+                        outcome?;
+                    }
                 },
                 error = self.failure_rx.recv() => {
                     let (generation, error) = error.ok_or("media_worker_stopped")?;
@@ -180,7 +191,7 @@ impl Worker {
         media: bool,
         reason: Option<&str>,
     ) -> Result<(), String> {
-        let event = self.journal.event(state, media, reason)?;
+        let event = self.journal.event(state, media, reason, self.manager.unix_time()?)?;
         self.send(event).await?;
         self.status(reason);
         Ok(())
@@ -212,6 +223,23 @@ impl Worker {
     }
     async fn message(&mut self, value: Value) -> Result<(), String> {
         match value["type"].as_str().ok_or("invalid_server_message")? {
+            "agent_request" => {
+                let request_id = value["requestId"].as_str().ok_or("invalid_management_id")?.to_string();
+                Uuid::parse_str(&request_id).map_err(|_| "invalid_management_id")?;
+                let bytes = serde_json::to_vec(&value).map_err(|_| "invalid_management_request")?;
+                if bytes.len() > 98304 { return Err("management_request_too_large".into()); }
+                let state = self.state.clone(); let signals = self.signals.clone();
+                tokio::spawn(async move {
+                    let outcome = tokio::task::spawn_blocking(move || state.management.handle(&bytes, &state)).await;
+                    let (status, body) = match outcome {
+                        Ok(outcome) => outcome,
+                        Err(_) => { eprintln!("[management] request worker failed"); (500, json!({"ok":false,"error":"agent_execution_unknown"})) },
+                    };
+                    use base64::Engine;
+                    let body = serde_json::to_vec(&body).expect("JSON Value serialization");
+                    let _ = signals.send(json!({"type":"agent_result","requestId":request_id,"status":status,"body":base64::engine::general_purpose::STANDARD.encode(body)})).await;
+                });
+            }
             "hello" => {
                 if value["protocol"] != 1
                     || value["role"] != "router"
@@ -220,6 +248,7 @@ impl Worker {
                 {
                     return Err("invalid_server_identity".into());
                 }
+                self.manager.observe_time(value["serverTime"].as_u64().ok_or("invalid_server_clock")?)?;
                 self.ice = serde_json::from_value(value["iceServers"].clone())
                     .map_err(|_| "invalid_ice_servers")?;
                 self.connected = true;
@@ -302,6 +331,10 @@ impl Worker {
             "event_ack" => self
                 .journal
                 .acknowledge(value["eventId"].as_str().ok_or("invalid_event_ack")?)?,
+            "sms_ack" => {
+                let id = value["eventId"].as_str().and_then(|id| Uuid::parse_str(id).ok()).ok_or("invalid_sms_ack")?;
+                if let Err(code) = self.state.sms_notifications.acknowledge(id) { eprintln!("[sms-notifications] {code}"); }
+            }
             "call" => {
                 if value["state"] == "ended" {
                     let id =
@@ -349,6 +382,13 @@ impl Worker {
         Ok(())
     }
     async fn tick(&mut self) -> Result<(), String> {
+        if self.connected && self.paired && Instant::now() >= self.next_sms {
+            self.next_sms = Instant::now() + Duration::from_secs(5);
+            match self.state.sms_notifications.pending() {
+                Ok(events) => for event in events { self.send(event.message()).await?; },
+                Err(code) => { eprintln!("[sms-notifications] {code}"); self.next_sms = Instant::now() + Duration::from_secs(60); },
+            }
+        }
         if self.cleanup.is_some() {
             if let Some(execution) = &self.execution {
                 execution.cancel();
@@ -537,7 +577,7 @@ impl Worker {
             .admitted
             .get(&command.request_id)
             .ok_or("command_admission_missing")?;
-        remaining_window(command, admitted, Instant::now(), unix_now()?)
+        remaining_window(command, admitted, Instant::now(), self.manager.unix_time()?)
     }
     fn execute(&mut self, command: Command) -> Result<(), &'static str> {
         let remaining = self.remaining(&command)?;
@@ -700,6 +740,7 @@ impl Worker {
         Ok(())
     }
     pub async fn shutdown(&mut self) -> Result<(), String> {
+        *self.manager.local_commands.lock().unwrap() = None;
         if let Some(execution) = &self.execution {
             execution.cancel();
         }
@@ -922,7 +963,7 @@ async fn connection(
             let endpoint = super::url(&config, "v1/socket").map_err(|_| "invalid_server_url")?.replacen("https://", "wss://", 1);
             let mut request = endpoint.into_client_request().map_err(|_| "invalid_websocket_request")?;
             request.headers_mut().insert("Authorization", format!("Bearer {}", config.device_token).parse().map_err(|_| "invalid_device_token")?);
-            let mut limits = WebSocketConfig::default(); limits.max_message_size = Some(65536); limits.max_frame_size = Some(65536);
+            let mut limits = WebSocketConfig::default(); limits.max_message_size = Some(98304); limits.max_frame_size = Some(98304);
             let connect = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async_with_config(request, Some(limits), false)); tokio::pin!(connect);
             let (socket, _) = loop { tokio::select! { result = &mut connect => break result.map_err(|_| "signaling_timeout")?.map_err(|_| "signaling_connect_failed")?, value = outgoing.recv() => { if value.is_none() { return Ok::<(), &'static str>(()); } } } };
             let (mut write, mut read) = socket.split(); delay = 1;

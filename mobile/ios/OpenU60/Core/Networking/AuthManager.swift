@@ -18,7 +18,8 @@ final class AuthManager {
         client.token ?? ""
     }
 
-    var isAuthenticated: Bool { state == .authenticated }
+    @ObservationIgnored var hasRemoteAccess: (@MainActor () -> Bool)?
+    var isAuthenticated: Bool { state == .authenticated || hasRemoteAccess?() == true }
 
     /// How long a failed silent re-auth suppresses the next attempt. Without it an unreachable
     /// router turns every poll tick into another login request.

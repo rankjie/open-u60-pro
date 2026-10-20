@@ -27,7 +27,16 @@ export class Store {
         status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL,
         last_error TEXT);
       CREATE TABLE IF NOT EXISTS router_events(router_id TEXT NOT NULL, event_id TEXT NOT NULL,
-        PRIMARY KEY(router_id,event_id));`);
+        PRIMARY KEY(router_id,event_id));
+      CREATE TABLE IF NOT EXISTS agent_operations(id TEXT NOT NULL, router_id TEXT NOT NULL,
+        phone_id TEXT NOT NULL, fingerprint TEXT NOT NULL, status TEXT NOT NULL,
+        expires_at INTEGER NOT NULL, PRIMARY KEY(router_id,id));
+      CREATE TABLE IF NOT EXISTS notification_tokens(endpoint_id TEXT PRIMARY KEY REFERENCES endpoints(id),
+        token TEXT NOT NULL, environment TEXT NOT NULL, disabled INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS sms_events(router_id TEXT NOT NULL, event_id TEXT NOT NULL,
+        phone_id TEXT NOT NULL REFERENCES endpoints(id), message_id TEXT NOT NULL, fingerprint TEXT NOT NULL, payload TEXT, received_at INTEGER NOT NULL,
+        status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL,
+        last_error TEXT, PRIMARY KEY(router_id,event_id));`);
   }
   one<T>(sql: string, ...params: SQLQueryBindings[]): T | undefined {
     return (this.db.query(sql).get(...params) as T | null) ?? undefined;
@@ -99,6 +108,7 @@ export class Store {
       if (!pairing || pairing.used_by || pairing.expires_at <= this.now()) throw new Fault(403, "invalid_pairing_code");
       if (this.currentCall(pairing.router_id)) throw new Fault(409, "call_in_progress");
       this.run("UPDATE phones SET push_token=NULL,push_disabled=1 WHERE endpoint_id IN (SELECT id FROM endpoints WHERE router_id=? AND role='phone')", pairing.router_id);
+      this.run("DELETE FROM notification_tokens WHERE endpoint_id IN (SELECT id FROM endpoints WHERE router_id=?)", pairing.router_id);
       this.run("UPDATE endpoints SET revoked=1 WHERE router_id=? AND role='phone'", pairing.router_id);
       const id = randomUUID();
       this.run("INSERT INTO endpoints(id,role,router_id,token_hash,request_id) VALUES(?,'phone',?,?,?)", id, pairing.router_id, hash(phoneToken), requestId);
@@ -229,6 +239,7 @@ export class Store {
     this.transaction(() => {
       this.run("UPDATE phones SET push_token=NULL,push_disabled=1 WHERE endpoint_id IN (SELECT id FROM endpoints WHERE router_id=? AND role='phone')", router.id);
       this.run("UPDATE endpoints SET revoked=1 WHERE router_id=? AND role='phone'", router.id);
+      this.run("DELETE FROM notification_tokens WHERE endpoint_id IN (SELECT id FROM endpoints WHERE router_id=?)", router.id);
       this.run("DELETE FROM pairings WHERE router_id=?", router.id);
     });
   }

@@ -54,6 +54,19 @@ final class RemoteCallingManager: NSObject {
     @ObservationIgnored private let http = CallingHTTPClient()
     @ObservationIgnored private var registry: PKPushRegistry?
     @ObservationIgnored private var credentials: CallingCredentials?
+    @ObservationIgnored var localCommandDelivery: (@MainActor ([String:Any], UUID) async throws -> Bool)?
+    @ObservationIgnored var commandAdmission: (@MainActor ([String:Any], String) async throws -> [String:Any])?
+    @ObservationIgnored var onSMSReceived: (@MainActor (UUID, UUID, String?) -> Void)?
+    @ObservationIgnored private var serverClock: (TimeInterval, ContinuousClock.Instant)?
+    var managementAccess: AgentRelayAccess? {
+        guard isPaired, let credentials, let routerID = credentials.routerId else { return nil }
+        let now: TimeInterval
+        if let (time, observed) = serverClock {
+            let elapsed = observed.duration(to: .now).components
+            now = time + Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+        } else { now = Date().timeIntervalSince1970 }
+        return AgentRelayAccess(server: credentials.serverURL, token: credentials.phoneToken, routerID: routerID, serverTime: now)
+    }
     @ObservationIgnored private var socket: (any CallingSocket)?
     @ObservationIgnored private var session: URLSession
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
@@ -316,9 +329,44 @@ final class RemoteCallingManager: NSObject {
                 if action != "hangup", self.call?.callId != callId || self.ended.contains(callId) {
                     self.complete(id, outcome: .failure(CallingError.server("call_ended"))); return
                 }
-                do { try await self.send(body) } catch { self.complete(id, outcome: .failure(error)) }
+                do { try await self.deliverCommand(body, id: id) } catch { self.complete(id, outcome: .failure(error)) }
             }
         }
+    }
+    private func deliverCommand(_ body: [String:Any], id: UUID) async throws {
+        guard let localCommandDelivery, let routerID = credentials?.routerId else { try await send(body); return }
+        let admission: [String:Any]
+        do { admission = try await admit(body, delivery: "local") }
+        catch let error as URLError where error.code != .cancelled {
+            // A lost admission response can safely use WSS with the same operation ID.
+            try await send(body); return
+        }
+        guard pending[id] != nil else { return }
+        guard let command = admission["command"] as? [String:Any],
+              command["requestId"] as? String == body["requestId"] as? String,
+              command["callId"] as? String == body["callId"] as? String,
+              command["action"] as? String == body["action"] as? String,
+              command["number"] as? String == body["number"] as? String,
+              command["digits"] as? String == body["digits"] as? String,
+              command["type"] as? String == "command", command["expiresAt"] as? Int != nil,
+              let status = admission["status"] as? String else { throw CallingError.invalidResponse }
+        if status != "pending" {
+            guard status == "done" || status == "expired", let ok = admission["ok"] as? Bool else { throw CallingError.invalidResponse }
+            if ok { complete(id, outcome: .success(())) }
+            else { complete(id, outcome: .failure(CallingError.server(try Self.errorCode(admission["error"])))) }
+            return
+        }
+        if try await localCommandDelivery(command, routerID) { return }
+        guard pending[id] != nil else { return }
+        _ = try await admit(body, delivery: "relay")
+    }
+    private func admit(_ body: [String:Any], delivery: String) async throws -> [String:Any] {
+        if let commandAdmission { return try await commandAdmission(body, delivery) }
+        guard let credentials else { throw CallingError.disconnected }
+        var request = body
+        request["delivery"] = delivery
+        return try await http.request("v1/call-operation", server: credentials.serverURL, token: credentials.phoneToken,
+                                      method: "POST", body: request)
     }
     private func complete(_ id: UUID, outcome: Result<Void, Error>) {
         deadlines.removeValue(forKey: id)?.cancel()
@@ -327,6 +375,11 @@ final class RemoteCallingManager: NSObject {
     private func receive(_ value: [String: Any]) async throws {
         guard let type = value["type"] as? String else { throw CallingError.invalidResponse }
         switch type {
+        case "sms_received":
+            guard let event = value["eventId"] as? String, let eventID = UUID(uuidString:event),
+                  let router = value["routerId"] as? String, let routerID = UUID(uuidString:router),
+                  routerID == credentials?.routerId else { throw CallingError.invalidResponse }
+            onSMSReceived?(eventID, routerID, value["messageId"] as? String)
         case "hello":
             guard value["protocol"] as? Int == 1, value["role"] as? String == "phone",
                   let endpoint = value["endpointId"] as? String, UUID(uuidString: endpoint) == credentials?.endpointId,
@@ -335,6 +388,10 @@ final class RemoteCallingManager: NSObject {
                   let calls = value["calls"] as? [[String: Any]],
                   let servers = value["iceServers"] as? [[String: Any]] else { throw CallingError.invalidResponse }
             iceServers = try JSONDecoder().decode([CallingICEServer].self, from: JSONSerialization.data(withJSONObject: servers))
+            if let time = value["serverTime"] as? Double {
+                guard (946684800..<4102444800).contains(time) else { throw CallingError.invalidResponse }
+                serverClock = (time, .now)
+            }
             pushConfigured = push
             isConnected = true
             routerOnline = online

@@ -110,7 +110,18 @@ fn handle_request(mut request: Request, state: &AppState) {
     // Strip query string for routing
     let path = url.split('?').next().unwrap_or(&url);
 
-    // Auth check — skip for login endpoint
+    // Discovery contains only public identity/time, never a credential or configuration.
+    if method == Method::Get && path == "/api/identity" {
+        let status = state.remote_calling.status();
+        let data = &status["data"];
+        if status["ok"] != true {
+            respond(request, 503, status);
+        } else {
+            respond(request, 200, json!({"ok":true,"data":{"protocol":1,
+                "routerId":data["routerId"],"agentTime":data["agentTime"]}}));
+        }
+        return;
+    }
     let needs_auth = path != "/api/auth/login";
     if needs_auth {
         let authorized = request
@@ -146,16 +157,19 @@ fn handle_request(mut request: Request, state: &AppState) {
         _ => {}
     }
 
-    if (path.starts_with("/api/live-activity") || path.starts_with("/api/remote-calling")) && !state.auth.has_password() {
+    if (path.starts_with("/api/live-activity") || path.starts_with("/api/remote-calling") || path.starts_with("/api/calling") || path == "/api/management") && !state.auth.has_password() {
         respond(request, 403, json!({"ok": false, "error": "agent password required"}));
         return;
     }
 
     // Read body
     let mut body = Vec::new();
-    if path.starts_with("/api/live-activity") || path.starts_with("/api/remote-calling") {
-        let limit = if path.starts_with("/api/live-activity") { 4096 } else { 8192 };
-        let _ = std::io::Read::read_to_end(&mut request.as_reader().take((limit + 1) as u64), &mut body);
+    if path.starts_with("/api/live-activity") || path.starts_with("/api/remote-calling") || path.starts_with("/api/calling") || path == "/api/management" {
+        let limit = if path == "/api/management" { 98304 } else if path.starts_with("/api/live-activity") { 4096 } else { 8192 };
+        if std::io::Read::read_to_end(&mut request.as_reader().take((limit + 1) as u64), &mut body).is_err() {
+            respond(request, 400, json!({"ok":false,"error":"incomplete_request_body"}));
+            return;
+        }
         if body.len() > limit {
             respond(request, 413, json!({"ok": false, "error": "body too large"}));
             return;
@@ -164,7 +178,11 @@ fn handle_request(mut request: Request, state: &AppState) {
         let _ = std::io::Read::read_to_end(&mut request.as_reader(), &mut body);
     }
 
-    let (status, body_json) = route(&method, path, state, &body);
+    let (status, body_json) = if method == Method::Post && path == "/api/management" {
+        state.management.handle(&body, state)
+    } else if method == Method::Post && path == "/api/calling/command" {
+        state.remote_calling.local_command(&body)
+    } else { route(&method, path, state, &body) };
     respond(request, status, body_json);
 }
 
@@ -182,6 +200,7 @@ fn parse_query_usize(url: &str, key: &str) -> Option<usize> {
 pub fn route(method: &Method, path: &str, state: &AppState, body: &[u8]) -> (u16, Value) {
     match (method, path) {
         (&Method::Get, "/api/remote-calling/status") => (200, state.remote_calling.status()),
+        (&Method::Get, "/api/sms/notifications/status") => (200, state.sms_notifications.status()),
         (&Method::Post, "/api/remote-calling/configure") => crate::remote_calling::configure(state, body),
         (&Method::Post, "/api/remote-calling/pairing") => crate::remote_calling::pairing(state),
         (&Method::Post, "/api/remote-calling/disable") => crate::remote_calling::disable(state),

@@ -197,6 +197,7 @@ impl Journal {
         state: &str,
         media: bool,
         reason: Option<&str>,
+        observed_at: u64,
     ) -> Result<Value, String> {
         let call = self.data.call.as_mut().ok_or("no_active_call")?;
         call.sequence += 1;
@@ -204,7 +205,7 @@ impl Journal {
         call.media_ready = media;
         let mut event = json!({"type":"event", "eventId":Uuid::new_v4(), "callId":call.id,
             "sequence":call.sequence, "state":state,"mediaReady":media,
-            "observedAt":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "invalid_clock")?.as_secs()});
+            "observedAt":observed_at});
         if let Some(number) = &call.number {
             if !number.is_empty() {
                 event["number"] = json!(number);
@@ -312,7 +313,7 @@ mod tests {
         journal
             .start(command.call_id, "ringing", command.number)
             .unwrap();
-        let event = journal.event("ringing", false, None).unwrap();
+        let event = journal.event("ringing", false, None, 1800000000).unwrap();
         drop(journal);
         let mut restored = Journal::open(&file).unwrap();
         assert_eq!(restored.events(), vec![event.clone()]);

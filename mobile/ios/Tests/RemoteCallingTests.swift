@@ -6,6 +6,33 @@ import WebRTC
     @MainActor static func main() async throws {
         var failures: [String] = []
         func expect(_ condition: Bool, _ message: String) { if !condition { failures.append(message) } }
+        for localAccepted in [true, false] {
+            let f = Fixture(); let id = UUID(); try await f.start(id)
+            var admissions: [(UUID, String)] = []
+            var delivered: UUID?
+            f.manager.commandAdmission = { body, delivery in
+                let operation = UUID(uuidString: body["requestId"] as! String)!
+                admissions.append((operation, delivery))
+                var canonical = body; canonical["expiresAt"] = 1_800_000_020
+                if delivery == "relay" {
+                    f.socket.emit(["type":"result","requestId":operation.uuidString,"callId":id.uuidString,"ok":true])
+                }
+                return ["command":canonical,"status":"pending"]
+            }
+            f.manager.localCommandDelivery = { command, router in
+                expect(router == f.router, "local call control must target the paired router")
+                delivered = UUID(uuidString:command["requestId"] as! String)!
+                if localAccepted { f.socket.emit(["type":"result","requestId":delivered!.uuidString,"callId":id.uuidString,"ok":true]) }
+                return localAccepted
+            }
+            let action = TestDTMFAction(call:id,digits:"12#",type:.singleTone)
+            f.manager.provider(f.provider, perform:action)
+            try await wait { action.fulfilled }
+            expect(admissions.map(\.1) == (localAccepted ? ["local"] : ["local","relay"]), "call control must prefer LAN then relay an uncertain admission")
+            expect(admissions.allSatisfy { $0.0 == delivered }, "both routes must retain the canonical operation ID")
+            expect(!f.socket.messages.contains { $0["action"] as? String == "dtmf" }, "a confirmed local command must not be sent through another execution path")
+            f.manager.commandAdmission = nil; f.manager.localCommandDelivery = nil; f.manager.disconnect()
+        }
         do {
             let f = Fixture(); let id = UUID(); try await f.start(id)
             f.socket.emit(["type":"ice_servers", "iceServers":[["urls":["turn:synthetic.invalid:3478"]]]])

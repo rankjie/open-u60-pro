@@ -12,6 +12,8 @@ use crate::system::{self, CpuTracker, ProcessTracker, SpeedTracker};
 use crate::ubus;
 
 pub struct AppState {
+    pub management: crate::management::Management,
+    pub sms_notifications: Arc<crate::sms_notifications::SMSNotifications>,
     pub remote_calling: Arc<crate::remote_calling::RemoteCalling>,
     pub live_activity: Arc<crate::live_activity::LiveActivity>,
     pub auth: AuthState,
@@ -43,6 +45,8 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
+            management: crate::management::Management::new(),
+            sms_notifications: Arc::new(crate::sms_notifications::SMSNotifications::new()),
             remote_calling: Arc::new(crate::remote_calling::RemoteCalling::new()),
             live_activity: Arc::new(crate::live_activity::LiveActivity::new()),
             auth: AuthState::new(),
