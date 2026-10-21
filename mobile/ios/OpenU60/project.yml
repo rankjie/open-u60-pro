@@ -41,8 +41,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.beexio.openu60
         INFOPLIST_FILE: Resources/Info.plist
         GENERATE_INFOPLIST_FILE: false
-        CODE_SIGN_STYLE: Manual
-        PROVISIONING_PROFILE_SPECIFIER: OpenU60 Beexio Push Development
+        CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 

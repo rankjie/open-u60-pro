@@ -42,7 +42,7 @@
    hello supplies a monotonic server-time anchor, also
    exposed as `agentTime` for local request expiry. Journal history uses admission
    order so a clock correction cannot forget a completed effect.
-3. Implemented and deployed, awaiting physical APNs verification: remote SMS
+3. Implemented, deployed and physically verified on L16: remote SMS
    uses the management transport. A firmware event subscription plus bounded
    database reconciliation identifies new received SMS, seeds historical messages
    without notifying, and persists pending events before sending. Notifications
@@ -51,7 +51,9 @@
    registers its ordinary APNs token separately from PushKit and opens Messages
    on a notification tap. Settings includes a durable synthetic SMS test that
    follows the same device/server outbox and ordinary APNs path without changing
-   the SMS database. Actual carrier receive/send awaits the SIM.
+   the SMS database. Real ordinary APNs delivered the complete synthetic text
+   while the App was backgrounded; tapping a notification selected Messages in
+   the complete App. Actual carrier receive/send awaits the SIM.
 4. Installed and observed: four tabs, grouped Settings, and a compact Home USB
    charging switch. Turning it on detached router USB/ADB; turning it off restored
    ADB within nine seconds using the App switch, with the same
@@ -65,24 +67,34 @@
 
 ## Current deployment and acceptance boundary
 
-The server is running the management/SMS implementation on nl1. Its configured
-VoIP push, ordinary SMS push and TURN health checks pass. The updated agent is
-installed on the real U60; the complete Beexio-signed App was installed before
-the user stopped phone testing. No phone launches, installs, UI operations or
-test pushes are permitted until the user resumes that work.
+The server runs the management/SMS implementation on nl1 and the updated agent
+is installed on the real U60. On 2026-10-21 the user selected L16, an iPhone 16 Pro
+running iOS 26.4.2, for the remaining acceptance. Its complete App uses the Beexio
+team and the dedicated App ID's development push profile, managed by Xcode.
 
-Real-router enrollment and phone pairing are unfinished. The first setup
-attempt exposed a rejected `serverURL` field: the Rust request used serde's
-`serverUrl` spelling. An explicit field name now matches the shipped iOS caller,
-with a failing-before/passing-after deserialization regression. That fixed agent
-is installed; setup was not retried after the user's phone hold. The final source
-uses the ordinary setup and "Pair with this router" UI, without the temporary
-operator launch hook. A fresh invitation will be required when setup resumes.
+The real U60 was enrolled and L16 paired through the normal Calls screen using a
+private transferred invitation. The App showed the service connected and the
+router online. The imported invitation was consumed through the normal client;
+no test shell or automatic operator launch hook is installed.
 
-The no-SIM router's temporary encrypted server route, hosts entry, port redirect,
-ADB forwarding and SSH tunnel were removed. Its corrected clock remains. Full
-SMS notification delivery to the phone, notification-tap navigation and the real
-paired device's LAN/off-LAN transition are still pending physical acceptance.
+The phone moved from `ZZZZTE_5G` to its original `L_5G` network, where Home
+automatically displayed "Via server" and fresh router data. Returning to ZTE
+Wi-Fi restored "Connected" and fresh data without editing the gateway or
+re-pairing. A test-notification write also succeeded over the server relay.
+
+For the background SMS check, one synthetic event was durably queued on the
+offline router. After the App was backgrounded and the phone returned to its
+internet-connected Wi-Fi, the router's test uplink was restored. A real Apple
+notification arrived with the sender and all English, Chinese, emoji and test
+code text. A separate notification tap opened Messages with the SMS tab selected.
+The synthetic message is not inserted into the real SMS database.
+
+The no-SIM router borrowed an encrypted route through the Mac for these checks;
+TLS validation remained enabled. The temporary hosts entry, port rules, TCP
+forwarder, ADB forwarding and SSH tunnel were removed. Pairing remains installed.
+L16 returned to its original Wi-Fi and its original two-minute auto-lock setting;
+the owned automation service was stopped. Independent remote operation still
+requires the U60 to have its own working uplink.
 
 Physical SIM calling, carrier registration, vendor PCM ABI/direction and audible
 cellular speech are deferred until the SIM arrives. Synthetic evidence does not

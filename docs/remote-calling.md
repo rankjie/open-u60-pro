@@ -153,9 +153,23 @@ and remote pairing files are preserved. Legacy adbd exit status is checked with
 a remote completion marker.
 
 Generate the Xcode project from `mobile/ios/OpenU60/project.yml`, then build the
-OpenU60 scheme. The configured Beexio profile and its extension signing must be
-available to produce a device-signed app. Do not replace private profile or key
-files through source-control tooling.
+OpenU60 scheme with the Beexio team selected. Xcode manages the development
+profiles for the dedicated `com.beexio.openu60` App ID and its extension, including
+newly registered test devices. The profile must retain the development APNs
+entitlement. Do not replace private profile or key files through source-control
+tooling.
+
+For operator-assisted setup, the normal server admin client can create a
+single-use invitation file. Transfer that opaque file into the app's private
+Documents directory as `openu60-router-invitation.private`, then open Calls and
+choose "Use transferred server invitation". This visible action uses the same
+router configuration and phone-pairing methods as manual setup; it never runs
+automatically on launch. Only a bounded regular text file is accepted, and the
+app removes it after successful pairing. If router enrollment succeeded but
+phone pairing was interrupted, retry pairs the configured router without
+resubmitting the consumed invitation. Neither transfer nor diagnostics should
+print the invitation. The router and phone both need a working server route
+during this setup.
 
 ## Verification and remaining device checks
 
@@ -202,8 +216,14 @@ the production PushKit registry, CallKit provider, signaling and media manager.
 The real pairing Keychain is unchanged. The distributed app omits the verification
 build flag. Do not replace the app with a standalone test shell.
 
-After the SIM arrives, install the built agent and app, pair the real devices,
-and verify outgoing and incoming calls with a voice-capable SIM and carrier IMS
+The real U60 is enrolled and paired with L16. LAN-first management, remote reads
+and a test-notification write, complete background SMS APNs and notification-tap
+navigation passed on the complete App on 2026-10-21. The no-SIM test borrowed an
+encrypted uplink through the Mac; that temporary configuration has been removed.
+The router still needs its own working internet connection for independent
+remote access.
+
+After the SIM arrives, verify outgoing and incoming calls with a voice-capable SIM and carrier IMS
 registration. Check both audio directions, mute, speaker/Bluetooth routing, DTMF,
 lock-screen/background/terminated-app incoming calls, caller cancellation before
 answer, local and remote hangup, and recovery after losing signaling or internet.

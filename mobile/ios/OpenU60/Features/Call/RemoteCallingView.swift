@@ -10,6 +10,10 @@ struct RemoteCallingView: View {
     @State private var number = ""
     @State private var busy = false
     @State private var confirmForget = false
+    @State private var hasTransferredInvitation = false
+    private var transferredInvitation: URL {
+        URL.documentsDirectory.appending(path: "openu60-router-invitation.private")
+    }
 
     var body: some View {
         Form {
@@ -70,6 +74,21 @@ struct RemoteCallingView: View {
                         Button("Enable remote calling on this router") {
                             perform { try await manager.enableRouter(client: localClient, invitation: invitation, server: server); invitation = "" }
                         }.disabled(invitation.isEmpty)
+                        if hasTransferredInvitation {
+                            Button("Use transferred server invitation", systemImage: "doc.badge.arrow.up") {
+                                perform {
+                                    let status = try await localClient.getJSON("/api/remote-calling/status")
+                                    if status["enabled"] as? Bool == true, status["configured"] as? Bool == true {
+                                        try await manager.pairLocalRouter(client: localClient)
+                                    } else {
+                                        try await manager.enableRouter(client: localClient,
+                                            invitation: RouterInvitation.read(from: transferredInvitation), server: server)
+                                    }
+                                    try FileManager.default.removeItem(at: transferredInvitation)
+                                    hasTransferredInvitation = false
+                                }
+                            }
+                        }
                     } header: { Text("Set up your router") }
                     footer: { Text("Connect to your router once for setup. Use a one-time invitation from your calling server.") }
                 }
@@ -92,7 +111,11 @@ struct RemoteCallingView: View {
         .confirmationDialog("Forget this router's pairing?", isPresented: $confirmForget) {
             Button("Forget pairing", role: .destructive) { perform { try await manager.forgetPairing() } }
         }
-        .onAppear { if server.isEmpty { server = manager.serverAddress }; manager.foreground() }
+        .onAppear {
+            if server.isEmpty { server = manager.serverAddress }
+            hasTransferredInvitation = FileManager.default.fileExists(atPath: transferredInvitation.path)
+            manager.foreground()
+        }
     }
     private func perform(_ action: @escaping () async throws -> Void) {
         guard !busy else { return }
