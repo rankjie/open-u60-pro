@@ -64,6 +64,11 @@ and advanced tools. App connection, appearance/refresh, and About have their own
 pages. Common actions precede radio locks and other advanced settings. Tools that
 only displayed a placeholder are omitted. Existing working tools remain available.
 
+The server list also shows the paths to the selected server: its HTTPS address and the
+QUIC doors the service advertises (server README, "QUIC doors"), each with its measured
+latency. Automatic uses the first path that answers before each connection; a chosen path
+is used while it answers. Connection details name the path in use.
+
 Calls owns the dialer, in-call controls, and connection/pairing sheet. Its server
 row and Home's connection details lead to one shared server list with manual
 selection and address management. Empty Call recalls the selected U60's latest
