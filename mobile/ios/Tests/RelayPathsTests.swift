@@ -41,7 +41,10 @@ import Foundation
             }
         }, probe: { base, token in
             precondition(token == "phone-token")
-            return latency[base.absoluteString] ?? nil
+            // A probe takes as long as the path's latency, like a real one; failures time out.
+            let value = latency[base.absoluteString] ?? nil
+            try? await Task.sleep(for: .milliseconds(Int((value ?? 0.3) * 1000)))
+            return value
         })
 
         // Automatic: the fastest answering path.
@@ -49,6 +52,9 @@ import Foundation
         precondition(paths.current == hangzhou.address && base.absoluteString == "http://127.0.0.1:5001")
         precondition(paths.options.map(\.id) == [RelayPaths.direct, hangzhou.address, netherlands.address, broken.address])
         precondition(paths.options.last?.reachable == false)
+        // Late probes still fill in the list after the choice.
+        try? await Task.sleep(for: .milliseconds(400))
+        precondition(paths.options.first { $0.id == netherlands.address }?.latency == 0.090)
         // Tunnels are reused across selections.
         _ = await paths.select(server: server, token: "phone-token", doors: [hangzhou, netherlands], preference: nil)
         precondition(FakeTunnel.started.filter { $0 == hangzhou.address }.count == 1)

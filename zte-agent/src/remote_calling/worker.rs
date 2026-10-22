@@ -443,6 +443,7 @@ impl Worker {
             }
             "error" => {
                 let code = value["error"].as_str().ok_or("invalid_server_error")?;
+                eprintln!("[remote-calling] server rejected {}: {code}", value["requestId"].as_str().unwrap_or("message"));
                 if code != "peer_offline" && code != "call_ended" {
                     self.status(Some("calling_server_rejected"));
                 }

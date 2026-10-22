@@ -112,7 +112,8 @@ private struct RelayPathsSection: View {
             ForEach(manager.paths.options) { option in
                 row(id: option.id, title: option.label,
                     detail: option.id == RelayPaths.direct ? "HTTPS" : "QUIC door",
-                    latency: option.reachable ? option.latency : nil, unreachable: !option.reachable)
+                    latency: option.reachable == true ? option.latency : nil, unreachable: option.reachable == false,
+                    measuring: option.reachable == nil)
             }
             if let error { Text(error).foregroundStyle(.red) }
         } header: {
@@ -127,7 +128,8 @@ private struct RelayPathsSection: View {
         return "Using \(current?.label ?? "Direct")"
     }
 
-    private func row(id: String?, title: String, detail: String, latency: TimeInterval?, unreachable: Bool = false) -> some View {
+    private func row(id: String?, title: String, detail: String, latency: TimeInterval?, unreachable: Bool = false,
+                     measuring: Bool = false) -> some View {
         Button {
             do { try manager.choosePath(id); error = nil } catch { self.error = error.localizedDescription }
         } label: {
@@ -137,7 +139,9 @@ private struct RelayPathsSection: View {
                     Text(detail).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
-                if unreachable {
+                if measuring {
+                    ProgressView().controlSize(.small)
+                } else if unreachable {
                     Text("Unreachable").font(.caption).foregroundStyle(.red)
                 } else if let latency {
                     Text("\(Int((latency * 1000).rounded())) ms").font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)

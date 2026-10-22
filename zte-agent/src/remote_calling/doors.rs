@@ -76,12 +76,16 @@ impl Doors {
                 candidates.push(Route { base: format!("http://{local}"), via: address.clone() });
             }
         }
-        let probes = candidates.into_iter().map(|route| async {
+        // The first path to answer is the fastest; a dead door costs nothing once one answers.
+        let mut probes: futures_util::stream::FuturesUnordered<_> = candidates.into_iter().map(|route| async {
             let elapsed = probe(&route, &config.device_token).await;
             (route, elapsed)
-        });
-        let results = futures_util::future::join_all(probes).await;
-        let chosen = choose(&results).unwrap_or_else(|| Route::direct(config));
+        }).collect();
+        let mut chosen = None;
+        while let Some((route, elapsed)) = futures_util::StreamExt::next(&mut probes).await {
+            if elapsed.is_some() { chosen = Some(route); break; }
+        }
+        let chosen = chosen.unwrap_or_else(|| Route::direct(config));
         if chosen.via != "direct" {
             eprintln!("[doors] using {}", chosen.via);
         }
@@ -97,35 +101,58 @@ async fn probe(route: &Route, token: &str) -> Option<Duration> {
     response.status().is_success().then(|| started.elapsed())
 }
 
-/// The fastest path that answered. Ties keep the earlier candidate, so direct wins a tie.
-fn choose(results: &[(Route, Option<Duration>)]) -> Option<Route> {
-    results
-        .iter()
-        .filter_map(|(route, elapsed)| elapsed.map(|elapsed| (route, elapsed)))
-        .min_by_key(|(_, elapsed)| *elapsed)
-        .map(|(route, _)| route.clone())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn route(via: &str) -> Route {
-        Route { base: format!("http://{via}"), via: via.into() }
+    /// An HTTP status endpoint that answers after `delay`.
+    async fn status_server(delay: Duration) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut request = [0; 2048];
+                    let _ = socket.read(&mut request).await;
+                    tokio::time::sleep(delay).await;
+                    let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await;
+                });
+            }
+        });
+        address
     }
 
-    #[test]
-    fn the_fastest_answering_path_wins_and_failures_never_do() {
-        let results = vec![
-            (route("direct"), Some(Duration::from_millis(320))),
-            (route("hangzhou"), Some(Duration::from_millis(40))),
-            (route("broken"), None),
-            (route("hongkong"), Some(Duration::from_millis(90))),
-        ];
-        assert_eq!(choose(&results).unwrap().via, "hangzhou");
-        assert_eq!(choose(&[(route("broken"), None)]), None);
-        let tie = vec![(route("direct"), Some(Duration::from_millis(50))), (route("door"), Some(Duration::from_millis(50)))];
-        assert_eq!(choose(&tie).unwrap().via, "direct");
+    fn config(server: String, doors: Vec<String>) -> Config {
+        Config { enabled: true, server_url: server, device_token: "t".repeat(43), request_id: uuid::Uuid::new_v4(),
+                 endpoint_id: None, invitation: None, doors }
+    }
+
+    #[tokio::test]
+    async fn the_first_path_to_answer_wins_without_waiting_for_dead_doors() {
+        let slow = status_server(Duration::from_millis(600)).await;
+        let fast = status_server(Duration::ZERO).await;
+        let dir = std::env::temp_dir().join(format!("doors-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let identity = relay_tunnel::Identity::load_or_create(&dir).unwrap();
+        let gateway = relay_tunnel::gateway(&identity, (Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+        let door = format!("quic://127.0.0.1:{}#{}", gateway.local_addr().unwrap().port(), identity.pin());
+        tokio::spawn(relay_tunnel::serve(gateway, fast));
+        let dead_port = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
+        let dead = format!("quic://127.0.0.1:{dead_port}#{}", identity.pin());
+
+        let doors = Doors::default();
+        let started = Instant::now();
+        let chosen = doors.select(&config(format!("http://{slow}"), vec![dead.clone(), door.clone()])).await;
+        assert_eq!(chosen.via, door);
+        assert!(started.elapsed() < Duration::from_millis(1500), "waited {:?}", started.elapsed());
+        assert_eq!(doors.route(&config(String::new(), vec![])).via, door);
+
+        // With no door answering, the direct address is used even though it is slower.
+        let chosen = doors.select(&config(format!("http://{slow}"), vec![dead])).await;
+        assert_eq!(chosen.via, "direct");
+        assert_eq!(chosen.base, format!("http://{slow}"));
     }
 
     #[test]

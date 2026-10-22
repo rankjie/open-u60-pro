@@ -55,7 +55,8 @@ final class RelayPaths {
         let id: String
         let label: String
         var latency: TimeInterval?
-        var reachable: Bool
+        /// nil while the probe is still running.
+        var reachable: Bool?
     }
 
     private(set) var options: [Option] = []
@@ -63,6 +64,7 @@ final class RelayPaths {
     @ObservationIgnored private var tunnels: [String: (tunnel: any DoorTunnel, port: UInt16)] = [:]
     @ObservationIgnored private let makeTunnel: @MainActor (CallingDoor) -> (any DoorTunnel)?
     @ObservationIgnored private let probe: @MainActor (URL, String) async -> TimeInterval?
+    @ObservationIgnored private var generation = UUID()
 
     init(makeTunnel: @escaping @MainActor (CallingDoor) -> (any DoorTunnel)?,
          probe: @escaping @MainActor (URL, String) async -> TimeInterval? = RelayPaths.status) {
@@ -92,29 +94,45 @@ final class RelayPaths {
                 candidates.append((door.address, door.label, base))
             }
         }
-        let probe = probe
-        let results = await withTaskGroup(of: (Int, TimeInterval?).self) { group in
-            for (index, candidate) in candidates.enumerated() {
-                group.addTask { @MainActor in (index, await probe(candidate.base, token)) }
-            }
-            var results = [TimeInterval?](repeating: nil, count: candidates.count)
-            for await (index, latency) in group { results[index] = latency }
-            return results
-        }
-        options = zip(candidates, results).map { Option(id: $0.id, label: $0.label, latency: $1, reachable: $1 != nil) }
+        options = candidates.map { Option(id: $0.id, label: $0.label, latency: nil, reachable: nil) }
             + doors.filter { door in !candidates.contains { $0.id == door.address } }
                 .map { Option(id: $0.address, label: $0.label, latency: nil, reachable: false) }
-        let answered = options.filter(\.reachable)
-        if let preference, answered.contains(where: { $0.id == preference }) {
-            current = preference
-        } else {
-            // Ties keep the earlier candidate, so the direct address wins a tie.
-            current = answered.min { ($0.latency ?? .infinity) < ($1.latency ?? .infinity) }?.id ?? Self.direct
+        // The first path to answer is the fastest, so the choice is made then; the remaining
+        // probes keep filling in latencies for the path list. A manual choice waits for its own.
+        let generation = UUID()
+        self.generation = generation
+        let preferred = preference.flatMap { id in candidates.contains { $0.id == id } ? id : nil }
+        current = await withCheckedContinuation { (decided: CheckedContinuation<String, Never>) in
+            var pending = candidates.count
+            var resumed = false
+            func decide(_ id: String) { if !resumed { resumed = true; decided.resume(returning: id) } }
+            for candidate in candidates {
+                Task { @MainActor [probe] in
+                    let latency = await probe(candidate.base, token)
+                    guard self.generation == generation else { return }
+                    if let index = self.options.firstIndex(where: { $0.id == candidate.id }) {
+                        self.options[index].latency = latency
+                        self.options[index].reachable = latency != nil
+                    }
+                    pending -= 1
+                    let answered = self.options.filter { $0.reachable == true }
+                    let preferredFailed = preferred.map { id in self.options.contains { $0.id == id && $0.reachable == false } } ?? true
+                    if let preferred, latency != nil, candidate.id == preferred {
+                        decide(preferred)
+                    } else if preferredFailed, let fastest = answered.min(by: { ($0.latency ?? .infinity) < ($1.latency ?? .infinity) }) {
+                        decide(fastest.id)
+                    } else if pending == 0 {
+                        decide(Self.direct)
+                    }
+                }
+            }
+            if candidates.isEmpty { decide(Self.direct) }
         }
         return base(server: server)
     }
 
     func stop() {
+        generation = UUID()
         for entry in tunnels.values { entry.tunnel.stop() }
         tunnels.removeAll()
         options = []
