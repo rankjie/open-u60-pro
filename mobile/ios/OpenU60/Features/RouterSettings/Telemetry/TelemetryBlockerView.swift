@@ -5,14 +5,6 @@ struct TelemetryBlockerView: View {
 
     var body: some View {
         List {
-            if let msg = viewModel.message {
-                Section {
-                    Text(msg)
-                        .font(.subheadline)
-                        .foregroundStyle(viewModel.messageIsError ? .red : .green)
-                        .textSelection(.enabled)
-                }
-            }
 
             Section("Domain Filter") {
                 LabeledContent("Status") {
@@ -87,13 +79,7 @@ struct TelemetryBlockerView: View {
         .navigationTitle("Telemetry Blocker")
         .keyboardDismissal()
         .refreshable { await viewModel.refresh() }
-        .overlay {
-            if viewModel.isLoading {
-                ProgressView()
-                    .padding()
-                    .background(Color(.systemBackground).opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
-            }
-        }
+        .operationStatus(message: viewModel.message, isError: viewModel.messageIsError, isLoading: viewModel.isLoading)
         .task { await viewModel.refresh() }
     }
 }

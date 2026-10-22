@@ -11,14 +11,6 @@ struct SignalDetectView: View {
 
     var body: some View {
         List {
-            if let msg = viewModel.message {
-                Section {
-                    Text(msg)
-                        .font(.subheadline)
-                        .foregroundStyle(viewModel.messageIsError ? .red : .green)
-                        .textSelection(.enabled)
-                }
-            }
 
             Section("Controls") {
                 if viewModel.status.running {
@@ -74,12 +66,6 @@ struct SignalDetectView: View {
         .navigationTitle("Signal Detection")
         .task { await viewModel.resumeIfRunning() }
         .onDisappear { viewModel.stopPolling() }
-        .overlay {
-            if viewModel.isLoading {
-                ProgressView()
-                    .padding()
-                    .background(Color(.systemBackground).opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
-            }
-        }
+        .operationStatus(message: viewModel.message, isError: viewModel.messageIsError, isLoading: viewModel.isLoading)
     }
 }

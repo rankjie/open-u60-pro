@@ -29,98 +29,121 @@ struct SMSListView: View {
         }
     }
 
-    var body: some View {
-        NavigationStack(path: $messagePath) {
-            List {
-                if let error = viewModel.error {
-                    Section {
-                        Text(error)
-                            .foregroundStyle(.red)
-                            .font(.caption)
-                    }
-                }
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
+    var body: some View {
+        if horizontalSizeClass == .regular {
+            // The unfolded Duo and iPad keep the thread list beside the open conversation.
+            NavigationSplitView {
+                inbox
+            } detail: {
+                if let id = messagePath.last, let conversation = viewModel.conversations.first(where: { $0.id == id }) {
+                    NavigationStack { SMSConversationView(viewModel: viewModel, conversation: conversation) }
+                        .id(id)
+                } else {
+                    ContentUnavailableView("No conversation selected", systemImage: "message")
+                }
+            }
+        } else {
+            NavigationStack(path: $messagePath) {
+                inbox.navigationDestination(for: String.self) { conversationId in
+                    if let conversation = viewModel.conversations.first(where: { $0.id == conversationId }) {
+                        SMSConversationView(viewModel: viewModel, conversation: conversation)
+                    }
+                }
+            }
+        }
+    }
+
+    private var selection: Binding<String?> {
+        Binding(get: { messagePath.last }, set: { messagePath = $0.map { [$0] } ?? [] })
+    }
+
+    private var inbox: some View {
+        List(selection: horizontalSizeClass == .regular ? selection : .constant(nil)) {
+            if let error = viewModel.error {
                 Section {
-                    let showsLine = Set(viewModel.allMessages.map(\.lineLabel)).count > 1
-                    ForEach(filteredConversations) { conversation in
-                        NavigationLink(value: conversation.id) {
-                            SMSConversationRow(conversation: conversation, now: now, showsLine: showsLine)
-                        }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button(role: .destructive) {
-                                Task { await viewModel.deleteConversation(conversation) }
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
-                        .listRowInsets(EdgeInsets(top: 10, leading: 8, bottom: 10, trailing: 16))
-                        .alignmentGuide(.listRowSeparatorLeading) { _ in 72 }
+                    Text(error)
+                        .foregroundStyle(.red)
+                        .font(.caption)
+                }
+            }
+
+            Section {
+                let showsLine = Set(viewModel.allMessages.map(\.lineLabel)).count > 1
+                ForEach(filteredConversations) { conversation in
+                    NavigationLink(value: conversation.id) {
+                        SMSConversationRow(conversation: conversation, now: now, showsLine: showsLine)
                     }
-                }
-            }
-            .listStyle(.plain)
-            .navigationTitle("Messages")
-            .navigationBarTitleDisplayMode(.large)
-            .navigationDestination(for: String.self) { conversationId in
-                if let conversation = viewModel.conversations.first(where: { $0.id == conversationId }) {
-                    SMSConversationView(viewModel: viewModel, conversation: conversation)
-                }
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Menu {
-                        NavigationLink {
-                            MessageSettingsView(client: client, authManager: authManager)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button(role: .destructive) {
+                            Task { await viewModel.deleteConversation(conversation) }
                         } label: {
-                            Label("Message settings", systemImage: "gearshape")
+                            Label("Delete", systemImage: "trash")
                         }
-                        if viewModel.capacity.nvTotal + viewModel.capacity.simTotal > 0 {
-                            Section("Storage") {
-                                Text("\(viewModel.capacity.nvUsed + viewModel.capacity.simUsed) of \(viewModel.capacity.nvTotal + viewModel.capacity.simTotal) messages")
-                            }
+                    }
+                    .listRowInsets(EdgeInsets(top: 10, leading: 8, bottom: 10, trailing: 16))
+                    .alignmentGuide(.listRowSeparatorLeading) { _ in 72 }
+                }
+            }
+        }
+        .listStyle(.plain)
+        .navigationTitle("Messages")
+        .navigationBarTitleDisplayMode(.large)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Menu {
+                    NavigationLink {
+                        MessageSettingsView(client: client, authManager: authManager)
+                    } label: {
+                        Label("Message settings", systemImage: "gearshape")
+                    }
+                    if viewModel.capacity.nvTotal + viewModel.capacity.simTotal > 0 {
+                        Section("Storage") {
+                            Text("\(viewModel.capacity.nvUsed + viewModel.capacity.simUsed) of \(viewModel.capacity.nvTotal + viewModel.capacity.simTotal) messages")
                         }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
                     }
-                    .accessibilityLabel("Message options")
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                 }
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        showCompose = true
-                    } label: {
-                        Image(systemName: "square.and.pencil")
-                    }
-                    .accessibilityLabel("New Message")
-                    .accessibilityIdentifier("sms-compose")
-                }
+                .accessibilityLabel("Message options")
             }
-            .searchable(text: $searchText, prompt: "Search messages")
-            .refreshable { await viewModel.refresh() }
-            .overlay {
-                if viewModel.isLoading && viewModel.conversations.isEmpty {
-                    ProgressView()
-                } else if !viewModel.isLoading && viewModel.conversations.isEmpty && viewModel.error == nil {
-                    ContentUnavailableView(
-                        "No Messages",
-                        systemImage: "message",
-                        description: Text("SMS messages will appear here")
-                    )
-                } else if filteredConversations.isEmpty && !searchText.isEmpty {
-                    ContentUnavailableView.search(text: searchText)
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showCompose = true
+                } label: {
+                    Image(systemName: "square.and.pencil")
                 }
+                .accessibilityLabel("New Message")
+                .accessibilityIdentifier("sms-compose")
             }
-            .sheet(isPresented: $showCompose) {
-                SMSComposeView(viewModel: viewModel) { number in
-                    let id = SMSParser.normalizeNumber(number)
-                    if viewModel.conversations.contains(where: { $0.id == id }) { messagePath = [id] }
-                }
+        }
+        .searchable(text: $searchText, prompt: "Search messages")
+        .refreshable { await viewModel.refresh() }
+        .overlay {
+            if viewModel.isLoading && viewModel.conversations.isEmpty {
+                ProgressView()
+            } else if !viewModel.isLoading && viewModel.conversations.isEmpty && viewModel.error == nil {
+                ContentUnavailableView(
+                    "No Messages",
+                    systemImage: "message",
+                    description: Text("SMS messages will appear here")
+                )
+            } else if filteredConversations.isEmpty && !searchText.isEmpty {
+                ContentUnavailableView.search(text: searchText)
             }
-            .onReceive(ticker) { now = $0 }
-            .task(id: notifications.openRevision) {
-                if let id = notifications.takeOpenMessageID(), let messageID = Int(id),
-                   let conversation = viewModel.conversations.first(where: { $0.messages.contains { $0.id == messageID } }) {
-                    messagePath = [conversation.id]
-                }
+        }
+        .sheet(isPresented: $showCompose) {
+            SMSComposeView(viewModel: viewModel) { number in
+                let id = SMSParser.normalizeNumber(number)
+                if viewModel.conversations.contains(where: { $0.id == id }) { messagePath = [id] }
+            }
+        }
+        .onReceive(ticker) { now = $0 }
+        .task(id: notifications.openRevision) {
+            if let id = notifications.takeOpenMessageID(), let messageID = Int(id),
+               let conversation = viewModel.conversations.first(where: { $0.messages.contains { $0.id == messageID } }) {
+                messagePath = [conversation.id]
             }
         }
     }

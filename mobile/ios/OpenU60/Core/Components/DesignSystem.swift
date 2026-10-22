@@ -157,3 +157,63 @@ struct LevelBars: View {
         .accessibilityHidden(true)
     }
 }
+
+/// The outcome of a settings action: a progress indicator in the navigation bar, and a banner
+/// above the bottom edge. Errors stay until dismissed or replaced; confirmations fade.
+struct OperationStatus: ViewModifier {
+    let message: String?
+    let isError: Bool
+    let isLoading: Bool
+    @State private var dismissed: String?
+
+    func body(content: Content) -> some View {
+        content
+            .toolbar {
+                if isLoading {
+                    ToolbarItem(placement: .topBarTrailing) { ProgressView().accessibilityLabel("Working") }
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if let message, message != dismissed {
+                    banner(message)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .task(id: message) {
+                            guard !isError else { return }
+                            try? await Task.sleep(for: .seconds(4))
+                            withAnimation { dismissed = message }
+                        }
+                }
+            }
+            .animation(.snappy, value: message)
+            .animation(.snappy, value: dismissed)
+            .onChange(of: message) { dismissed = nil }
+    }
+
+    private func banner(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(isError ? .red : .green)
+            Text(text).font(.subheadline).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            Button { withAnimation { dismissed = text } } label: {
+                Image(systemName: "xmark").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Dismiss")
+        }
+        .padding(.leading, 14)
+        .padding(.vertical, 10)
+        .padding(.trailing, 6)
+        .background(.regularMaterial, in: .rect(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder((isError ? Color.red : Color.green).opacity(0.25)))
+        .padding(.horizontal)
+        .padding(.bottom, 8)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+extension View {
+    func operationStatus(message: String?, isError: Bool, isLoading: Bool) -> some View {
+        modifier(OperationStatus(message: message, isError: isError, isLoading: isLoading))
+    }
+}

@@ -21,6 +21,8 @@ struct SettingsRow: View {
     let title: String
     let icon: String
     var color: Color = .blue
+    /// The current state, shown trailing like iOS Settings; empty hides it.
+    var value: String? = nil
 
     var body: some View {
         HStack(spacing: 12) {
@@ -32,6 +34,14 @@ struct SettingsRow: View {
                 .accessibilityHidden(true)
             Text(title)
                 .foregroundStyle(.primary)
+                .layoutPriority(1)
+            if let value, !value.isEmpty {
+                Spacer(minLength: 8)
+                Text(value)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
         }
     }
 }

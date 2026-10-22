@@ -5,14 +5,6 @@ struct SIMView: View {
 
     var body: some View {
         List {
-            if let msg = viewModel.message {
-                Section {
-                    Text(msg)
-                        .font(.subheadline)
-                        .foregroundStyle(viewModel.messageIsError ? .red : .green)
-                        .textSelection(.enabled)
-                }
-            }
 
             if viewModel.isPinLocked {
                 Section {
@@ -157,13 +149,7 @@ struct SIMView: View {
         .navigationTitle("SIM Card")
         .keyboardDismissal()
         .refreshable { await viewModel.refresh() }
-        .overlay {
-            if viewModel.isLoading {
-                ProgressView()
-                    .padding()
-                    .background(Color(.systemBackground).opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
-            }
-        }
+        .operationStatus(message: viewModel.message, isError: viewModel.messageIsError, isLoading: viewModel.isLoading)
         .task(id: viewModel.identityRevision) { await viewModel.refresh() }
         .sheet(isPresented: $viewModel.showChangePinSheet) {
             ChangePinSheet(viewModel: viewModel)

@@ -6,14 +6,6 @@ struct APNView: View {
 
     var body: some View {
         List {
-            if let msg = viewModel.message {
-                Section {
-                    Text(msg)
-                        .font(.subheadline)
-                        .foregroundStyle(viewModel.messageIsError ? .red : .green)
-                        .textSelection(.enabled)
-                }
-            }
 
             if let activeName = viewModel.activeAPNName {
                 Section("Current APN") {
@@ -93,13 +85,7 @@ struct APNView: View {
         .navigationTitle("APN Settings")
         .keyboardDismissal()
         .refreshable { await viewModel.refresh() }
-        .overlay {
-            if viewModel.isLoading {
-                ProgressView()
-                    .padding()
-                    .background(Color(.systemBackground).opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
-            }
-        }
+        .operationStatus(message: viewModel.message, isError: viewModel.messageIsError, isLoading: viewModel.isLoading)
         .task { await viewModel.refresh() }
         .sheet(isPresented: $viewModel.showFormSheet) {
             APNFormSheet(viewModel: viewModel)

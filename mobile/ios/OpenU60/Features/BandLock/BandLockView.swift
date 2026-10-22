@@ -5,14 +5,6 @@ struct BandLockView: View {
 
     var body: some View {
         List {
-            if let msg = viewModel.message {
-                Section {
-                    Text(msg)
-                        .font(.subheadline)
-                        .foregroundStyle(viewModel.messageIsError ? .red : .green)
-                        .textSelection(.enabled)
-                }
-            }
 
             Section {
                 Button(role: .destructive) {
@@ -50,13 +42,7 @@ struct BandLockView: View {
             }
         }
         .navigationTitle("Band Lock")
-        .overlay {
-            if viewModel.isLoading {
-                ProgressView()
-                    .padding()
-                    .background(Color(.systemBackground).opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
-            }
-        }
+        .operationStatus(message: viewModel.message, isError: viewModel.messageIsError, isLoading: viewModel.isLoading)
     }
 
     private func bandGrid(bands: [String], selected: Set<String>, technology: BandTechnology, toggle: @escaping (String) -> Void) -> some View {

@@ -289,11 +289,17 @@ final class AgentClient {
                 access: access, peer: peerRequest, token: { self.token }, reauthenticate: { await self.onUnauthorized?() ?? false })
             return try await Self.process(response, parse: parse).value
         }
+        let sentToken = token
         do {
             let request = try makeRequest(method: method, path: path, body: body, authenticated: authenticated)
             return try await AgentClient.perform(request, on: session, parse: parse).value
         } catch let error as AgentError where error.isUnauthorized {
-            guard retryOnUnauthorized, authenticated, let onUnauthorized, await onUnauthorized() else { throw error }
+            guard retryOnUnauthorized, authenticated else { throw error }
+            // A session established while this request was in flight answers it; only a token
+            // that is still the rejected one needs another login.
+            if token == nil || token == sentToken {
+                guard let onUnauthorized, await onUnauthorized() else { throw error }
+            }
             // Rebuilt so it picks up the token the hook just installed. Errors from here escape:
             // a request is retried at most once.
             let retry = try makeRequest(method: method, path: path, body: body, authenticated: true)

@@ -5,14 +5,6 @@ struct VPNPassthroughView: View {
 
     var body: some View {
         List {
-            if let msg = viewModel.message {
-                Section {
-                    Text(msg)
-                        .font(.subheadline)
-                        .foregroundStyle(viewModel.messageIsError ? .red : .green)
-                        .textSelection(.enabled)
-                }
-            }
 
             Section("VPN Passthrough") {
                 Toggle("L2TP", isOn: $viewModel.editL2tp)
@@ -32,13 +24,7 @@ struct VPNPassthroughView: View {
         }
         .navigationTitle("VPN Passthrough")
         .refreshable { await viewModel.refresh() }
-        .overlay {
-            if viewModel.isLoading {
-                ProgressView()
-                    .padding()
-                    .background(Color(.systemBackground).opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
-            }
-        }
+        .operationStatus(message: viewModel.message, isError: viewModel.messageIsError, isLoading: viewModel.isLoading)
         .task { await viewModel.refresh() }
     }
 }

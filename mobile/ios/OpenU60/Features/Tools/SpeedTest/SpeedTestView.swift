@@ -11,13 +11,6 @@ struct SpeedTestView: View {
 
     var body: some View {
         List {
-            if let msg = viewModel.message {
-                Section {
-                    Text(msg)
-                        .font(.subheadline)
-                        .foregroundStyle(viewModel.messageIsError ? .red : .green)
-                }
-            }
 
             Section("Server") {
                 Picker("Server", selection: $viewModel.selectedServerId) {
@@ -111,13 +104,8 @@ struct SpeedTestView: View {
             await viewModel.resumeIfRunning()
         }
         .onDisappear { viewModel.stopPolling() }
-        .overlay {
-            if viewModel.isLoading && !viewModel.isRunning {
-                ProgressView()
-                    .padding()
-                    .background(Color(.systemBackground).opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
-            }
-        }
+        .operationStatus(message: viewModel.message, isError: viewModel.messageIsError,
+                         isLoading: viewModel.isLoading && !viewModel.isRunning)
     }
 
     private var phaseLabel: String {

@@ -7,14 +7,6 @@ struct DeviceControlView: View {
 
     var body: some View {
         List {
-            if let msg = viewModel.message {
-                Section {
-                    Text(msg)
-                        .font(.subheadline)
-                        .foregroundStyle(viewModel.messageIsError ? .red : .green)
-                        .textSelection(.enabled)
-                }
-            }
 
             Section {
                 Toggle("Charge Limit", isOn: Binding(
@@ -150,13 +142,7 @@ struct DeviceControlView: View {
         }
         .task { await viewModel.refresh() }
         .navigationTitle("Device Controls")
-        .overlay {
-            if viewModel.isLoading {
-                ProgressView()
-                    .padding()
-                    .background(Color(.systemBackground).opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
-            }
-        }
+        .operationStatus(message: viewModel.message, isError: viewModel.messageIsError, isLoading: viewModel.isLoading)
         .sheet(isPresented: $viewModel.showRebootConfirm) {
             PasswordConfirmView(
                 title: "Reboot Router",

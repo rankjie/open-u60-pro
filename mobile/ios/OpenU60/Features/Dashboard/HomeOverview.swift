@@ -280,3 +280,81 @@ struct LatestMessageTile: View {
         }
     }
 }
+
+/// Regular width (the unfolded Duo, iPad) has room for lists that compact width only links to.
+struct HomeWidePanels: View {
+    let viewModel: DashboardViewModel
+    let messages: SMSViewModel
+    let openDevices: () -> Void
+    let openConversation: (String) -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: Design.gap) {
+            panel(title: "Devices", icon: "laptopcomputer.and.iphone", action: openDevices) {
+                let devices = viewModel.connectedDevices.prefix(6)
+                if devices.isEmpty {
+                    Text(viewModel.lastUpdated == nil ? "Loading…" : "No devices connected")
+                        .font(.subheadline).foregroundStyle(.secondary).padding(.vertical, 8)
+                }
+                ForEach(Array(devices.enumerated()), id: \.element.id) { index, device in
+                    if index > 0 { Divider() }
+                    HStack {
+                        Text(device.displayName).font(.subheadline).lineLimit(1)
+                        Spacer(minLength: 8)
+                        Text(device.ipAddress).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 7)
+                }
+            }
+            panel(title: "Recent messages", icon: "message", action: nil) {
+                let recent = messages.conversations.prefix(3)
+                if recent.isEmpty {
+                    Text("No messages").font(.subheadline).foregroundStyle(.secondary).padding(.vertical, 8)
+                }
+                ForEach(Array(recent.enumerated()), id: \.element.id) { index, conversation in
+                    if index > 0 { Divider() }
+                    Button { openConversation(conversation.id) } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            ContactAvatar(number: conversation.number, name: conversation.brand, size: 30)
+                            VStack(alignment: .leading, spacing: 1) {
+                                HStack {
+                                    Text(conversation.displayName)
+                                        .font(.subheadline.weight(conversation.unreadCount > 0 ? .semibold : .regular))
+                                        .lineLimit(1)
+                                    Spacer(minLength: 8)
+                                    Text(SMSTimestamp.short(conversation.latestTime, now: .now))
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                Text(conversation.preview).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
+                        .padding(.vertical, 7)
+                        .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func panel<Content: View>(title: String, icon: String, action: (() -> Void)?,
+                                      @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: icon).imageScale(.small)
+                Text(title)
+                Spacer()
+                if let action {
+                    Button("Show all", action: action).font(.footnote.weight(.semibold)).buttonStyle(.borderless)
+                }
+            }
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.bottom, 4)
+            content()
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: .rect(cornerRadius: Design.corner))
+    }
+}

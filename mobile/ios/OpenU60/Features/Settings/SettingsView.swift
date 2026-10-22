@@ -5,6 +5,7 @@ struct SettingsView: View {
     private let authManager: AuthManager
     @State private var viewModel: SettingsViewModel
     @FocusState private var gatewayFieldFocused: Bool
+    @Environment(AppModel.self) private var app
 
     init(client: AgentClient, authManager: AuthManager) {
         self.client = client
@@ -19,12 +20,12 @@ struct SettingsView: View {
                     NavigationLink {
                         RouterSettingsListView(client: client, authManager: authManager, category: .connectivity)
                     } label: {
-                        SettingsRow(title: "Wi-Fi & network", icon: "wifi")
+                        SettingsRow(title: "Wi-Fi & network", icon: "wifi", value: summary.wifi)
                     }.listRowInsets(SettingsRow.insets)
                     NavigationLink {
                         RouterSettingsListView(client: client, authManager: authManager, category: .cellular)
                     } label: {
-                        SettingsRow(title: "Cellular & SIM", icon: "simcard.fill", color: .green)
+                        SettingsRow(title: "Cellular & SIM", icon: "simcard.fill", color: .green, value: summary.cellular)
                     }.listRowInsets(SettingsRow.insets)
                     NavigationLink {
                         RouterSettingsListView(client: client, authManager: authManager, category: .security)
@@ -34,14 +35,14 @@ struct SettingsView: View {
                     NavigationLink {
                         RouterSettingsListView(client: client, authManager: authManager, category: .system)
                     } label: {
-                        SettingsRow(title: "Power & system", icon: "power", color: .gray)
+                        SettingsRow(title: "Power & system", icon: "power", color: .gray, value: summary.battery)
                     }.listRowInsets(SettingsRow.insets)
                 }
                 Section("Services") {
                     NavigationLink {
                         MessageSettingsView(client: client, authManager: authManager)
                     } label: {
-                        SettingsRow(title: "Messages", icon: "message.fill", color: .green)
+                        SettingsRow(title: "Messages", icon: "message.fill", color: .green, value: summary.messages)
                     }.listRowInsets(SettingsRow.insets)
                     NavigationLink {
                         PushedModelHost(SchedulerViewModel(client: client, authManager: authManager)) {
@@ -63,7 +64,7 @@ struct SettingsView: View {
                 }
                 Section("App") {
                     NavigationLink { connectionSettings } label: {
-                        SettingsRow(title: "Connection", icon: "point.3.connected.trianglepath.dotted")
+                        SettingsRow(title: "Connection", icon: "point.3.connected.trianglepath.dotted", value: summary.route)
                     }.listRowInsets(SettingsRow.insets)
                     NavigationLink { preferences } label: {
                         SettingsRow(title: "Appearance & refresh", icon: "paintbrush.fill", color: .indigo)
@@ -75,7 +76,33 @@ struct SettingsView: View {
             }
             .listStyle(.insetGrouped)
             .navigationTitle("Settings")
+            // Opened before Home has polled: one batched read fills the row values.
+            .task { if app.device.dashboard.lastUpdated == nil { await app.device.dashboard.refresh() } }
         }
+    }
+
+    /// Last known device state for the hub rows; nothing here issues a request.
+    private var summary: (wifi: String?, cellular: String?, battery: String?, messages: String?, route: String?) {
+        let dashboard = app.device.dashboard
+        let wifi = dashboard.wifiStatus
+        let devices = dashboard.connectedDevices.count
+        let info = dashboard.operatorInfo
+        let network = info.networkType.isEmpty ? nil
+            : info.displayNetworkType(nrConnected: dashboard.nrSignal.isConnected, lteSignal: dashboard.lteSignal)
+        let cellular = dashboard.isAirplaneMode ? "Airplane mode" : network
+        let unread = app.device.messages.unreadCount
+        let route: String? = switch client.connectionRoute {
+        case .local: "Local"
+        case .p2p: "P2P"
+        case .relay: "Relay"
+        case .connecting: "Connecting"
+        case .unavailable: "Offline"
+        }
+        return (dashboard.lastUpdated == nil ? nil : wifi.wifiOn ? "\(devices) device\(devices == 1 ? "" : "s")" : "Off",
+                cellular,
+                dashboard.battery.capacityPercent.map { "\($0)%" },
+                unread > 0 ? "\(unread) unread" : nil,
+                authManager.isAuthenticated ? route : "Offline")
     }
 
     private var connectionSettings: some View {

@@ -16,6 +16,7 @@ struct DashboardView: View {
     @State private var showAllDevices = true
     @State private var showWiFiShare = false
     @Environment(AppModel.self) private var app
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     private var internetModel: WiFiInternetViewModel { app.device.internet }
 
     init(viewModel: DashboardViewModel, isAuthenticated: Bool, client: AgentClient, authManager: AuthManager,
@@ -49,7 +50,12 @@ struct DashboardView: View {
                         DevicesTile(viewModel: viewModel) { detail = .wifi }
                         SystemTile(viewModel: viewModel) { detail = .health }
                     }
-                    LatestMessageTile(messages: messages, open: openConversation)
+                    if horizontalSizeClass == .regular {
+                        HomeWidePanels(viewModel: viewModel, messages: messages,
+                                       openDevices: { detail = .wifi }, openConversation: openConversation)
+                    } else {
+                        LatestMessageTile(messages: messages, open: openConversation)
+                    }
                     DashboardUpdateStatus(viewModel: viewModel)
                 }
                 .padding(.horizontal)

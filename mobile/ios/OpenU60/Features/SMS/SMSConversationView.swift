@@ -6,6 +6,7 @@ struct SMSConversationView: View {
     @State private var messageText = ""
     @State private var sendFailure: String?
     @FocusState private var messageFocused: Bool
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     private var messages: [SMSMessage] {
         viewModel.conversations.first(where: { $0.id == conversation.id })?.messages ?? conversation.messages
@@ -84,7 +85,7 @@ struct SMSConversationView: View {
         .navigationTitle(conversation.displayName)
         .scrollDismissesKeyboard(.interactively)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.hidden, for: .tabBar)
+        .toolbar(horizontalSizeClass == .regular ? .automatic : .hidden, for: .tabBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 if messageFocused {

@@ -5,14 +5,6 @@ struct MobileNetworkView: View {
 
     var body: some View {
         List {
-            if let msg = viewModel.message {
-                Section {
-                    Text(msg)
-                        .font(.subheadline)
-                        .foregroundStyle(viewModel.messageIsError ? .red : .green)
-                        .textSelection(.enabled)
-                }
-            }
 
             Section {
                 Toggle("Airplane Mode", isOn: Binding(
@@ -115,13 +107,7 @@ struct MobileNetworkView: View {
         }
         .navigationTitle("Mobile Network")
         .refreshable { await viewModel.refresh() }
-        .overlay {
-            if viewModel.isLoading {
-                ProgressView()
-                    .padding()
-                    .background(Color(.systemBackground).opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
-            }
-        }
+        .operationStatus(message: viewModel.message, isError: viewModel.messageIsError, isLoading: viewModel.isLoading)
         .alert("Reboot Required", isPresented: $viewModel.showRebootAfterAirplaneOff) {
             Button("Reboot Now") {
                 Task { await viewModel.reboot() }
