@@ -34,7 +34,7 @@ fi
 # --- Constants ---------------------------------------------------------------
 SCHEME="OpenU60"
 XCODEPROJ="OpenU60.xcodeproj"
-BUNDLE_ID="com.jesthersilvestre.openu60"
+BUNDLE_ID="com.beexio.openu60"
 TEAM_ID="${TEAM_ID:-}"
 
 # --- Colors ------------------------------------------------------------------

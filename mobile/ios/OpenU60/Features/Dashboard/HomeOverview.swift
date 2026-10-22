@@ -58,7 +58,11 @@ struct InternetHero: View {
         }
         if viewModel.isAirplaneMode { return ("Airplane", .orange) }
         if viewModel.isMobileDataOff { return ("Data off", .orange) }
-        if !viewModel.wanIPv4.isEmpty || !viewModel.wanIPv6.isEmpty { return ("Online", .green) }
+        if !viewModel.wanIPv4.isEmpty || !viewModel.wanIPv6.isEmpty {
+            // A restored or stale reading is not a live claim.
+            let current = viewModel.lastUpdated.map { Date().timeIntervalSince($0) < 15 } == true
+            return ("Online", current ? .green : .secondary)
+        }
         return viewModel.lastUpdated == nil ? ("Checking", .secondary) : ("No data", .secondary)
     }
 }
@@ -106,7 +110,8 @@ struct TrafficHistoryChart: View {
     var body: some View {
         let history = fresh ? viewModel.speedHistory : []
         let down = history.map(\.downloadBytesPerSec), up = history.map(\.uploadBytesPerSec)
-        let ceiling = max(down.max() ?? 0, up.max() ?? 0)
+        // At least 1 Mb/s of scale, so an idle link's few bytes draw flat instead of as peaks.
+        let ceiling = max(down.max() ?? 0, up.max() ?? 0, 125_000)
         let slots = DashboardViewModel.speedHistoryLimit
         ZStack(alignment: .topLeading) {
             Sparkline(values: down, ceiling: ceiling, area: true, capacity: slots)
@@ -115,8 +120,8 @@ struct TrafficHistoryChart: View {
                 .stroke(.blue, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
             Sparkline(values: up, ceiling: ceiling, capacity: slots)
                 .stroke(.teal.opacity(0.8), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-            if showsPeak, ceiling > 0 {
-                let peak = DeviceParser.speedComponents(ceiling)
+            if showsPeak, let top = (down + up).max(), top > 0 {
+                let peak = DeviceParser.speedComponents(top)
                 Text("Peak \(peak.number, specifier: "%.\(peak.decimalPlaces)f") \(peak.unit.trimmingCharacters(in: .whitespaces)) · last \(history.count)s")
                     .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
             }
@@ -166,10 +171,10 @@ struct BatteryTile: View {
                 if stale {
                     Facts(age.map { "Updated \(Self.ago($0))" } ?? "No recent data")
                 } else {
-                    let charging = (battery.powerWatts ?? 0) > 0.05
-                    Facts(charging ? "Charging" : usb.usbStatus.powerbankActive ? "Powering USB" : nil,
-                          battery.powerWatts == nil ? nil : battery.powerText,
-                          charging || battery.usbPower.externalPower == true || battery.runtimeText == "—" ? nil : battery.runtimeText)
+                    let discharging = battery.statusText == "Discharging"
+                    let watts = battery.powerWatts.map { abs($0) >= 0.05 } == true ? battery.powerText : nil
+                    Facts(usb.usbStatus.powerbankActive ? "Powering USB" : discharging ? nil : battery.statusText,
+                          watts, discharging && battery.runtimeText != "—" ? battery.runtimeText : nil)
                 }
             }
         }
@@ -225,29 +230,29 @@ struct SystemTile: View {
 }
 
 extension String {
-    /// "78" → "n78"; an already-labelled or empty band is left alone.
+    /// "78", "n78" or "NR5G BAND 78" → "n78"; text without a number is left alone.
     func bandLabel(prefix: String) -> String? {
-        guard !isEmpty else { return nil }
-        return allSatisfy(\.isNumber) ? prefix + self : self
+        // Firmware reports "78", "n78" or "LTE BAND 3"; the number is what identifies the band.
+        guard let digits = split(whereSeparator: { !$0.isNumber }).last else { return isEmpty ? nil : self }
+        return prefix + digits
     }
 }
 
-/// The newest unread thread, or the newest thread, straight from inbox state; a push delivery
+/// The newest unread thread, straight from inbox state; a push delivery
 /// shows here without a refresh.
 struct LatestMessageTile: View {
     let messages: SMSViewModel
     let open: (String) -> Void
 
     var body: some View {
-        let conversations = messages.conversations
-        if let conversation = conversations.first(where: { $0.unreadCount > 0 }) ?? conversations.first {
+        // Home only surfaces messages that still need attention.
+        if let conversation = messages.conversations.first(where: { $0.unreadCount > 0 }) {
             TimelineView(.periodic(from: .now, by: 30)) { context in
                 let latest = conversation.messages.last
                 let code = latest.flatMap { $0.tag.isIncoming && context.date.timeIntervalSince($0.date) < 86400
                     ? SMSParser.verificationCode(in: $0.content) : nil }
                 let unread = messages.unreadCount
-                Tile(title: unread > 0 ? "\(unread) unread" : "Messages", icon: "message.fill",
-                     tint: unread > 0 ? .blue : .secondary, action: { open(conversation.id) }) {
+                Tile(title: "\(unread) unread", icon: "message.fill", tint: .blue, action: { open(conversation.id) }) {
                     HStack(alignment: .top, spacing: 10) {
                         ContactAvatar(number: conversation.number, name: conversation.brand, size: 36)
                         VStack(alignment: .leading, spacing: 2) {

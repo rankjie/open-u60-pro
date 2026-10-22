@@ -90,7 +90,7 @@ list reads. Threads from service senders are named by their signature (for
 example 【京东】), which is removed from the preview. A 4–8 digit code within 40
 characters of a code keyword is offered as a one-tap copy chip on the thread row,
 in the conversation and on Home, for incoming messages from the last day. The
-SIM line is shown on rows only when the inbox spans more than one line, and in a
+SIM line is shown on rows only when the inbox spans more than one known line, and in a
 conversation only where it starts or changes. At regular width Messages is a
 split view of threads and the open conversation. Message
 settings have one shared destination from Settings and the contextual Messages

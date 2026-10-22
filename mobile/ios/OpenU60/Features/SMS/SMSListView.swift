@@ -70,7 +70,8 @@ struct SMSListView: View {
             }
 
             Section {
-                let showsLine = Set(viewModel.allMessages.map(\.lineLabel)).count > 1
+                // Only distinct known lines; old messages without a line snapshot do not count.
+                let showsLine = Set(viewModel.allMessages.compactMap { $0.line?.iccid }).count > 1
                 ForEach(filteredConversations) { conversation in
                     NavigationLink(value: conversation.id) {
                         SMSConversationRow(conversation: conversation, now: now, showsLine: showsLine)
@@ -186,10 +187,10 @@ private struct SMSConversationRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                if code != nil || showsLine || brand != nil {
+                if code != nil || (showsLine && latest?.line != nil) || brand != nil {
                     HStack(spacing: 8) {
                         if let code { CodeChip(code: code) }
-                        Facts(brand == nil ? nil : conversation.number, showsLine ? latest?.lineLabel ?? "Line unknown" : nil)
+                        Facts(brand == nil ? nil : conversation.number, showsLine ? latest?.line?.label : nil)
                     }
                     .padding(.top, 2)
                 }

@@ -132,14 +132,18 @@ final class DashboardViewModel {
         var updatedAt: Date
     }
     private let identity: () -> UUID?
+    /// The upstream Wi-Fi interface while U60 runs as a repeater; nil on the SIM hotspot.
+    private let uplinkInterface: () -> String?
     private let cache: DeviceSnapshotCache<Snapshot>
     @ObservationIgnored private var savedAt: Date?
 
     init(client: AgentClient, authManager: AuthManager, identity: @escaping () -> UUID? = { nil },
+         uplinkInterface: @escaping () -> String? = { nil },
          directory: URL = .applicationSupportDirectory.appending(path: "Dashboard", directoryHint: .isDirectory)) {
         self.client = client
         self.authManager = authManager
         self.identity = identity
+        self.uplinkInterface = uplinkInterface
         self.cache = DeviceSnapshotCache(directory: directory)
         restore()
     }
@@ -449,7 +453,8 @@ final class DashboardViewModel {
                 previous: self.previousTraffic ?? traffic, current: traffic
             )
             if speed != self.speed { self.speed = speed }
-            if self.previousTraffic != nil {
+            if self.previousTraffic?.source != traffic.source { self.speedHistory.removeAll() }
+            if let previous = self.previousTraffic, previous.source == traffic.source {
                 self.speedHistory.append(speed)
                 if self.speedHistory.count > Self.speedHistoryLimit { self.speedHistory.removeFirst() }
             }
@@ -466,6 +471,10 @@ final class DashboardViewModel {
     }
 
     private func fetchTraffic() async -> TrafficStats? {
+        // A repeater's internet crosses the upstream Wi-Fi link, not the modem.
+        if let interface = uplinkInterface() {
+            do { return try await fetchUplinkTraffic(interface) } catch { return nil }
+        }
         let now = Date()
         if now.timeIntervalSince(lastTrafficProbe) >= Self.trafficReprobeInterval {
             lastTrafficProbe = now
@@ -554,6 +563,17 @@ final class DashboardViewModel {
         stats.serverRxSpeed = resp.rx_speed
         stats.serverTxSpeed = resp.tx_speed
         return stats
+    }
+
+    private func fetchUplinkTraffic(_ interface: String) async throws -> TrafficStats? {
+        struct NetIface: Decodable {
+            let name: String
+            let rx_bytes: UInt64
+            let tx_bytes: UInt64
+        }
+        let ifaces: [NetIface] = try await client.get("/api/network/traffic")
+        guard let uplink = ifaces.first(where: { $0.name == interface }) else { return nil }
+        return TrafficStats(rxBytes: uplink.rx_bytes, txBytes: uplink.tx_bytes, timestamp: Date(), source: "uplink")
     }
 
     private func fetchAgentTraffic() async throws -> TrafficStats? {

@@ -74,12 +74,15 @@ extension SMSConversation {
     var displayName: String { brand ?? number }
     /// The latest text without the brand signature the title already shows.
     var preview: String {
-        guard let brand else { return latestMessage }
-        let text = latestMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-        for signature in ["【\(brand)】", "[\(brand)]"] {
-            if text.hasPrefix(signature) { return String(text.dropFirst(signature.count)) }
-            if text.hasSuffix(signature) { return String(text.dropLast(signature.count)) }
+        // One flowing line: line breaks in the message would leave blank preview rows.
+        var text = latestMessage.split(whereSeparator: \.isNewline).joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        if let brand {
+            for signature in ["【\(brand)】", "[\(brand)]"] {
+                if text.hasPrefix(signature) { text = String(text.dropFirst(signature.count)) }
+                else if text.hasSuffix(signature) { text = String(text.dropLast(signature.count)) }
+            }
         }
-        return latestMessage
+        return text
     }
 }

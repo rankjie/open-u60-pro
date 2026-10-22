@@ -79,10 +79,15 @@ final class RouterSession {
     let recordings: CallRecordingLibrary
 
     init(client: AgentClient, auth: AuthManager) {
-        dashboard = DashboardViewModel(client: client, authManager: auth, identity: { [weak client] in client?.relayAccess?()?.routerID })
+        let internet = WiFiInternetViewModel(client: client)
+        self.internet = internet
+        dashboard = DashboardViewModel(client: client, authManager: auth, identity: { [weak client] in client?.relayAccess?()?.routerID },
+            uplinkInterface: { [weak internet] in
+                guard let config = internet?.status?.config, config.mode == .repeater else { return nil }
+                return config.band == .two ? "wlan0" : "wlan2"
+            })
         messages = SMSViewModel(client: client, identity: { [weak client] in client?.relayAccess?()?.routerID })
         usb = USBConnectionViewModel(client: client, authManager: auth)
-        internet = WiFiInternetViewModel(client: client)
         sim = SIMViewModel(client: client, authManager: auth)
         mobile = MobileNetworkViewModel(client: client, authManager: auth)
         recordings = CallRecordingLibrary(remote: client, identity: { [weak client] in client?.relayAccess?()?.routerID })

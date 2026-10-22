@@ -22,6 +22,7 @@ struct CellularCardView: View, Equatable {
         if !available || age >= 5 {
             return "Last traffic sample · \(age)s ago · waiting for device"
         }
+        if source == "uplink" { return "Live Wi-Fi upstream traffic · all devices" }
         return source == "wwandst" ? "Live cellular traffic · all devices"
             : "Estimated cellular traffic · all devices"
     }
@@ -30,7 +31,8 @@ struct CellularCardView: View, Equatable {
         CardView {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Label("Cellular traffic", systemImage: "arrow.up.arrow.down")
+                    Label(trafficStats.source == "uplink" ? "Wi-Fi upstream traffic" : "Cellular traffic",
+                          systemImage: "arrow.up.arrow.down")
                         .font(.subheadline.weight(.semibold))
                     Spacer()
                     if compact { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary) }
