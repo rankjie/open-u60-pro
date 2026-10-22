@@ -13,6 +13,9 @@ final class AuthManager {
     }
 
     var state: AuthState = .idle
+    /// The router answered and refused the saved password. Only this, never an unreachable
+    /// router, sends a user with saved credentials back to the password screen.
+    private(set) var storedPasswordRejected = false
 
     var sessionToken: String {
         client.token ?? ""
@@ -47,6 +50,7 @@ final class AuthManager {
         do {
             try await client.login(password: password)
             lastReauthFailure = nil
+            storedPasswordRejected = false
             state = .authenticated
         } catch {
             state = error.isCancellation ? .idle : .failed(error.localizedDescription)
@@ -99,6 +103,7 @@ final class AuthManager {
         do {
             try await client.login(password: password)
             lastReauthFailure = nil
+            storedPasswordRejected = false
             state = .authenticated
             return true
         } catch {
@@ -107,6 +112,7 @@ final class AuthManager {
             if !error.isCancellation {
                 lastReauthFailure = .now
             }
+            if case AgentError.unauthorized = error { storedPasswordRejected = true }
             return false
         }
     }

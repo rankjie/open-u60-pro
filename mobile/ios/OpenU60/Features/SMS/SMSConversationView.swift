@@ -16,7 +16,9 @@ struct SMSConversationView: View {
         return messages.enumerated().map { index, message in
             let showDate = index == 0 || message.date.timeIntervalSince(messages[index - 1].date) > 300
                 || !Calendar.autoupdatingCurrent.isDate(message.date, inSameDayAs: messages[index - 1].date)
-            return MessageTimelineItem(message: message, showDate: showDate)
+            // The line is stated where it starts or changes, not under every bubble.
+            let showsLine = showDate || message.line != messages[index - 1].line
+            return MessageTimelineItem(message: message, showDate: showDate, showsLine: showsLine)
         }
     }
 
@@ -34,7 +36,8 @@ struct SMSConversationView: View {
                                 .frame(maxWidth: .infinity)
                         }
                         SMSBubbleView(message: item.message,
-                                      isLatest: item.message.id == messages.last?.id)
+                                      isLatest: item.message.id == messages.last?.id,
+                                      showsLine: item.showsLine)
                             .id(item.message.id)
                     }
                 }
@@ -78,7 +81,7 @@ struct SMSConversationView: View {
             }
             .background(.bar)
         }
-        .navigationTitle(conversation.number)
+        .navigationTitle(conversation.displayName)
         .scrollDismissesKeyboard(.interactively)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
@@ -94,11 +97,8 @@ struct SMSConversationView: View {
             }
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 2) {
-                    Image(systemName: "person.crop.circle.fill")
-                        .font(.system(size: 26))
-                        .foregroundStyle(.secondary)
-                        .accessibilityHidden(true)
-                    Text(conversation.number)
+                    ContactAvatar(number: conversation.number, name: conversation.brand, size: 28)
+                    Text(conversation.displayName)
                         .font(.caption.weight(.medium))
                         .lineLimit(1)
                 }
@@ -116,6 +116,7 @@ struct SMSConversationView: View {
 private struct MessageTimelineItem: Identifiable {
     let message: SMSMessage
     let showDate: Bool
+    let showsLine: Bool
     var id: Int { message.id }
 }
 
@@ -124,6 +125,7 @@ private struct MessageTimelineItem: Identifiable {
 private struct SMSBubbleView: View {
     let message: SMSMessage
     let isLatest: Bool
+    let showsLine: Bool
 
     private var isOutgoing: Bool { !message.tag.isIncoming }
 
@@ -138,10 +140,15 @@ private struct SMSBubbleView: View {
                     .background(isOutgoing ? Color.green : Color(.systemGray5), in: RoundedRectangle(cornerRadius: 18))
                     .foregroundStyle(isOutgoing ? .white : .primary)
                     .textSelection(.enabled)
+                if !isOutgoing, let code = SMSParser.verificationCode(in: message.content) {
+                    CodeChip(code: code).padding(.top, 2)
+                }
 
                 HStack(spacing: 4) {
-                    Text(message.line.map { "\(isOutgoing ? "From" : "To") \($0.label)" } ?? "Line unknown")
-                        .foregroundStyle(.secondary)
+                    if showsLine {
+                        Text(message.line.map { "\(isOutgoing ? "From" : "To") \($0.label)" } ?? "Line unknown")
+                            .foregroundStyle(.secondary)
+                    }
                     if message.tag == .failed {
                         Image(systemName: "exclamationmark.circle.fill")
                             .foregroundStyle(.red)

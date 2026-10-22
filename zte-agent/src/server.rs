@@ -276,6 +276,7 @@ pub fn route(method: &Method, path: &str, state: &AppState, body: &[u8]) -> (u16
         }
         // SMS
         (&Method::Post, "/api/sms/list") => sms::sms_list(state, body),
+        (&Method::Post, "/api/batch") => crate::batch::handle(state, body),
         (&Method::Get, "/api/sms/capacity") => sms::sms_capacity(state),
         (&Method::Post, "/api/sms/send") => sms::sms_send(state, body),
         (&Method::Post, "/api/sms/delete") => sms::sms_delete(state, body),

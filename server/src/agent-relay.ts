@@ -21,7 +21,8 @@ export function agentRequest(value: unknown, now: number): AgentRequest {
   return { requestId, method, path, body: input.body, expiresAt: Number(input.expiresAt) };
 }
 export function agentRead(request: AgentRequest): boolean {
-  return request.method === "GET" || (request.method === "POST" && request.path === "/api/sms/list");
+  return request.method === "GET" || (request.method === "POST"
+    && (request.path === "/api/sms/list" || request.path === "/api/batch"));
 }
 interface Pending {
   phone: Endpoint; request: AgentRequest; timer: ReturnType<typeof setTimeout>;

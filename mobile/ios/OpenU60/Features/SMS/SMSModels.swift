@@ -283,3 +283,76 @@ enum SMSParser {
         )
     }
 }
+
+// MARK: - Verification codes
+
+extension SMSParser {
+    private static let codeKeywords = ["验证码", "校验码", "动态码", "动态密码", "确认码", "验证代码",
+                                       "verification", "passcode", "code", "otp"]
+
+    /// The one-time code a message carries: a 4–8 digit run standing on its own, closest to a
+    /// code keyword and within 40 characters of it. Amounts, dates and order numbers that are
+    /// not near a keyword are not codes.
+    static func verificationCode(in text: String) -> String? {
+        let characters = Array(text)
+        let lower = Array(text.lowercased())
+        guard characters.count == lower.count else { return nil }
+        var keywords: [Range<Int>] = []
+        for keyword in codeKeywords {
+            let pattern = Array(keyword)
+            guard pattern.count <= lower.count else { continue }
+            for start in 0...(lower.count - pattern.count) where Array(lower[start..<start + pattern.count]) == pattern {
+                keywords.append(start..<start + pattern.count)
+            }
+        }
+        guard !keywords.isEmpty else { return nil }
+        var best: (code: String, distance: Int)?
+        var index = 0
+        while index < characters.count {
+            guard characters[index].isASCII, characters[index].isNumber else { index += 1; continue }
+            var end = index
+            while end < characters.count, characters[end].isASCII, characters[end].isNumber { end += 1 }
+            // A run glued to letters (an ID such as AB1234) or part of a decimal is not a code.
+            func letter(_ position: Int) -> Bool {
+                characters.indices.contains(position) && characters[position].isASCII && characters[position].isLetter
+            }
+            func separator(_ position: Int, digitAt neighbour: Int) -> Bool {
+                characters.indices.contains(position) && characters.indices.contains(neighbour)
+                    && [".", ","].contains(characters[position]) && characters[neighbour].isNumber
+            }
+            let embedded = letter(index - 1) || letter(end)
+                || separator(index - 1, digitAt: index - 2) || separator(end, digitAt: end + 1)
+            if (4...8).contains(end - index), !embedded {
+                let distance = keywords.map { $0.upperBound <= index ? index - $0.upperBound : max(0, $0.lowerBound - end) }.min()!
+                if distance <= 40, best.map({ distance < $0.distance }) ?? true {
+                    best = (String(characters[index..<end]), distance)
+                }
+            }
+            index = end
+        }
+        return best?.code
+    }
+}
+
+// MARK: - Sender brand
+
+extension SMSParser {
+    /// The signature service senders put at the start or end of a message, as in 【京东】 or [Alipay].
+    static func senderBrand(in text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for (open, close) in [("【", "】"), ("[", "]")] {
+            if trimmed.hasPrefix(open), let end = trimmed.range(of: close) {
+                return brand(String(trimmed[trimmed.index(after: trimmed.startIndex)..<end.lowerBound]))
+            }
+            if trimmed.hasSuffix(close), let start = trimmed.range(of: open, options: .backwards) {
+                return brand(String(trimmed[start.upperBound..<trimmed.index(before: trimmed.endIndex)]))
+            }
+        }
+        return nil
+    }
+
+    private static func brand(_ value: String) -> String? {
+        let name = value.trimmingCharacters(in: .whitespaces)
+        return (1...12).contains(name.count) ? name : nil
+    }
+}

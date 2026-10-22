@@ -1,6 +1,6 @@
 import Foundation
 
-struct BatteryStatus: Equatable {
+struct BatteryStatus: Equatable, Codable {
     var capacity: Int = -1
     var temperature: Double? = nil
     var charging: String = ""
@@ -63,7 +63,7 @@ struct BatteryStatus: Equatable {
     static let empty = BatteryStatus()
 }
 
-struct USBPowerStatus: Equatable {
+struct USBPowerStatus: Equatable, Codable {
     var role: String?
     var online: Bool?
     var inputVoltageMV: Double?
@@ -89,7 +89,7 @@ struct USBPowerStatus: Equatable {
     }
 }
 
-struct TemperatureSensor: Equatable, Identifiable {
+struct TemperatureSensor: Equatable, Identifiable, Codable {
     let id: String
     let name: String
     let temperatureC: Double?
@@ -113,7 +113,7 @@ struct TemperatureSensor: Equatable, Identifiable {
     }
 }
 
-struct ThermalStatus: Equatable {
+struct ThermalStatus: Equatable, Codable {
     var cpuTemp: Double? = nil
     var sensors: [TemperatureSensor] = []
 
@@ -152,7 +152,7 @@ struct TrafficSpeed: Equatable {
     static let zero = TrafficSpeed()
 }
 
-struct ConnectedDevice: Identifiable, Equatable {
+struct ConnectedDevice: Identifiable, Equatable, Codable {
     let id: String // MAC address
     var name: String
     var ipAddress: String
@@ -183,7 +183,7 @@ struct DeviceIdentity: Equatable {
     static let empty = DeviceIdentity()
 }
 
-struct WifiStatus: Equatable {
+struct WifiStatus: Equatable, Codable {
     var wifiOn: Bool = false
     var ssid2g: String = ""
     var ssid5g: String = ""
@@ -212,7 +212,7 @@ struct CpuStatSample: Equatable {
     var total: UInt64
 }
 
-struct SystemInfo: Equatable {
+struct SystemInfo: Equatable, Codable {
     var cpuUsagePercent: Double = 0.0
     var cpuUsageIsEstimate: Bool = true
     var cpuCores: Int = 1

@@ -13,12 +13,16 @@ struct CellularCardView: View, Equatable {
     var compact = false
 
     private func trafficCaption(at now: Date) -> String {
-        guard let trafficUpdatedAt else { return "Live traffic unavailable" }
-        let age = max(0, Int(now.timeIntervalSince(trafficUpdatedAt)))
-        if !isTrafficAvailable || age >= 5 {
+        Self.caption(updatedAt: trafficUpdatedAt, available: isTrafficAvailable, source: trafficStats.source, now: now)
+    }
+
+    static func caption(updatedAt: Date?, available: Bool, source: String, now: Date) -> String {
+        guard let updatedAt else { return "Live traffic unavailable" }
+        let age = max(0, Int(now.timeIntervalSince(updatedAt)))
+        if !available || age >= 5 {
             return "Last traffic sample · \(age)s ago · waiting for device"
         }
-        return trafficStats.source == "wwandst" ? "Live cellular traffic · all devices"
+        return source == "wwandst" ? "Live cellular traffic · all devices"
             : "Estimated cellular traffic · all devices"
     }
 
@@ -120,9 +124,10 @@ private struct TrafficTotalRow: View {
     }
 }
 
-private struct LiveTrafficValue: View {
+struct LiveTrafficValue: View {
     let bytesPerSecond: Double?
     let sampleInterval: TimeInterval
+    var font: Font = .title3.weight(.bold).monospacedDigit()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -134,14 +139,14 @@ private struct LiveTrafficValue: View {
                 AnimatedNumber(
                     value: components.number,
                     decimalPlaces: components.decimalPlaces,
-                    font: .title3.weight(.bold).monospacedDigit(),
+                    font: font,
                     textColor: .primary,
                     animationDuration: NumberPresentation.trafficDuration(sampleInterval: sampleInterval,
                                                            reduceMotion: reduceMotion),
                     suffix: components.unit
                 )
             } else {
-                Text("—").font(.title3.weight(.bold).monospacedDigit())
+                Text("—").font(font)
             }
         }
         .lineLimit(1)

@@ -15,7 +15,8 @@ struct OpenU60App: App {
     @State private var showCallingProbe = Foundation.ProcessInfo.processInfo.arguments.contains("--native-callkit-probe")
 #endif
     @Environment(\.scenePhase) private var scenePhase
-    @State private var isAttemptingAutoLogin = true
+    /// Saved credentials open the app on cached state at once; sign-in completes behind it.
+    @State private var hasStoredPassword = Self.storedPasswordAvailable()
     @AppStorage("gateway_ip") private var gatewayIP: String = "192.168.0.1"
     @AppStorage("dark_mode_override") private var darkModeOverride: Int = 0
 
@@ -88,25 +89,9 @@ struct OpenU60App: App {
 
     @ViewBuilder
     private var rootView: some View {
-        if authManager.isAuthenticated {
+        if authManager.isAuthenticated || (hasStoredPassword && !authManager.storedPasswordRejected) {
             TabBarView(model: model).id(model.device.id)
-        } else if isAttemptingAutoLogin {
-            VStack(spacing: 16) {
-                Image(systemName: "wifi.router.fill")
-                    .font(.system(size: 64))
-                    .foregroundStyle(.blue)
-                    .accessibilityHidden(true)
-                Text("ZTE U60 Pro")
-                    .font(.title.bold())
-                ProgressView()
-                    .accessibilityLabel("Signing in")
-            }
-            .task {
-                if KeychainHelper.load(key: "router_password") != nil {
-                    if await attemptAutoLogin() { return }
-                }
-                isAttemptingAutoLogin = false
-            }
+                .task { if !authManager.isAuthenticated { _ = await attemptAutoLogin() } }
         } else {
             LoginView(authManager: authManager)
                 .safeAreaInset(edge: .bottom) {
@@ -125,12 +110,22 @@ struct OpenU60App: App {
         }
     }
 
+    private static func storedPasswordAvailable() -> Bool {
+#if DEBUG
+        // Simulator runs against a mock agent: `-debug_router_password <value>` seeds the Keychain.
+        if let password = UserDefaults.standard.string(forKey: "debug_router_password"), !password.isEmpty {
+            KeychainHelper.save(key: "router_password", value: password)
+        }
+#endif
+        return KeychainHelper.load(key: "router_password") != nil
+    }
+
     // MARK: - Auto-login
 
     /// Stored credentials should not be abandoned because Wi-Fi had not settled at launch, so the
-    /// silent login gets a few quick tries. The window keeps a genuinely unreachable agent from
-    /// holding the splash screen: once a request has burned its timeout there is nothing transient
-    /// left to wait out, and the password screen is the better answer.
+    /// silent login gets a few quick tries. After the window, polling's 401 hook keeps signing in
+    /// as the router becomes reachable; the app stays on its cached state, marked offline, and
+    /// only a refused password returns to the password screen.
     private static let autoLoginAttempts = 3
     private static let autoLoginRetryDelay: TimeInterval = 1
     private static let autoLoginWindow: TimeInterval = 8
@@ -142,6 +137,7 @@ struct OpenU60App: App {
             // Bypasses the re-auth cooldown, which throttles open-ended poll-tick storms and would
             // otherwise turn every try after the first into a no-op that issues no request at all.
             if await authManager.reauthenticate(ignoringCooldown: true) { return true }
+            if authManager.storedPasswordRejected { return false }
             // The delay has to fit inside the window too. A try that failed instantly raced the
             // interface coming up and is worth repeating; one that consumed most of the window
             // reached the timeout, and a second timeout would strand the splash screen for

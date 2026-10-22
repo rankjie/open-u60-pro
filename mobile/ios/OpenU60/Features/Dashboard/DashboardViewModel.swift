@@ -32,6 +32,10 @@ final class DashboardViewModel {
     var batteryUpdatedAt: Date?
     var cpuUpdatedAt: Date?
     var speed: TrafficSpeed = .zero
+    /// The last minute of measured samples, oldest first. Cleared whenever the sample chain breaks,
+    /// so the chart never bridges a gap with values that were not measured.
+    private(set) var speedHistory: [TrafficSpeed] = []
+    static let speedHistoryLimit = 60
     var isTrafficAvailable = false
     var trafficUpdatedAt: Date?
     var trafficStats: TrafficStats = .empty
@@ -115,9 +119,63 @@ final class DashboardViewModel {
     /// How often the traffic fallback chain restarts from the best tier, so recovery still happens.
     private static let trafficReprobeInterval: TimeInterval = 60
 
-    init(client: AgentClient, authManager: AuthManager) {
+    /// The last confirmed readings of one router. A cold start shows them at once, with their
+    /// age, instead of dashes until the first round trip. Live traffic is never restored.
+    struct Snapshot: Codable {
+        var nr: NRSignal, lte: LTESignal, wcdma: WCDMASignal, operatorInfo: OperatorInfo
+        var battery: BatteryStatus, batteryUpdatedAt: Date?
+        var thermal: ThermalStatus, thermalUpdatedAt: Date?
+        var systemInfo: SystemInfo, cpuUpdatedAt: Date?
+        var wifi: WifiStatus, devices: [ConnectedDevice]
+        var wanIPv4: String, wanIPv6: String
+        var airplane: Bool, mobileDataOff: Bool
+        var updatedAt: Date
+    }
+    private let identity: () -> UUID?
+    private let cache: DeviceSnapshotCache<Snapshot>
+    @ObservationIgnored private var savedAt: Date?
+
+    init(client: AgentClient, authManager: AuthManager, identity: @escaping () -> UUID? = { nil },
+         directory: URL = .applicationSupportDirectory.appending(path: "Dashboard", directoryHint: .isDirectory)) {
         self.client = client
         self.authManager = authManager
+        self.identity = identity
+        self.cache = DeviceSnapshotCache(directory: directory)
+        restore()
+    }
+
+    private func restore() {
+        guard let router = identity() else { return }
+        do {
+            guard let saved = try cache.load(routerID: router) else { return }
+            nrSignal = saved.nr; lteSignal = saved.lte; wcdmaSignal = saved.wcdma; operatorInfo = saved.operatorInfo
+            battery = saved.battery; batteryUpdatedAt = saved.batteryUpdatedAt
+            thermal = saved.thermal; thermalUpdatedAt = saved.thermalUpdatedAt
+            systemInfo = saved.systemInfo; cpuUpdatedAt = saved.cpuUpdatedAt
+            wifiStatus = saved.wifi; connectedDevices = saved.devices
+            wanIPv4 = saved.wanIPv4; wanIPv6 = saved.wanIPv6
+            isAirplaneMode = saved.airplane; isMobileDataOff = saved.mobileDataOff
+            lastUpdated = saved.updatedAt; savedAt = saved.updatedAt
+        } catch {
+            logger.error("Dashboard snapshot unreadable: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Written at most every 15 seconds while polling, and once when polling stops.
+    private func persist(force: Bool = false) {
+        guard let router = identity(), let lastUpdated else { return }
+        if !force, let savedAt, lastUpdated.timeIntervalSince(savedAt) < 15 { return }
+        savedAt = lastUpdated
+        let snapshot = Snapshot(nr: nrSignal, lte: lteSignal, wcdma: wcdmaSignal, operatorInfo: operatorInfo,
+            battery: battery, batteryUpdatedAt: batteryUpdatedAt, thermal: thermal, thermalUpdatedAt: thermalUpdatedAt,
+            systemInfo: systemInfo, cpuUpdatedAt: cpuUpdatedAt, wifi: wifiStatus, devices: connectedDevices,
+            wanIPv4: wanIPv4, wanIPv6: wanIPv6, airplane: isAirplaneMode, mobileDataOff: isMobileDataOff,
+            updatedAt: lastUpdated)
+        let cache = cache
+        Task.detached(priority: .utility) {
+            do { try cache.save(snapshot, routerID: router) }
+            catch { logger.error("Dashboard snapshot not saved: \(error.localizedDescription, privacy: .public)") }
+        }
     }
 
     // MARK: - Polling
@@ -134,6 +192,7 @@ final class DashboardViewModel {
         if !trafficPoller.isRunning {
             // A pre-pause baseline must not pair with a sample minutes later.
             previousTraffic = nil
+            speedHistory.removeAll()
             // Likewise for the cadence: the pause itself is not a measurement interval.
             lastDistinctTrafficAt = nil
             trafficSampleInterval = Self.defaultSampleInterval
@@ -157,6 +216,7 @@ final class DashboardViewModel {
     }
 
     func stopPolling() {
+        if poller.isRunning { persist(force: true) }
         poller.stop()
         trafficPoller.stop()
         healthPoller.stop()
@@ -318,7 +378,10 @@ final class DashboardViewModel {
             }
         }
 
-        if reachable { lastUpdated = Date() }
+        if reachable {
+            lastUpdated = Date()
+            persist()
+        }
         logger.debug("refresh done")
         return reachable
     }
@@ -364,6 +427,7 @@ final class DashboardViewModel {
                 self.isTrafficAvailable = false
                 self.previousTraffic = nil
                 self.lastDistinctTrafficAt = nil
+                self.speedHistory.removeAll()
                 return false
             }
             let now = Date()
@@ -385,6 +449,10 @@ final class DashboardViewModel {
                 previous: self.previousTraffic ?? traffic, current: traffic
             )
             if speed != self.speed { self.speed = speed }
+            if self.previousTraffic != nil {
+                self.speedHistory.append(speed)
+                if self.speedHistory.count > Self.speedHistoryLimit { self.speedHistory.removeFirst() }
+            }
             self.previousTraffic = traffic
             self.trafficStats = traffic
             self.trafficUpdatedAt = now
@@ -653,8 +721,10 @@ final class DashboardViewModel {
     private func fetchMobileDataStatus(enabled: Bool) async -> Bool? {
         guard enabled, let data = try? await client.getJSON("/api/modem/data") else { return nil }
         let wwan = MobileNetworkParser.parseWWAN(data)
-        let connected = wwan.connectStatus.contains("connected")
-        return wwan.dataEnabled == 0 && !connected
+        // "disconnected" contains "connected"; use the exact session states.
+        var connection = MobileNetworkConfig.empty
+        connection.connectStatus = wwan.connectStatus
+        return wwan.dataEnabled == 0 && !connection.isConnected
     }
 
     // MARK: - Parsing

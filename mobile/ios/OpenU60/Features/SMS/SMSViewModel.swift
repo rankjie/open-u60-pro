@@ -23,6 +23,9 @@ final class SMSViewModel {
     var capacity: SMSCapacity = .empty
     var isLoading = false
     var isSending = false
+    /// Push deliveries update this through the same state as list reads, so the tab badge moves
+    /// the moment a message arrives.
+    var unreadCount: Int { conversations.reduce(0) { $0 + $1.unreadCount } }
     var error: String?
 
     private struct Inbox: Codable {

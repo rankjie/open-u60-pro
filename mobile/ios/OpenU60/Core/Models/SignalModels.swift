@@ -1,6 +1,6 @@
 import Foundation
 
-struct NRSignal: Equatable {
+struct NRSignal: Equatable, Codable {
     var rsrp: Double?
     var rsrq: Double?
     var sinr: Double?
@@ -22,7 +22,7 @@ struct NRSignal: Equatable {
     }
 }
 
-struct LTECarrier: Equatable, Identifiable {
+struct LTECarrier: Equatable, Identifiable, Codable {
     var id: String { "\(label)-\(band)-\(pci)-\(earfcn)" }
     var label: String = ""
     var pci: String = ""
@@ -35,7 +35,7 @@ struct LTECarrier: Equatable, Identifiable {
     var rssi: Double?
 }
 
-struct LTESignal: Equatable {
+struct LTESignal: Equatable, Codable {
     var rsrp: Double?
     var rsrq: Double?
     var sinr: Double?
@@ -58,7 +58,7 @@ struct LTESignal: Equatable {
     }
 }
 
-struct WCDMASignal: Equatable {
+struct WCDMASignal: Equatable, Codable {
     var rscp: Double?
     var ecio: Double?
 
@@ -67,7 +67,7 @@ struct WCDMASignal: Equatable {
     var isConnected: Bool { rscp != nil }
 }
 
-struct OperatorInfo: Equatable {
+struct OperatorInfo: Equatable, Codable {
     var provider: String = ""
     var networkType: String = ""
     var signalBar: Int = 0

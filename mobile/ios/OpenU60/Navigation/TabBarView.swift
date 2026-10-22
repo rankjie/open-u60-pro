@@ -9,9 +9,10 @@ struct TabBarView: View {
     @Environment(SMSNotificationManager.self) private var notifications
     @Environment(RemoteCallingManager.self) private var calling
 
-    private enum Tab: Hashable { case dashboard, calls, sms, settings }
-    @State private var selectedTab: Tab = .dashboard
+    private enum Tab: String, Hashable { case dashboard, calls, sms, settings }
+    @State private var selectedTab: Tab = Self.initialTab
     @State private var callPath: [CallDestination] = []
+    @State private var messagePath: [String] = []
 
     private var dashboardVM: DashboardViewModel { model.device.dashboard }
     private var smsVM: SMSViewModel { model.device.messages }
@@ -25,7 +26,11 @@ struct TabBarView: View {
     var body: some View {
         TabView(selection: $selectedTab) {
             DashboardView(viewModel: dashboardVM, isAuthenticated: authManager.isAuthenticated,
-                         client: client, authManager: authManager, usbViewModel: usbVM)
+                         client: client, authManager: authManager, usbViewModel: usbVM,
+                         messages: smsVM, openConversation: { id in
+                             messagePath = [id]
+                             selectedTab = .sms
+                         })
                 .tabItem {
                     Label("Home", systemImage: "gauge.with.needle")
                 }
@@ -42,10 +47,11 @@ struct TabBarView: View {
                 .tabItem { Label("Calls", systemImage: "phone.fill") }
                 .tag(Tab.calls)
 
-            SMSListView(viewModel: smsVM, client: client, authManager: authManager)
+            SMSListView(viewModel: smsVM, client: client, authManager: authManager, messagePath: $messagePath)
                 .tabItem {
                     Label("Messages", systemImage: "message")
                 }
+                .badge(smsVM.unreadCount)
                 .tag(Tab.sms)
 
             SettingsView(client: client, authManager: authManager)
@@ -85,6 +91,14 @@ struct TabBarView: View {
             dashboardVM.stopPolling()
             usbVM.stopPolling()
         }
+    }
+
+    private static var initialTab: Tab {
+#if DEBUG
+        // Simulator screenshots: `-debug_tab sms`.
+        if let raw = UserDefaults.standard.string(forKey: "debug_tab"), let tab = Tab(rawValue: raw) { return tab }
+#endif
+        return .dashboard
     }
 
     // MARK: - Polling gates

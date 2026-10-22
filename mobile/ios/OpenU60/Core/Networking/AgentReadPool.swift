@@ -5,7 +5,7 @@ import Foundation
 final class AgentReadPool {
     private var scope: String?
     private var generation = 0
-    private var pending: [String: (id: UUID, task: Task<Data, Error>)] = [:]
+    private var pending: [String: (id: UUID, task: Task<AgentHTTPResponse, Error>)] = [:]
 
     func invalidate() {
         generation += 1
@@ -19,7 +19,7 @@ final class AgentReadPool {
         }
     }
 
-    func read(scope: String, path: String, load: @escaping @MainActor () async throws -> Data) async throws -> Data {
+    func read(scope: String, path: String, load: @escaping @MainActor () async throws -> AgentHTTPResponse) async throws -> AgentHTTPResponse {
         if self.scope != scope { invalidate(); self.scope = scope }
         if let existing = pending[path] { return try await existing.task.value }
         let id = UUID(), generation = generation

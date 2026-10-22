@@ -3,10 +3,11 @@ import Combine
 
 struct SMSListView: View {
     @Environment(SMSNotificationManager.self) private var notifications
-    @State private var messagePath: [String] = []
     var viewModel: SMSViewModel
     let client: AgentClient
     let authManager: AuthManager
+    /// Owned by the tab container so Home can open a thread directly.
+    @Binding var messagePath: [String]
     @State private var showCompose = false
     @State private var searchText = ""
 
@@ -40,9 +41,10 @@ struct SMSListView: View {
                 }
 
                 Section {
+                    let showsLine = Set(viewModel.allMessages.map(\.lineLabel)).count > 1
                     ForEach(filteredConversations) { conversation in
                         NavigationLink(value: conversation.id) {
-                            SMSConversationRow(conversation: conversation, now: now)
+                            SMSConversationRow(conversation: conversation, now: now, showsLine: showsLine)
                         }
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) {
@@ -51,8 +53,8 @@ struct SMSListView: View {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
-                        .listRowInsets(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 16))
-                        .alignmentGuide(.listRowSeparatorLeading) { _ in 76 }
+                        .listRowInsets(EdgeInsets(top: 10, leading: 8, bottom: 10, trailing: 16))
+                        .alignmentGuide(.listRowSeparatorLeading) { _ in 72 }
                     }
                 }
             }
@@ -130,52 +132,61 @@ private struct SMSConversationRow: View {
     let conversation: SMSConversation
     /// Bumped by the list's ticker, so the timestamp keeps up without a timer of its own.
     let now: Date
+    /// The line is only worth a row when the inbox spans more than one.
+    let showsLine: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
+        let unread = conversation.unreadCount > 0
+        let latest = conversation.messages.last
+        let code = latest.flatMap { $0.tag.isIncoming && now.timeIntervalSince($0.date) < 86400 ? SMSParser.verificationCode(in: $0.content) : nil }
+        let brand = conversation.brand
+        HStack(alignment: .top, spacing: 8) {
             Circle()
-                .fill(conversation.unreadCount > 0 ? Color.blue : Color.clear)
+                .fill(unread ? Color.blue : Color.clear)
                 .frame(width: 8, height: 8)
+                .padding(.top, 18)
                 .accessibilityHidden(true)
-            Image(systemName: "person.fill")
-                .font(.system(size: 26))
-                .foregroundStyle(.white)
-                .frame(width: 48, height: 48)
-                .background(Color(.systemGray3), in: Circle())
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(conversation.number)
-                        .font(.body.weight(.semibold))
+            ContactAvatar(number: conversation.number, name: brand)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(brand ?? conversation.number)
+                        .font(.body.weight(unread ? .semibold : .regular))
                         .lineLimit(1)
-                    Spacer()
+                    Spacer(minLength: 8)
                     Text(timestamp)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.caption.weight(unread ? .semibold : .regular))
+                        .foregroundStyle(unread ? Color.blue : Color.secondary)
                         .lineLimit(1)
                 }
-                Text(conversation.latestMessage)
+                Text(conversation.preview)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Text(conversation.messages.last?.lineLabel ?? "Line unknown")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(1)
+                if code != nil || showsLine || brand != nil {
+                    HStack(spacing: 8) {
+                        if let code { CodeChip(code: code) }
+                        Facts(brand == nil ? nil : conversation.number, showsLine ? latest?.lineLabel ?? "Line unknown" : nil)
+                    }
+                    .padding(.top, 2)
+                }
             }
         }
-        .frame(minHeight: 64)
         .accessibilityElement(children: .combine)
         .accessibilityValue(conversation.unreadCount > 0 ? "\(conversation.unreadCount) unread messages" : "")
     }
 
-    private var timestamp: String {
+    private var timestamp: String { SMSTimestamp.short(conversation.latestTime, now: now) }
+}
+
+enum SMSTimestamp {
+    static func short(_ date: Date, now: Date) -> String {
         let calendar = Calendar.autoupdatingCurrent
-        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: conversation.latestTime),
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date),
                                             to: calendar.startOfDay(for: now)).day
-        if days == 0 { return conversation.latestTime.formatted(date: .omitted, time: .shortened) }
-        if days == 1 { return "Yesterday" }
-        if let days, (2..<7).contains(days) { return conversation.latestTime.formatted(.dateTime.weekday(.wide)) }
-        return conversation.latestTime.formatted(date: .numeric, time: .omitted)
+        if days == 0 { return date.formatted(date: .omitted, time: .shortened) }
+        if days == 1 { return String(localized: "Yesterday") }
+        if let days, (2..<7).contains(days) { return date.formatted(.dateTime.weekday(.wide)) }
+        return date.formatted(date: .numeric, time: .omitted)
     }
 }

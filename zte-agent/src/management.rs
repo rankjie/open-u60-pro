@@ -82,7 +82,8 @@ impl Request {
         Ok((method, body))
     }
     fn read_only(&self) -> bool {
-        self.method == "GET" || (self.method == "POST" && self.path == "/api/sms/list")
+        self.method == "GET"
+            || (self.method == "POST" && (self.path == "/api/sms/list" || self.path == "/api/batch"))
     }
     fn fingerprint(&self) -> String {
         let mut hash = Sha256::new();
@@ -358,7 +359,7 @@ mod tests {
     fn reads_can_retry_without_persisting_their_contents() {
         let fixture = Fixture::new();
         let manager = fixture.manager();
-        for (method, path) in [("GET", "/api/battery"), ("POST", "/api/sms/list")] {
+        for (method, path) in [("GET", "/api/battery"), ("POST", "/api/sms/list"), ("POST", "/api/batch")] {
             let request = request(method, path);
             for _ in 0..2 {
                 assert_eq!(

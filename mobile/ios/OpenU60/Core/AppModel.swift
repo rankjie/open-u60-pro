@@ -79,7 +79,7 @@ final class RouterSession {
     let recordings: CallRecordingLibrary
 
     init(client: AgentClient, auth: AuthManager) {
-        dashboard = DashboardViewModel(client: client, authManager: auth)
+        dashboard = DashboardViewModel(client: client, authManager: auth, identity: { [weak client] in client?.relayAccess?()?.routerID })
         messages = SMSViewModel(client: client, identity: { [weak client] in client?.relayAccess?()?.routerID })
         usb = USBConnectionViewModel(client: client, authManager: auth)
         internet = WiFiInternetViewModel(client: client)

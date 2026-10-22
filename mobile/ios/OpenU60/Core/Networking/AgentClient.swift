@@ -12,8 +12,9 @@ final class AgentClient {
     var token: String?
     @ObservationIgnored var relayAccess: (@MainActor () -> AgentRelayAccess?)?
     @ObservationIgnored var peerRequest: AgentPeerRequest?
-    private let transport = AgentTransport()
+    private let transport: AgentTransport
     private let reads = AgentReadPool()
+    @ObservationIgnored private var batcher: AgentReadBatcher!
     var connectionRoute: AgentTransport.Route {
         relayAccess?() == nil ? (token == nil ? .unavailable : .local) : transport.route
     }
@@ -30,17 +31,24 @@ final class AgentClient {
     private let session: URLSession
 
     init(baseURL: String = "http://192.168.0.1:9090") {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 10
-        config.timeoutIntervalForResource = 15
         // Every response is live device state polled on a timer: it must not be served from a
         // cache, nor written to the shared on-disk one. The interface is deliberately left to the
         // routing table — the configured host is whatever the user typed, and pinning the session
         // to Wi-Fi would fail every request as "Cannot reach the agent" with no way to relax it.
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        config.urlCache = nil
-        self.session = URLSession(configuration: config)
+        let session = AgentTransport.makeSession()
+        self.session = session
+        self.transport = AgentTransport(session: session)
         self.baseURL = baseURL
+        batcher = AgentReadBatcher(
+            single: { [weak self] path in
+                guard let self else { throw CancellationError() }
+                return AgentHTTPResponse(status: 200, data: try await self.sendUnshared(method: "GET", path: path, body: nil, parse: { $0 }))
+            },
+            batch: { [weak self] paths in
+                guard let self else { throw CancellationError() }
+                let body = try JSONSerialization.data(withJSONObject: ["requests": paths.map { ["path": $0] }])
+                return AgentHTTPResponse(status: 200, data: try await self.sendUnshared(method: "POST", path: "/api/batch", body: body, parse: { $0 }))
+            })
     }
 
     // MARK: - Typed REST methods
@@ -253,10 +261,11 @@ final class AgentClient {
         if isRead, authenticated, retryOnUnauthorized {
             let scope = "\(relayAccess?()?.server.absoluteString ?? "local")/\(simDevice)/\(baseURL)"
             let key = path + (body.map { "?" + $0.base64EncodedString() } ?? "")
-            let bytes = try await reads.read(scope: scope, path: key) {
-                try await self.sendUnshared(method: method, path: path, body: body, parse: { $0 })
+            let response = try await reads.read(scope: scope, path: key) {
+                if method == "GET" { return try await self.batcher.read(scope: scope, path: path) }
+                return AgentHTTPResponse(status: 200, data: try await self.sendUnshared(method: method, path: path, body: body, parse: { $0 }))
             }
-            return try await Self.process(AgentHTTPResponse(status: 200, data: bytes), parse: parse).value
+            return try await Self.process(response, parse: parse).value
         }
         // A read that overlaps a mutation cannot publish the preceding state afterwards.
         let group = "/" + path.split(separator: "/").prefix(2).joined(separator: "/")
@@ -299,6 +308,7 @@ final class AgentClient {
 
         var req = URLRequest(url: url)
         req.httpMethod = method
+        req.timeoutInterval = 10
         if body != nil {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }

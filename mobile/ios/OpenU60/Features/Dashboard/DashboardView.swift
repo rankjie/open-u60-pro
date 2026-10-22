@@ -6,6 +6,8 @@ struct DashboardView: View {
     let client: AgentClient
     let authManager: AuthManager
     let usbViewModel: USBConnectionViewModel
+    let messages: SMSViewModel
+    let openConversation: (String) -> Void
 
     @State private var signalMonitorVM: SignalMonitorViewModel?
     @State private var networkModeVM: NetworkModeViewModel?
@@ -16,12 +18,15 @@ struct DashboardView: View {
     @Environment(AppModel.self) private var app
     private var internetModel: WiFiInternetViewModel { app.device.internet }
 
-    init(viewModel: DashboardViewModel, isAuthenticated: Bool, client: AgentClient, authManager: AuthManager, usbViewModel: USBConnectionViewModel) {
+    init(viewModel: DashboardViewModel, isAuthenticated: Bool, client: AgentClient, authManager: AuthManager,
+         usbViewModel: USBConnectionViewModel, messages: SMSViewModel, openConversation: @escaping (String) -> Void) {
         self.viewModel = viewModel
         self.isAuthenticated = isAuthenticated
         self.client = client
         self.authManager = authManager
         self.usbViewModel = usbViewModel
+        self.messages = messages
+        self.openConversation = openConversation
     }
 
     var body: some View {
@@ -29,40 +34,28 @@ struct DashboardView: View {
         NavigationStack {
             ScrollView {
                 // Keep summary view identities stable while samples update and sheets open.
-                VStack(spacing: 12) {
+                VStack(spacing: Design.gap) {
                     if usbViewModel.usbStatus.showsPowerControl { USBPowerControl(viewModel: usbViewModel) }
                     ForEach(banners) { config in
                         SIMAlertBanner(config: config)
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
-                    Button { detail = .internet } label: {
-                        InternetOverview(model: internetModel)
+                    InternetHero(viewModel: viewModel, internet: internetModel,
+                                 openInternet: { detail = .internet }, openTraffic: { detail = .traffic })
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: Design.tileMinWidth), spacing: Design.gap)],
+                              spacing: Design.gap) {
+                        SignalTile(viewModel: viewModel) { detail = .connection }
+                        BatteryTile(viewModel: viewModel, usb: usbViewModel) { detail = .battery }
+                        DevicesTile(viewModel: viewModel) { detail = .wifi }
+                        SystemTile(viewModel: viewModel) { detail = .health }
                     }
-                    .buttonStyle(.plain)
-                    Button { detail = .traffic } label: {
-                        CellularCardScope(viewModel: viewModel, compact: true)
-                    }
-                    .buttonStyle(.plain)
-                    CardView(padding: 0) {
-                        VStack(spacing: 0) {
-                            Button { detail = .wifi } label: {
-                                WiFiOverview(viewModel: viewModel)
-                            }
-                            .buttonStyle(.plain)
-                            Divider().padding(.leading, 52)
-                            Button { detail = .health } label: {
-                                HealthOverview(viewModel: viewModel)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    Button { detail = .battery } label: {
-                        BatteryOverviewScope(viewModel: viewModel, usbViewModel: usbViewModel)
-                    }
-                    .buttonStyle(.plain)
+                    LatestMessageTile(messages: messages, open: openConversation)
                     DashboardUpdateStatus(viewModel: viewModel)
                 }
-                .padding()
+                .padding(.horizontal)
+                .padding(.bottom)
+                .frame(maxWidth: 960)
+                .frame(maxWidth: .infinity)
                 .animation(.easeInOut, value: banners)
             }
             .background(Color(.systemGroupedBackground))
@@ -388,16 +381,6 @@ private struct BatteryDetailScope: View {
     }
 }
 
-private struct BatteryOverviewScope: View {
-    let viewModel: DashboardViewModel
-    let usbViewModel: USBConnectionViewModel
-
-    var body: some View {
-        BatteryOverviewCard(battery: viewModel.battery, updatedAt: viewModel.batteryUpdatedAt,
-                            powerbankActive: usbViewModel.usbStatus.powerbankActive)
-    }
-}
-
 private struct CPUDetailScope: View {
     let viewModel: DashboardViewModel
     let client: AgentClient
@@ -480,7 +463,6 @@ private struct SIMAlertBanner: View {
     }
 }
 
-
 private struct TemperatureCardScope: View {
     let viewModel: DashboardViewModel
 
@@ -510,47 +492,6 @@ private struct OverviewHeading: View {
             Spacer(minLength: 4)
             Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
         }
-    }
-}
-
-private struct InternetOverview: View {
-    let model: WiFiInternetViewModel
-    var body: some View {
-        CardView {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    Label("Internet", systemImage: "globe").font(.subheadline.weight(.semibold))
-                    Spacer(minLength: 4)
-                    if let status = model.status {
-                        Text(status.config.mode == .repeater ? "Wi-Fi Repeater" : "SIM Hotspot")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Image(systemName: "chevron.right")
-                        .font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
-                }
-                if let status = model.status {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(status.config.mode == .repeater ? status.config.ssid : status.sourceLabel)
-                            .font(.title3.bold())
-                        Spacer()
-                        Text(model.refreshError == nil ? status.label : "Status unavailable")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(model.refreshError != nil || status.phase == "failed" ? .red : (status.connectivity == "online" ? .green : .secondary))
-                    }
-                    if status.config.mode == .repeater {
-                        Text("\(status.config.band.label) upstream → \(status.config.band.hotspotLabel) hotspot")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                } else if model.refreshError == nil {
-                    ProgressView("Checking internet source…")
-                }
-                if let error = model.refreshError {
-                    Text(error).font(.caption).foregroundStyle(.red)
-                }
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("internet-overview")
     }
 }
 
@@ -712,48 +653,6 @@ private struct BatteryStatusIcon: View {
         .frame(width: 38, height: 18)
         .accessibilityHidden(true)
         .transaction { $0.animation = nil }
-    }
-}
-
-private struct HealthOverview: View {
-    let viewModel: DashboardViewModel
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "cpu").foregroundStyle(.secondary).frame(width: 24)
-            Text("System").font(.subheadline.weight(.medium))
-            Spacer(minLength: 4)
-            if viewModel.cpuUpdatedAt != nil {
-                Text("\(viewModel.systemInfo.cpuUsagePercent, specifier: "%.0f")% CPU")
-                    .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
-            } else { Text("Unavailable").font(.subheadline).foregroundStyle(.secondary) }
-            Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
-        }
-        .padding(16)
-        .frame(minHeight: 56)
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
-        .accessibilityHint("Opens CPU, memory, processes and temperatures")
-    }
-}
-
-private struct WiFiOverview: View {
-    let viewModel: DashboardViewModel
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "wifi").foregroundStyle(.blue).frame(width: 24)
-            Text("Hotspot & devices").font(.subheadline.weight(.medium))
-            Spacer(minLength: 4)
-            Text(viewModel.wifiStatus.wifiOn ? "\(viewModel.connectedDevices.count) connected" : "Wi-Fi off")
-                .font(.subheadline).foregroundStyle(.secondary)
-            Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
-        }
-        .padding(16)
-        .frame(minHeight: 56)
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
-        .accessibilityHint("Opens hotspot sharing and connected devices")
     }
 }
 

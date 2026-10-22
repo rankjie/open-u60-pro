@@ -9,6 +9,7 @@ swiftc -swift-version 5 -parse-as-library \
     "$openu60_root/mobile/ios/OpenU60/Core/Networking/PeerFrames.swift" \
     "$openu60_root/mobile/ios/OpenU60/Core/Networking/AgentClient.swift" \
     "$openu60_root/mobile/ios/OpenU60/Core/Networking/AgentReadPool.swift" \
+    "$openu60_root/mobile/ios/OpenU60/Core/Networking/AgentReadBatcher.swift" \
     "$openu60_root/mobile/ios/OpenU60/Core/Models/SimIdentity.swift" \
     "$openu60_root/mobile/ios/OpenU60/Core/Models/CellularLine.swift" \
     "$openu60_root/mobile/ios/OpenU60/Core/Models/SIMState.swift" \

@@ -31,6 +31,37 @@ struct SMSParserTests {
         let noSIM = try CellularLine.current(["sim_states": "sim undetected"])
         precondition(noSIM == nil)
         print("SMSParserTests: whole-message decoding, Unicode, line identity, unknown numbers and malformed input passed")
+        let codes: [(String, String?)] = [
+            ("【招商银行】您的验证码为 482913，5分钟内有效。", "482913"),
+            ("Your Apple ID code is: 739104. Don't share it.", "739104"),
+            ("G-583920 is your Google verification code.", "583920"),
+            ("动态密码 123456，请勿泄露", "123456"),
+            ("您的校验码是0412", "0412"),
+            ("验证码 771203，如非本人操作请致电 95555", "771203"),
+            ("Your login code is 5521. Ref 99887766", "5521"),
+            ("您本月已使用流量 1024MB，余额 35.20元", nil),
+            ("Your order 123456789 has shipped", nil),
+            ("Meeting moved to 1530 tomorrow", nil),
+            ("OTP 12.5034 is not a code", nil),
+            ("", nil),
+        ]
+        let brands: [(String, String?)] = [
+            ("【京东】验证码：482913，您正在登录京东账号", "京东"),
+            ("您的验证码为 1234，请勿泄露。【招商银行】", "招商银行"),
+            ("[Alipay] Your code is 1234", "Alipay"),
+            ("No brackets here", nil),
+            ("【】空的", nil),
+            ("【这是一个非常非常非常长的不是品牌的括号内容】", nil),
+            ("Reply 【1】 to confirm", nil),
+        ]
+        for (text, expected) in brands {
+            let found = SMSParser.senderBrand(in: text)
+            precondition(found == expected, "brand for \(text): \(found ?? "nil")")
+        }
+        for (text, expected) in codes {
+            let found = SMSParser.verificationCode(in: text)
+            precondition(found == expected, "verification code for \(text): \(found ?? "nil")")
+        }
     }
 
     private static func message(_ body: String) -> SMSMessage {

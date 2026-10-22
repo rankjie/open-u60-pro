@@ -1,6 +1,7 @@
 mod at_cmd;
 mod at_terminal;
 mod auth;
+mod batch;
 mod bearer;
 mod cache;
 mod cell;

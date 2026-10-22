@@ -30,12 +30,21 @@ final class AgentTransport {
         var now: TimeInterval { time + observed.duration(to: .now).seconds }
     }
 
-    init(load: (@Sendable (URLRequest, Int) async throws -> AgentHTTPResponse)? = nil) {
+    /// One connection pool for every request to the agent. tiny_http parks a worker thread per
+    /// open connection, so the pool stays at the agent's thread count instead of iOS's six per
+    /// host per session; keep-alive then reuses those sockets across ticks.
+    nonisolated static func makeSession() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.httpMaximumConnectionsPerHost = 4
         config.timeoutIntervalForRequest = 20
         config.timeoutIntervalForResource = 22
-        let session = URLSession(configuration: config)
+        return URLSession(configuration: config)
+    }
+
+    init(session: URLSession = AgentTransport.makeSession(),
+         load: (@Sendable (URLRequest, Int) async throws -> AgentHTTPResponse)? = nil) {
         self.load = load ?? { request, limit in
             let (bytes, response) = try await session.bytes(for: request)
             guard let response = response as? HTTPURLResponse else { throw AgentError.serverUnreachable }
@@ -64,7 +73,7 @@ final class AgentTransport {
         let effectID = UUID()
         let id = effectID.uuidString.lowercased()
         let encoded = (body ?? Data()).base64EncodedString()
-        let read = method == "GET" || (method == "POST" && path == "/api/sms/list")
+        let read = method == "GET" || (method == "POST" && (path == "/api/sms/list" || path == "/api/batch"))
         func payload(time: TimeInterval) throws -> Data {
             let remaining = ContinuousClock.now.duration(to: deadline).seconds
             guard remaining >= 1 else { throw AgentError.timeout }
