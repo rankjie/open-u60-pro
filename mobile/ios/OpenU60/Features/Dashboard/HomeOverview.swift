@@ -40,8 +40,8 @@ struct InternetHero: View {
 
     private var title: String {
         if repeater, let ssid = config?.ssid, !ssid.isEmpty { return ssid }
-        let provider = viewModel.operatorInfo.provider
-        return provider.isEmpty ? "U60" : provider
+        // The carrier names the Signal tile; the source here is the cellular link itself.
+        return "Cellular"
     }
 
     private var detail: String? {
@@ -143,7 +143,8 @@ struct SignalTile: View {
         let rsrp = nr.isConnected ? nr.rsrp : lte.rsrp
         let sinr = nr.isConnected ? nr.sinr : lte.sinr
         let band = nr.isConnected ? nr.band.bandLabel(prefix: "n") : lte.band.bandLabel(prefix: "B")
-        Tile(title: "Signal", icon: viewModel.isAirplaneMode ? "airplane" : "cellularbars", tint: Color.rsrpColor(rsrp),
+        let provider = viewModel.operatorInfo.provider
+        Tile(title: provider.isEmpty ? "Signal" : provider, icon: viewModel.isAirplaneMode ? "airplane" : "cellularbars", tint: Color.rsrpColor(rsrp),
              level: viewModel.isAirplaneMode ? nil : Double(Color.signalBars(rsrp)) / 4, action: action) {
             if viewModel.isAirplaneMode {
                 Metric(value: "Off")
