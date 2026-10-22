@@ -27,6 +27,12 @@ struct CallingServerChoice: Identifiable {
 
 struct SavedCallingCredentials: Codable {
     static let defaultServer = URL(string: "https://nl1.gmdns.net/openu60")!
+    /// The default server's doors, so a first connection can already use them (for example
+    /// from mainland China). The service's own list replaces these once it has been received.
+    static let defaultDoors = [
+        CallingDoor(address: "quic://141.144.206.203:47853#mWJybZSTT2HdGT2vcHLQ1SzstKmKA_xHva0u4qO_nQE", label: "Netherlands"),
+        CallingDoor(address: "quic://114.55.246.231:47853#3hiHx6QELdfjF5aANBiC4nFpxYzmL99-qpJ2BYF7O1w", label: "Hangzhou"),
+    ]
     private(set) var profiles: [CallingServerProfile]
     private(set) var selectedServer: URL
     private var selectedIndex: Int { profiles.firstIndex { $0.address == selectedServer }! }
@@ -39,7 +45,7 @@ struct SavedCallingCredentials: Codable {
         set { profiles[selectedIndex].pending = newValue }
     }
     var doors: [CallingDoor] {
-        get { profiles[selectedIndex].doors ?? [] }
+        get { profiles[selectedIndex].doors ?? (selectedServer == Self.defaultServer ? Self.defaultDoors : []) }
         set { profiles[selectedIndex].doors = newValue.isEmpty ? nil : newValue }
     }
     var pathPreference: String? {

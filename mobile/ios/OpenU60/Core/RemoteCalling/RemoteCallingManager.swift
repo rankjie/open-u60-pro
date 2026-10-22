@@ -240,6 +240,14 @@ final class RemoteCallingManager: NSObject {
             try saveCredentials(saved)
             doors = advertised
         } catch { present(error) }
+        // Measure the new list now rather than at the next reconnection, so the path list
+        // shows every door; requests already follow the current choice.
+        guard let credentials else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.paths.select(server: credentials.serverURL, token: credentials.phoneToken,
+                                    doors: self.doors, preference: self.pathPreference)
+        }
     }
     func addServer(_ address: String) throws {
         guard !serverOperationInProgress else { throw CallingError.server("server_operation_in_progress") }

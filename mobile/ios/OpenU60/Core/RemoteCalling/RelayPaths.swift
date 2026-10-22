@@ -65,6 +65,7 @@ final class RelayPaths {
     @ObservationIgnored private let makeTunnel: @MainActor (CallingDoor) -> (any DoorTunnel)?
     @ObservationIgnored private let probe: @MainActor (URL, String) async -> TimeInterval?
     @ObservationIgnored private var generation = UUID()
+    @ObservationIgnored private var selecting: Task<URL, Never>?
 
     init(makeTunnel: @escaping @MainActor (CallingDoor) -> (any DoorTunnel)?,
          probe: @escaping @MainActor (URL, String) async -> TimeInterval? = RelayPaths.status) {
@@ -79,8 +80,19 @@ final class RelayPaths {
         return url
     }
 
+    /// Selections run one at a time, so two of them never start a tunnel for the same door.
     @discardableResult
     func select(server: URL, token: String, doors: [CallingDoor], preference: String?) async -> URL {
+        let previous = selecting
+        let task = Task { @MainActor in
+            _ = await previous?.value
+            return await self.measure(server: server, token: token, doors: doors, preference: preference)
+        }
+        selecting = task
+        return await task.value
+    }
+
+    private func measure(server: URL, token: String, doors: [CallingDoor], preference: String?) async -> URL {
         let addresses = Set(doors.map(\.address))
         for (address, entry) in tunnels where !addresses.contains(address) {
             entry.tunnel.stop(); tunnels[address] = nil
