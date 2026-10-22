@@ -30,11 +30,7 @@ struct DeviceInfoView: View {
         }
         .navigationTitle("Device Info")
         .refreshable { await viewModel.refresh() }
-        .overlay {
-            if viewModel.isLoading {
-                ProgressView()
-            }
-        }
+        .operationStatus(message: nil, isError: false, isLoading: viewModel.isLoading)
         .task(id: viewModel.identityRevision) { await viewModel.refresh() }
     }
 

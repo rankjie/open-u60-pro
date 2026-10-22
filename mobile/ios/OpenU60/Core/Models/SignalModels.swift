@@ -81,8 +81,10 @@ struct OperatorInfo: Equatable, Codable {
 
     var networkMode: NetworkMode {
         let raw = networkType.uppercased()
-        if raw == "SA" || raw.contains("5G SA") || raw.contains("NR SA") || raw.contains("NR-SA") { return .sa }
-        if raw.contains("NSA") || raw == "ENDC" || raw == "EN-DC" { return .nsa }
+        // Firmware spellings vary: "SA", "5G SA", "NR-SA", "NR5G_SA", "NR5G-NSA".
+        let tokens = raw.split { !$0.isLetter && !$0.isNumber }
+        if tokens.contains("SA") { return .sa }
+        if tokens.contains("NSA") || raw.contains("NSA") || raw == "ENDC" || raw == "EN-DC" { return .nsa }
         if raw.contains("LTE") || raw == "4G" || raw == "4G+" { return .lte }
         if raw.contains("WCDMA") || raw.contains("UMTS") || raw.contains("GSM")
             || raw.contains("2G") || raw.contains("3G") { return .legacy }

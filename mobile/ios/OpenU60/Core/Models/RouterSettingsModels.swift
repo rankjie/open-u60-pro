@@ -654,37 +654,3 @@ enum VPNPassthroughParser {
         return false
     }
 }
-
-// MARK: - Scheduled Reboot
-
-struct ScheduleRebootConfig: Equatable {
-    var enabled: Bool
-    var time: String        // "HH:MM"
-    var days: String        // comma-separated day numbers
-
-    static let empty = ScheduleRebootConfig(enabled: false, time: "03:00", days: "")
-
-    static let dayOptions: [(label: String, value: String)] = [
-        ("Mon", "1"), ("Tue", "2"), ("Wed", "3"), ("Thu", "4"),
-        ("Fri", "5"), ("Sat", "6"), ("Sun", "0")
-    ]
-}
-
-enum ScheduleRebootParser {
-    static func parse(_ data: [String: Any]) -> ScheduleRebootConfig {
-        ScheduleRebootConfig(
-            enabled: asBool(data["auto_reboot_enable"]),
-            time: data["auto_reboot_time"] as? String ?? "03:00",
-            days: data["auto_reboot_days"] as? String ?? ""
-        )
-    }
-
-    private static func asBool(_ value: Any?) -> Bool {
-        if let str = value as? String {
-            return str == "1" || str.lowercased() == "true" || str.lowercased() == "on"
-        }
-        if let num = value as? Int { return num != 0 }
-        if let b = value as? Bool { return b }
-        return false
-    }
-}

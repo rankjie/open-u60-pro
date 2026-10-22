@@ -142,7 +142,7 @@ pub fn router_firewall_dmz_set(_state: &AppState, body: &[u8]) -> (u16, Value) {
 }
 
 pub fn router_firewall_upnp_get(_state: &AppState) -> (u16, Value) {
-    match ubus::call("zwrt_router.api", "router_get_upnp_switch", Some("{}")) {
+    match ubus::call("zwrt_router.api", "router_get_upnp", Some("{}")) {
         Ok(data) => (200, json!({"ok": true, "data": data})),
         Err(e) => (503, json!({"ok": false, "error": e})),
     }
@@ -214,7 +214,7 @@ pub fn router_vpn_set(_state: &AppState, body: &[u8]) -> (u16, Value) {
 }
 
 pub fn router_qos_get(_state: &AppState) -> (u16, Value) {
-    match ubus::call("zwrt_router.api", "router_get_qos_switch", Some("{}")) {
+    match ubus::call("zwrt_router.api", "router_get_qos", Some("{}")) {
         Ok(data) => (200, json!({"ok": true, "data": data})),
         Err(e) => (503, json!({"ok": false, "error": e})),
     }
@@ -225,7 +225,7 @@ pub fn router_qos_set(_state: &AppState, body: &[u8]) -> (u16, Value) {
         Ok(v) => v,
         Err(_) => return (400, json!({"ok": false, "error": "invalid JSON"})),
     };
-    match ubus::call("zwrt_router.api", "router_set_qos_switch", Some(&parsed.to_string())) {
+    match ubus::call("zwrt_router.api", "router_set_qos", Some(&parsed.to_string())) {
         Ok(data) => (200, json!({"ok": true, "data": data})),
         Err(e) => (503, json!({"ok": false, "error": e})),
     }
