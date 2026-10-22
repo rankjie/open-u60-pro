@@ -7,6 +7,9 @@ final class FirewallSettingsViewModel {
     var portForwardRules: [PortForwardRule] = []
     var filterRules: [FilterRule] = []
     var upnpEnabled: Bool = false
+    /// The firmware's setter replaces the whole UPnP record; toggles resend these as read.
+    private var upnpNotifyInterval = 60
+    private var upnpNATPMP = 0
     var isLoading: Bool = false
     var message: String?
     var messageIsError: Bool = false
@@ -91,11 +94,11 @@ final class FirewallSettingsViewModel {
 
     private func fetchUPnP() async -> Bool {
         do {
+            // zwrt_router.api router_get_upnp: string fields from the upnpd UCI section.
             let data = try await client.getJSON("/api/router/firewall/upnp")
-            if let str = data["upnp_switch"] as? String {
-                return str == "1"
-            }
-            return false
+            if let interval = (data["notify_interval"] as? String).flatMap(Int.init) { upnpNotifyInterval = interval }
+            if let natpmp = (data["enable_natpmp"] as? String).flatMap(Int.init) { upnpNATPMP = natpmp }
+            return data["enable_upnp"] as? String == "1"
         } catch {
             return false
         }
@@ -140,7 +143,10 @@ final class FirewallSettingsViewModel {
     func toggleUPnP(enabled: Bool) async {
         isLoading = true
         do {
-            let _ = try await client.putJSON("/api/router/firewall/upnp", body: ["upnp_switch": enabled ? "1" : "0"])
+            // router_set_upnp_switch takes integers.
+            let _ = try await client.putJSON("/api/router/firewall/upnp", body: [
+                "enable_upnp": enabled ? 1 : 0, "notify_interval": upnpNotifyInterval, "natpmp": upnpNATPMP,
+            ])
             showMessage("UPnP \(enabled ? "enabled" : "disabled")", isError: false)
             upnpEnabled = enabled
         } catch {

@@ -43,6 +43,8 @@ struct BandLockView: View {
         }
         .navigationTitle("Band Lock")
         .operationStatus(message: viewModel.message, isError: viewModel.messageIsError, isLoading: viewModel.isLoading)
+        .task { await viewModel.load() }
+        .refreshable { await viewModel.load() }
     }
 
     private func bandGrid(bands: [String], selected: Set<String>, technology: BandTechnology, toggle: @escaping (String) -> Void) -> some View {

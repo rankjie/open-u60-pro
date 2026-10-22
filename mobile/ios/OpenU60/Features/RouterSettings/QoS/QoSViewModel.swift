@@ -34,7 +34,8 @@ final class QoSViewModel {
         isLoading = true
 
         do {
-            let _ = try await client.putJSON("/api/router/qos", body: ["qos_switch": enabled ? "1" : "0"])
+            // router_set_qos: the firmware's smart QoS switch, an integer.
+            let _ = try await client.putJSON("/api/router/qos", body: ["qos_smart_switch": enabled ? 1 : 0])
             showMessage("QoS \(enabled ? "enabled" : "disabled")", isError: false)
             config = QoSConfig(enabled: enabled)
         } catch {

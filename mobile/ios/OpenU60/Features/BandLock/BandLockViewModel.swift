@@ -16,6 +16,23 @@ final class BandLockViewModel {
         self.authManager = authManager
     }
 
+    /// The modem's current selection, so the grids start from what is applied.
+    func load() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let data = try await client.getJSON("/api/network/signal")
+            guard let current = BandConfig.current(data) else {
+                showMessage("The modem did not report its band selection", isError: true)
+                return
+            }
+            config = current
+        } catch {
+            guard !error.isCancellation else { return }
+            showMessage("Could not read the band selection: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     func toggleNRBand(_ band: String) {
         if config.nrBands.contains(band) {
             config.nrBands.remove(band)
@@ -46,6 +63,7 @@ final class BandLockViewModel {
             // Lock SA bands
             let _ = try await client.postJSON("/api/cell/band/nr", body: ["nr5g_type": "sa", "nr5g_band": bandStr])
             showMessage("NR bands locked: \(bandStr)", isError: false)
+            await load()
         } catch {
             showMessage("Failed: \(error.localizedDescription)", isError: true)
         }
@@ -67,6 +85,7 @@ final class BandLockViewModel {
                 "gw_band_mask": ""
             ])
             showMessage("LTE bands locked: \(config.lteBandString)", isError: false)
+            await load()
         } catch {
             showMessage("Failed: \(error.localizedDescription)", isError: true)
         }
@@ -78,8 +97,8 @@ final class BandLockViewModel {
 
         do {
             let _ = try await client.postJSON("/api/cell/band/reset")
-            config = .empty
             showMessage("All bands unlocked", isError: false)
+            await load()
         } catch {
             showMessage("Failed: \(error.localizedDescription)", isError: true)
         }

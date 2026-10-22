@@ -613,7 +613,8 @@ struct QoSConfig: Equatable {
 
 enum QoSParser {
     static func parse(_ data: [String: Any]) -> QoSConfig {
-        QoSConfig(enabled: asBool(data["qos_switch"]))
+        // Empty until QoS was first set; then {"qos_smart_switch": 0|1}.
+        QoSConfig(enabled: asBool(data["qos_smart_switch"]))
     }
 
     private static func asBool(_ value: Any?) -> Bool {
