@@ -8,22 +8,23 @@ Hotspot, or the upstream network and band for Wi-Fi Repeater, the connection
 state, live cellular download/upload and the last minute of measured samples.
 Signal, Battery, Devices and CPU tiles follow in a grid (two columns on a phone,
 one row when wide), then the newest unread message thread with its verification
-code. Each tile is one number and one line of facts: SINR, band and the data session's QCI (5QI on 5G SA); battery
-power (positive while charging) and runtime; the hotspot name; CPU temperature.
-A quiet line at the bottom shows Local, P2P or Relay for the app-to-router
-connection, and the data age only once it is ten seconds old; it opens the
-connection-details sheet with the current route, local address, remote pairing
-and server status, and the router's internet source. Regular width (the unfolded
-iPhone Duo, iPad) lists connected devices and the three newest threads side by
-side instead. Every signal-bar icon (Home, signal details, Device Info, eSIM, Live Activity)
-shows the measured level: 4 bars from RSRP at -80/-90/-100/-110 dBm, 3G from
-RSCP, and Wi-Fi scan results by dBm. Battery percentage uses validated device
-telemetry. Battery
-readings older than ten seconds are shown dimmed with their age. Unknown values
-display a dash. Traffic rates expire after five seconds without a fresh sample
-and are explicitly labeled cellular traffic when stale; the history chart is
-cleared whenever the sample chain breaks rather than bridging the gap. No
-generated chart or estimated reading is presented as a measured value.
+code. Each tile is one number and one line of facts: SINR, band and the data
+session's QCI (5QI on 5G SA); battery power flow (USB input, then the battery's
+charge or draw, and runtime while discharging); the hotspot name; CPU
+temperature. A quiet line at the bottom shows Local, P2P or Relay for the app-
+to-router connection, and the data age only once it is ten seconds old; it opens
+the connection-details sheet with the current route, local address, remote
+pairing and server status, and the router's internet source. Regular width (the
+unfolded iPhone Duo, iPad) lists connected devices and the three newest threads
+side by side instead. Every signal-bar icon (Home, signal details, Device Info,
+eSIM, Live Activity) shows the measured level: 4 bars from RSRP at
+-80/-90/-100/-110 dBm, 3G from RSCP, and Wi-Fi scan results by dBm. Battery
+percentage uses validated device telemetry. Battery readings older than ten
+seconds are shown dimmed with their age. Unknown values display a dash. Traffic
+rates expire after five seconds without a fresh sample and are explicitly
+labeled cellular traffic when stale; the history chart is cleared whenever the
+sample chain breaks rather than bridging the gap. No generated chart or
+estimated reading is presented as a measured value.
 
 A paired router's last confirmed Home readings (not traffic) are stored per
 router UUID and shown at launch with their age until the first refresh. With a
