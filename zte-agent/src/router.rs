@@ -52,19 +52,34 @@ pub fn router_dns_set(_state: &AppState, body: &[u8]) -> (u16, Value) {
 }
 
 pub fn router_lan_get(_state: &AppState) -> (u16, Value) {
-    let ip = ubus::uci_get("network.lan.ipaddr").unwrap_or_default();
-    let mask = ubus::uci_get("network.lan.netmask").unwrap_or_default();
-    let ignore = ubus::uci_get("dhcp.lan.ignore").unwrap_or_default();
-    let start = ubus::uci_get("dhcp.lan.start").unwrap_or_default();
-    let limit = ubus::uci_get("dhcp.lan.limit").unwrap_or_default();
-    let lease = ubus::uci_get("dhcp.lan.leasetime").unwrap_or_default();
+    let shown = ubus::uci_show("network.lan").and_then(|network| Ok((network, ubus::uci_show("dhcp.lan")?)));
+    match shown.map_err(|e| e.to_string()).and_then(|(network, dhcp)| lan_settings(&network, &dhcp)) {
+        Ok(data) => (200, json!({"ok": true, "data": data})),
+        Err(e) => (503, json!({"ok": false, "error": e})),
+    }
+}
+
+/// LAN and DHCP settings from `uci show`. A missing required value is an error, not an empty
+/// string: the app would otherwise show, and could save back, a blank address or netmask.
+/// Only `dhcp.lan.ignore` is optional; its absence means the DHCP server is on.
+fn lan_settings(network: &str, dhcp: &str) -> Result<Value, String> {
+    let values: std::collections::HashMap<String, String> =
+        ubus::uci_show_map(network).into_iter().chain(ubus::uci_show_map(dhcp)).collect();
+    let required = |key: &str| values.get(key).filter(|v| !v.is_empty()).cloned()
+        .ok_or_else(|| format!("missing_{}", key.replace('.', "_")));
+    let ip = required("network.lan.ipaddr")?;
+    let mask = required("network.lan.netmask")?;
+    let start = required("dhcp.lan.start")?;
+    let limit = required("dhcp.lan.limit")?;
+    let lease = required("dhcp.lan.leasetime")?;
+    let ignore = values.get("dhcp.lan.ignore").map(String::as_str) == Some("1");
     let end = compute_dhcp_end(&ip, &start, &limit);
-    (200, json!({"ok": true, "data": {
+    Ok(json!({
         "lan_ipaddr": ip, "lan_netmask": mask,
-        "dhcp_enable": if ignore == "1" { "0" } else { "1" },
+        "dhcp_enable": if ignore { "0" } else { "1" },
         "dhcp_start": start, "dhcp_end": end,
         "dhcp_lease_time": lease
-    }}))
+    }))
 }
 
 fn compute_dhcp_end(base_ip: &str, start: &str, limit: &str) -> String {
@@ -322,5 +337,30 @@ pub fn router_apn_profiles_activate(_state: &AppState, body: &[u8]) -> (u16, Val
     match ubus::call("zwrt_apn_object", "enable_manu_apn_id", Some(&parsed.to_string())) {
         Ok(data) => (200, json!({"ok": true, "data": data})),
         Err(e) => (503, json!({"ok": false, "error": e})),
+    }
+}
+
+#[cfg(test)]
+mod lan_settings_tests {
+    use super::lan_settings;
+
+    const NETWORK: &str = "network.lan=interface\nnetwork.lan.ipaddr='192.168.0.1'\nnetwork.lan.netmask='255.255.255.0'\n";
+    const DHCP: &str = "dhcp.lan=dhcp\ndhcp.lan.start='2'\ndhcp.lan.limit='252'\ndhcp.lan.leasetime='86400'\n";
+
+    #[test]
+    fn a_complete_record_reads_and_an_absent_ignore_means_dhcp_on() {
+        let data = lan_settings(NETWORK, DHCP).unwrap();
+        assert_eq!(data["lan_ipaddr"], "192.168.0.1");
+        assert_eq!(data["dhcp_enable"], "1");
+        assert_eq!(data["dhcp_end"], "192.168.0.253");
+        let off = lan_settings(NETWORK, &format!("{DHCP}dhcp.lan.ignore='1'\n")).unwrap();
+        assert_eq!(off["dhcp_enable"], "0");
+    }
+
+    #[test]
+    fn a_missing_required_value_is_an_error_not_a_blank() {
+        assert_eq!(lan_settings("network.lan.ipaddr='192.168.0.1'\n", DHCP).unwrap_err(), "missing_network_lan_netmask");
+        assert_eq!(lan_settings(NETWORK, "dhcp.lan.start='2'\n").unwrap_err(), "missing_dhcp_lan_limit");
+        assert!(lan_settings("", "").is_err());
     }
 }

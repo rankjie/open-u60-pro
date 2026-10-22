@@ -312,20 +312,17 @@ pub fn device_fast_boot_set(_state: &AppState, body: &[u8]) -> (u16, Value) {
 }
 
 pub fn device_auto_sleep_get(_state: &AppState) -> (u16, Value) {
-    let timeout = ubus::uci_get("zwrt_sleep.ztmp_time.SysIdTime").unwrap_or_default();
-    let switch = ubus::uci_get("zwrt_sleep.ztmp_switch.sleepSwitch").unwrap_or_default();
-    let status = ubus::uci_get("zwrt_sleep.ztmp_status.sleepStatus").unwrap_or_default();
-    (
-        200,
-        json!({
-            "ok": true,
-            "data": {
-                "enabled": switch == "1",
-                "timeout": timeout,
-                "status": status,
-            }
-        }),
-    )
+    // A failed read is an error, not "off": the app would otherwise save its default timeout.
+    let read = || -> Result<Value, String> {
+        let switch = ubus::uci_get("zwrt_sleep.ztmp_switch.sleepSwitch")?;
+        let timeout = ubus::uci_get("zwrt_sleep.ztmp_time.SysIdTime")?;
+        let status = ubus::uci_get("zwrt_sleep.ztmp_status.sleepStatus").unwrap_or_default();
+        Ok(json!({"enabled": switch == "1", "timeout": timeout, "status": status}))
+    };
+    match read() {
+        Ok(data) => (200, json!({"ok": true, "data": data})),
+        Err(e) => (503, json!({"ok": false, "error": e})),
+    }
 }
 
 pub fn device_auto_sleep_set(_state: &AppState, body: &[u8]) -> (u16, Value) {

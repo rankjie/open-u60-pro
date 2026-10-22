@@ -48,12 +48,7 @@ pub fn modem_data_set(state: &AppState, body: &[u8]) -> (u16, Value) {
         Ok(v) => v,
         Err(_) => return (400, json!({"ok": false, "error": "invalid JSON"})),
     };
-    // Read fresh, not through the cache: the merge must start from the modem's state now.
-    let current = match ubus::call("zwrt_data", "get_wwaniface", Some(r#"{"cid":1}"#)) {
-        Ok(current) => current,
-        Err(e) => return (503, json!({"ok": false, "error": e})),
-    };
-    let merged = match merge_data_update(&current, &parsed) {
+    let merged = match data_update(&parsed) {
         Ok(merged) => merged,
         Err(code) => return (400, json!({"ok": false, "error": code})),
     };
@@ -66,31 +61,27 @@ pub fn modem_data_set(state: &AppState, body: &[u8]) -> (u16, Value) {
     }
 }
 
-/// `set_wwaniface` replaces the whole data-call record. A request names only what it changes
-/// and the rest comes from the modem's current record, so a client's stale copy cannot, for
-/// example, switch mobile data off while changing roaming.
-fn merge_data_update(current: &Value, update: &Value) -> Result<Value, &'static str> {
+/// `set_wwaniface` commits only the fields it is given, so a request carries exactly what the
+/// user changed. Nothing is filled in from the modem's record: its `enable` reads 0 after every
+/// boot while auto-connect keeps data up, and writing that back disconnects data.
+fn data_update(update: &Value) -> Result<Value, &'static str> {
     let update = update.as_object().ok_or("invalid_data_update")?;
-    let flag = |value: &Value| -> Option<u8> {
-        match value {
-            Value::Number(n) => n.as_u64().filter(|n| *n <= 1).map(|n| n as u8),
-            Value::String(s) => s.parse::<u8>().ok().filter(|n| *n <= 1),
-            _ => None,
-        }
-    };
     let mut merged = serde_json::Map::new();
     merged.insert("cid".into(), json!(1));
-    for field in ["connect_mode", "roam_enable", "enable"] {
-        let value = match update.get(field) {
-            Some(value) => flag(value).ok_or("invalid_data_update")?,
-            None => current.get(field).and_then(flag).ok_or("modem_data_unavailable")?,
-        };
-        merged.insert(field.into(), json!(value));
-    }
     for (key, value) in update {
-        if !["cid", "connect_mode", "roam_enable", "enable"].contains(&key.as_str()) {
-            merged.insert(key.clone(), value.clone());
-        }
+        let value = match key.as_str() {
+            "cid" => continue,
+            "connect_mode" | "roam_enable" | "enable" => {
+                let flag = match value {
+                    Value::Number(n) => n.as_u64(),
+                    Value::String(s) => s.parse::<u64>().ok(),
+                    _ => None,
+                };
+                json!(flag.filter(|n| *n <= 1).ok_or("invalid_data_update")?)
+            }
+            _ => value.clone(),
+        };
+        merged.insert(key.clone(), value);
     }
     Ok(Value::Object(merged))
 }
@@ -183,35 +174,31 @@ pub fn modem_register_result(_state: &AppState) -> (u16, Value) {
 
 #[cfg(test)]
 mod data_update_tests {
-    use super::merge_data_update;
+    use super::data_update;
     use serde_json::json;
 
-    fn current(enable: u8) -> serde_json::Value {
-        json!({"cid": 1, "connect_mode": 1, "roam_enable": 1, "enable": enable, "connect_status": "ipv4_connected"})
+    #[test]
+    fn changing_roaming_never_writes_the_data_switch() {
+        // After a boot the modem reports "enable":0 while auto-connect keeps data up; copying
+        // that value into a roaming change disconnects data (2026-10-22, twice).
+        let merged = data_update(&json!({"roam_enable": 0})).unwrap();
+        assert_eq!(merged, json!({"cid": 1, "roam_enable": 0}));
+        let merged = data_update(&json!({"connect_mode": "0"})).unwrap();
+        assert_eq!(merged, json!({"cid": 1, "connect_mode": 0}));
     }
 
     #[test]
-    fn changing_roaming_keeps_the_current_data_switch() {
-        // 2026-10-22: roaming off sent {"enable":0} from a stale copy and disconnected data.
-        let merged = merge_data_update(&current(1), &json!({"roam_enable": 0})).unwrap();
-        assert_eq!(merged, json!({"cid": 1, "connect_mode": 1, "roam_enable": 0, "enable": 1}));
-        let merged = merge_data_update(&current(0), &json!({"roam_enable": 0})).unwrap();
-        assert_eq!(merged["enable"], 0);
-    }
-
-    #[test]
-    fn named_fields_win_and_extra_fields_pass_through() {
-        let merged = merge_data_update(&current(1), &json!({"enable": 0, "connect_status": "disconnected"})).unwrap();
-        assert_eq!(merged, json!({"cid": 1, "connect_mode": 1, "roam_enable": 1, "enable": 0, "connect_status": "disconnected"}));
-        let merged = merge_data_update(&current(0), &json!({"enable": "1", "connect_mode": 0})).unwrap();
+    fn named_fields_are_validated_and_extra_fields_pass_through() {
+        let merged = data_update(&json!({"cid": 3, "enable": 0, "connect_status": "disconnected"})).unwrap();
+        assert_eq!(merged, json!({"cid": 1, "enable": 0, "connect_status": "disconnected"}));
+        let merged = data_update(&json!({"enable": "1", "connect_mode": 0})).unwrap();
         assert_eq!((merged["enable"].clone(), merged["connect_mode"].clone()), (json!(1), json!(0)));
     }
 
     #[test]
-    fn invalid_values_or_an_unknown_current_state_are_refused() {
-        assert_eq!(merge_data_update(&current(1), &json!({"enable": 2})), Err("invalid_data_update"));
-        assert_eq!(merge_data_update(&current(1), &json!({"enable": true})), Err("invalid_data_update"));
-        assert_eq!(merge_data_update(&current(1), &json!([1])), Err("invalid_data_update"));
-        assert_eq!(merge_data_update(&json!({"cid": 1}), &json!({"roam_enable": 0})), Err("modem_data_unavailable"));
+    fn invalid_values_are_refused() {
+        assert_eq!(data_update(&json!({"enable": 2})), Err("invalid_data_update"));
+        assert_eq!(data_update(&json!({"enable": true})), Err("invalid_data_update"));
+        assert_eq!(data_update(&json!([1])), Err("invalid_data_update"));
     }
 }

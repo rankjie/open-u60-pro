@@ -216,6 +216,36 @@ pub fn wifi_set(state: &AppState, body: &[u8]) -> (u16, Value) {
     state.wifi_uplink.edit_hotspot(|| wifi_set_inner(body))
 }
 
+/// Refuses a hotspot that would come up unusable: an empty name, or a secured band whose
+/// key (submitted or current) is not a valid WPA passphrase. A client's failed load or stale
+/// defaults then fail loudly here instead of taking every device off the network.
+fn validate_hotspot(
+    update: &serde_json::Map<String, Value>,
+    current: &std::collections::HashMap<String, String>,
+) -> Result<(), &'static str> {
+    let text = |key: &str| update.get(key).map(|value| match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    });
+    for band in ["2g", "5g"] {
+        let ssid = text(&format!("ssid_{band}"));
+        if let Some(ssid) = &ssid {
+            if ssid.trim().is_empty() || ssid.len() > 32 { return Err("invalid_wifi_ssid"); }
+        }
+        let encryption = text(&format!("encryption_{band}"))
+            .or_else(|| current.get(&format!("wireless.main_{band}.encryption")).cloned())
+            .unwrap_or_default();
+        let key = text(&format!("key_{band}"));
+        // Only check a key this request supplies or makes relevant by changing the encryption.
+        if key.is_none() && update.get(&format!("encryption_{band}")).is_none() { continue; }
+        if encryption.is_empty() || encryption == "none" || encryption == "owe" { continue; }
+        let key = key.or_else(|| current.get(&format!("wireless.main_{band}.key")).cloned()).unwrap_or_default();
+        let hex = key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit());
+        if !hex && !(8..=63).contains(&key.len()) { return Err("invalid_wifi_key"); }
+    }
+    Ok(())
+}
+
 fn wifi_set_inner(body: &[u8]) -> (u16, Value) {
     let parsed: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
@@ -263,6 +293,10 @@ fn wifi_set_inner(body: &[u8]) -> (u16, Value) {
         Ok(w) => w,
         Err(e) => return (503, json!({"ok": false, "error": e})),
     };
+
+    if let Err(code) = validate_hotspot(obj, &current_map.0) {
+        return (400, json!({"ok": false, "error": code}));
+    }
 
     for (key, value) in obj {
         let val_str = match value {
@@ -420,8 +454,20 @@ fn guest_set_inner(body: &[u8]) -> (u16, Value) {
     // Refuse before writing anything if uci cannot read the config: a locked
     // or failing uci would otherwise turn every `uci set` below into a silent
     // skip and report "no changes".
-    if let Err(e) = Wireless::load() {
-        return (503, json!({"ok": false, "error": e}));
+    let current = match Wireless::load() {
+        Ok(current) => current,
+        Err(e) => return (503, json!({"ok": false, "error": e})),
+    };
+    // The guest bands share one name and key; check them as the hotspot's are.
+    let mut as_hotspot = serde_json::Map::new();
+    for (guest, hotspot) in [("guest_ssid", "ssid_2g"), ("guest_key", "key_2g"), ("guest_encryption", "encryption_2g")] {
+        if let Some(value) = obj.get(guest) { as_hotspot.insert(hotspot.into(), value.clone()); }
+    }
+    let current_guest = current.0.iter()
+        .filter_map(|(path, value)| path.strip_prefix("wireless.guest_2g.").map(|field| (format!("wireless.main_2g.{field}"), value.clone())))
+        .collect();
+    if let Err(code) = validate_hotspot(&as_hotspot, &current_guest) {
+        return (400, json!({"ok": false, "error": code}));
     }
 
     let mut changed = false;
@@ -488,5 +534,44 @@ mod wireless_tests {
         assert!(w.0.is_empty());
         assert!(!w.0.contains_key("wireless.zte_mbb.wifi_onoff"));
         assert_eq!(w.get("main_2g.ssid"), "");
+    }
+}
+
+#[cfg(test)]
+mod hotspot_validation_tests {
+    use super::validate_hotspot;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn current() -> HashMap<String, String> {
+        HashMap::from([
+            ("wireless.main_2g.encryption".to_string(), "psk2+ccmp".to_string()),
+            ("wireless.main_2g.key".to_string(), "existing-key".to_string()),
+            ("wireless.main_5g.encryption".to_string(), "sae-mixed".to_string()),
+            ("wireless.main_5g.key".to_string(), "short".to_string()),
+        ])
+    }
+    fn check(update: serde_json::Value) -> Result<(), &'static str> {
+        validate_hotspot(update.as_object().unwrap(), &current())
+    }
+
+    #[test]
+    fn defaults_from_a_failed_load_are_refused() {
+        assert_eq!(check(json!({"ssid_2g": "", "key_2g": ""})), Err("invalid_wifi_ssid"));
+        assert_eq!(check(json!({"key_2g": ""})), Err("invalid_wifi_key"));
+        assert_eq!(check(json!({"key_5g": "1234567"})), Err("invalid_wifi_key"));
+        assert_eq!(check(json!({"ssid_5g": "x".repeat(33)})), Err("invalid_wifi_ssid"));
+        // Turning security on needs a valid key, even one already stored.
+        assert_eq!(check(json!({"encryption_5g": "psk2+ccmp"})), Err("invalid_wifi_key"));
+    }
+
+    #[test]
+    fn valid_or_unrelated_changes_pass() {
+        assert_eq!(check(json!({"channel_2g": "11"})), Ok(()));
+        assert_eq!(check(json!({"ssid_2g": "Home", "key_2g": "a-good-passphrase"})), Ok(()));
+        assert_eq!(check(json!({"key_2g": "a".repeat(64).replace('a', "f")})), Ok(()));
+        assert_eq!(check(json!({"encryption_5g": "none"})), Ok(()));
+        // The existing short 5 GHz key is not this request's concern unless it touches it.
+        assert_eq!(check(json!({"hidden_5g": "1"})), Ok(()));
     }
 }
