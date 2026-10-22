@@ -11,12 +11,11 @@ struct InternetHero: View {
     let openTraffic: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 14) {
             Button(action: openInternet) { source.contentShape(.rect) }
                 .buttonStyle(TileButtonStyle())
                 .accessibilityHint("Opens internet source settings")
                 .accessibilityIdentifier("internet-overview")
-            Divider().padding(.vertical, 12)
             Button(action: openTraffic) { HeroTraffic(viewModel: viewModel).contentShape(.rect) }
                 .buttonStyle(TileButtonStyle())
                 .accessibilityHint("Opens live traffic details")
@@ -26,16 +25,9 @@ struct InternetHero: View {
     }
 
     private var source: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: repeater ? "wifi" : "antenna.radiowaves.left.and.right")
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(.tint)
-                .frame(width: 40, height: 40)
-                .background(.tint.opacity(0.12), in: .rect(cornerRadius: 12))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.headline).lineLimit(1)
-                Facts(internet.status?.sourceLabel ?? "Internet", detail)
-            }
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(title).font(.title3.weight(.semibold)).lineLimit(1)
+            if let detail { Text(detail).font(.subheadline).foregroundStyle(.secondary).lineLimit(1) }
             Spacer(minLength: 8)
             StatusLabel(text: state.text, color: state.color)
         }
@@ -51,7 +43,7 @@ struct InternetHero: View {
     }
 
     private var detail: String? {
-        if repeater { return internet.status.map { "\($0.config.band.label) upstream" } }
+        if repeater { return internet.status.map { "Repeater · \($0.config.band.label)" } }
         let info = viewModel.operatorInfo
         guard !info.networkType.isEmpty else { return nil }
         return info.displayNetworkType(nrConnected: viewModel.nrSignal.isConnected, lteSignal: viewModel.lteSignal)
@@ -84,9 +76,11 @@ private struct HeroTraffic: View {
                     direction("arrow.up", .teal, fresh ? viewModel.speed.uploadBytesPerSec : nil)
                 }
                 TrafficHistoryChart(viewModel: viewModel, fresh: fresh)
-                Text(CellularCardView.caption(updatedAt: viewModel.trafficUpdatedAt, available: viewModel.isTrafficAvailable,
-                                              source: viewModel.trafficStats.source, now: context.date))
-                    .font(.caption2).foregroundStyle(.secondary)
+                if !fresh {
+                    Text(CellularCardView.caption(updatedAt: viewModel.trafficUpdatedAt, available: viewModel.isTrafficAvailable,
+                                                  source: viewModel.trafficStats.source, now: context.date))
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -147,12 +141,8 @@ struct SignalTile: View {
                 Metric(value: "Off")
                 Facts("Airplane mode")
             } else {
-                HStack(alignment: .firstTextBaseline) {
-                    Metric(value: rsrp.map { "\(Int($0.rounded()))" }, unit: "dBm")
-                    Spacer(minLength: 4)
-                    LevelBars(level: Color.signalBars(rsrp), color: Color.rsrpColor(rsrp))
-                }
-                Facts(rsrp.map { _ in Color.rsrpQuality(rsrp) }, sinr.map { "SINR \(Int($0.rounded()))" }, band)
+                Metric(value: rsrp.map { "\(Int($0.rounded()))" }, unit: "dBm")
+                Facts(sinr.map { "SINR \(Int($0.rounded()))" }, band)
             }
         }
         .accessibilityIdentifier("home-signal")
@@ -171,20 +161,15 @@ struct BatteryTile: View {
             let stale = age.map { $0 >= 10 } ?? true
             Tile(title: "Battery", icon: icon(battery), tint: stale ? .secondary : Color.batteryColor(battery.capacity),
                  action: action) {
-                HStack(alignment: .firstTextBaseline) {
-                    Metric(value: battery.capacityPercent.map { "\($0)" }, unit: "%",
-                           color: stale ? .secondary : .primary)
-                    Spacer(minLength: 4)
-                    if !stale, battery.powerWatts != nil {
-                        Text(battery.powerText).font(.footnote.weight(.semibold).monospacedDigit())
-                            .foregroundStyle((battery.powerWatts ?? 0) > 0.05 ? .green : .secondary)
-                    }
-                }
+                Metric(value: battery.capacityPercent.map { "\($0)" }, unit: "%",
+                       color: stale ? .secondary : .primary)
                 if stale {
                     Facts(age.map { "Updated \(Self.ago($0))" } ?? "No recent data")
                 } else {
-                    Facts(usb.usbStatus.powerbankActive ? "Powering USB" : battery.statusText,
-                          battery.usbPower.externalPower == true ? nil : battery.runtimeText == "—" ? nil : battery.runtimeText)
+                    let charging = (battery.powerWatts ?? 0) > 0.05
+                    Facts(charging ? "Charging" : usb.usbStatus.powerbankActive ? "Powering USB" : nil,
+                          battery.powerWatts == nil ? nil : battery.powerText,
+                          charging || battery.usbPower.externalPower == true || battery.runtimeText == "—" ? nil : battery.runtimeText)
                 }
             }
         }
@@ -217,11 +202,9 @@ struct DevicesTile: View {
     var body: some View {
         let wifi = viewModel.wifiStatus
         let ssid = wifi.ssid5g.isEmpty ? wifi.ssid2g : wifi.ssid5g
-        Tile(title: "Devices", icon: "laptopcomputer.and.iphone", tint: .blue, action: action) {
-            Metric(value: viewModel.lastUpdated == nil ? nil : "\(viewModel.connectedDevices.count)",
-                   unit: viewModel.connectedDevices.count == 1 ? "device" : "devices")
-            Facts(wifi.wifiOn ? ssid : (viewModel.lastUpdated == nil ? nil : "Wi-Fi off"),
-                  wifi.guestEnabled ? "Guest on" : nil)
+        Tile(title: "Devices", icon: "laptopcomputer.and.iphone", action: action) {
+            Metric(value: viewModel.lastUpdated == nil ? nil : "\(viewModel.connectedDevices.count)")
+            Facts(wifi.wifiOn ? ssid : (viewModel.lastUpdated == nil ? nil : "Wi-Fi off"))
         }
         .accessibilityIdentifier("home-devices")
     }
@@ -232,20 +215,12 @@ struct SystemTile: View {
     let action: () -> Void
 
     var body: some View {
-        let system = viewModel.systemInfo
-        let cpu = viewModel.cpuUpdatedAt == nil ? nil : system.cpuUsagePercent
-        Tile(title: "System", icon: "cpu", tint: cpu.map(Color.cpuUsageColor) ?? .secondary, action: action) {
-            Metric(value: cpu.map { String(format: "%.0f", $0) }, unit: "% CPU")
-            Facts(viewModel.thermal.cpuTemp.map { String(format: "%.0f °C", $0) },
-                  system.uptime > 0 ? "up \(Self.uptime(system.uptime))" : nil)
+        let cpu = viewModel.cpuUpdatedAt == nil ? nil : viewModel.systemInfo.cpuUsagePercent
+        Tile(title: "CPU", icon: "cpu", tint: cpu.map { $0 >= 80 ? .red : .secondary } ?? .secondary, action: action) {
+            Metric(value: cpu.map { String(format: "%.0f", $0) }, unit: "%")
+            Facts(viewModel.thermal.cpuTemp.map { String(format: "%.0f °C", $0) })
         }
         .accessibilityIdentifier("home-system")
-    }
-
-    static func uptime(_ seconds: Int) -> String {
-        let days = seconds / 86400, hours = seconds % 86400 / 3600
-        if days > 0 { return "\(days)d \(hours)h" }
-        return hours > 0 ? "\(hours)h \(seconds % 3600 / 60)m" : "\(seconds / 60)m"
     }
 }
 
@@ -287,7 +262,7 @@ struct LatestMessageTile: View {
                     }
                 }
                 .overlay(alignment: .topTrailing) {
-                    if let code { CodeChip(code: code).padding(.top, 9).padding(.trailing, 36) }
+                    if let code { CodeChip(code: code).padding(.top, 9).padding(.trailing, 12) }
                 }
             }
             .accessibilityIdentifier("home-latest-message")
@@ -370,5 +345,42 @@ struct HomeWidePanels: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: .rect(cornerRadius: Design.corner))
+    }
+}
+
+/// Where the app reaches U60, and the data age only when it is no longer current.
+struct HomeFooter: View {
+    let viewModel: DashboardViewModel
+    let icon: String
+    let label: String
+    let color: Color
+    let description: String
+    let action: () -> Void
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 5)) { context in
+            let age = viewModel.lastUpdated.map { context.date.timeIntervalSince($0) }
+            Button(action: action) {
+                VStack(spacing: 4) {
+                    if let error = viewModel.error, (age ?? .infinity) >= 10 {
+                        Text(error).foregroundStyle(.red).multilineTextAlignment(.center)
+                    }
+                    HStack(spacing: 5) {
+                        Image(systemName: icon)
+                        Text(label)
+                        if let age, age >= 10 { Text("· Updated \(BatteryTile.ago(age))") }
+                    }
+                    .foregroundStyle(color)
+                }
+                .font(.caption)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Router connection")
+            .accessibilityValue(description)
+            .accessibilityHint("Opens connection details")
+            .accessibilityIdentifier("dashboard-router-connection")
+        }
     }
 }

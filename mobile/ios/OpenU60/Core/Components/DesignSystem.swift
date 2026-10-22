@@ -37,9 +37,6 @@ struct Tile<Content: View>: View {
                 Image(systemName: icon).foregroundStyle(tint).imageScale(.small)
                 Text(title).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
-                if action != nil {
-                    Image(systemName: "chevron.right").imageScale(.small).foregroundStyle(.tertiary)
-                }
             }
             .font(.footnote.weight(.semibold))
             content
@@ -136,25 +133,6 @@ struct Sparkline: Shape {
             path.closeSubpath()
         }
         return path
-    }
-}
-
-/// A single-row signal or battery level, drawn as segmented bars.
-struct LevelBars: View {
-    let level: Int
-    var count = 4
-    var color: Color = .primary
-
-    var body: some View {
-        HStack(alignment: .bottom, spacing: 2) {
-            ForEach(0..<count, id: \.self) { bar in
-                let fill: Color = bar < level ? color : Color(uiColor: .quaternaryLabel)
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(fill)
-                    .frame(width: 3, height: CGFloat(5 + bar * 3))
-            }
-        }
-        .accessibilityHidden(true)
     }
 }
 

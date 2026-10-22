@@ -56,9 +56,11 @@ struct DashboardView: View {
                     } else {
                         LatestMessageTile(messages: messages, open: openConversation)
                     }
-                    DashboardUpdateStatus(viewModel: viewModel)
+                    HomeFooter(viewModel: viewModel, icon: connectionIcon, label: connectionLabel,
+                               color: connectionColor, description: connectionDescription) { detail = .routerConnection }
                 }
                 .padding(.horizontal)
+                .padding(.top, 12)
                 .padding(.bottom)
                 .frame(maxWidth: 960)
                 .frame(maxWidth: .infinity)
@@ -89,28 +91,7 @@ struct DashboardView: View {
                     _ = await (dashboard, usb)
                 }
             }
-            .toolbar {
-                if #available(iOS 26.0, *) {
-                    ToolbarItem(placement: .topBarLeading) { connectionIndicator }
-                        .sharedBackgroundVisibility(.hidden)
-                    ToolbarItem(placement: .topBarTrailing) {
-                        CellularStatusButton(viewModel: viewModel) { detail = .connection }
-                    }
-                    .sharedBackgroundVisibility(.hidden)
-                    ToolbarItem(placement: .topBarTrailing) {
-                        BatteryStatusButton(viewModel: viewModel) { detail = .battery }
-                    }
-                    .sharedBackgroundVisibility(.hidden)
-                } else {
-                    ToolbarItem(placement: .topBarLeading) { connectionIndicator }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        CellularStatusButton(viewModel: viewModel) { detail = .connection }
-                    }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        BatteryStatusButton(viewModel: viewModel) { detail = .battery }
-                    }
-                }
-            }
+            .toolbar(.hidden, for: .navigationBar)
         }
     }
 
@@ -232,29 +213,6 @@ struct DashboardView: View {
         return configs
     }
 
-    private var connectionIndicator: some View {
-        Button { detail = .routerConnection } label: {
-            HStack(spacing: 6) {
-                if isAuthenticated && client.connectionRoute == .connecting {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Image(systemName: connectionIcon)
-                }
-                Text(connectionLabel)
-            }
-            .font(.caption.weight(.medium))
-            .foregroundStyle(connectionColor)
-            .fixedSize()
-            .frame(minHeight: 44)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Router connection")
-        .accessibilityValue(connectionDescription)
-        .accessibilityHint("Opens connection details")
-        .accessibilityIdentifier("dashboard-router-connection")
-    }
-
     private var connectionIcon: String {
         guard isAuthenticated else { return "wifi.exclamationmark" }
         switch client.connectionRoute {
@@ -364,25 +322,6 @@ private struct DevicesCardScope: View {
 
     var body: some View {
         DevicesCardView(connectedDevices: viewModel.connectedDevices, showAllDevices: $showAllDevices)
-    }
-}
-
-private struct DashboardUpdateStatus: View {
-    let viewModel: DashboardViewModel
-
-    var body: some View {
-        VStack(spacing: 6) {
-            if let error = viewModel.error {
-                Text(error).font(.caption).foregroundStyle(.red)
-            }
-            HStack(spacing: 4) {
-                if viewModel.isLoading { ProgressView().controlSize(.mini) }
-                Text("Updated").font(.caption2).foregroundStyle(.secondary)
-                LastUpdatedView(date: viewModel.lastUpdated)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 4)
     }
 }
 
@@ -575,107 +514,6 @@ private struct RouterConnectionDetail: View {
         .navigationTitle("Connection details")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-    }
-}
-
-private struct CellularStatusButton: View {
-    let viewModel: DashboardViewModel
-    let action: () -> Void
-
-    var body: some View {
-        let info = viewModel.operatorInfo
-        let nr = viewModel.nrSignal
-        let lte = viewModel.lteSignal
-        let rsrp = nr.isConnected ? nr.rsrp : lte.rsrp
-        let network = info.networkType.isEmpty ? "—" : info.displayNetworkType(nrConnected: nr.isConnected, lteSignal: lte)
-        Button(action: action) {
-            HStack(spacing: 5) {
-                if viewModel.isAirplaneMode {
-                    Image(systemName: "airplane")
-                } else {
-                    HStack(alignment: .bottom, spacing: 2) {
-                        ForEach(0..<4) { bar in
-                            RoundedRectangle(cornerRadius: 1)
-                                .fill(bar < Color.signalBars(rsrp) ? Color.primary : Color(.quaternaryLabel))
-                                .frame(width: 3, height: CGFloat(5 + bar * 3))
-                        }
-                    }
-                    Text(network).font(.caption.weight(.semibold)).lineLimit(1)
-                }
-            }
-            .fixedSize(horizontal: true, vertical: false)
-            .frame(minWidth: 44, minHeight: 44)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Cellular signal")
-        .accessibilityValue(viewModel.isAirplaneMode ? "Airplane mode" :
-            "\(info.provider.isEmpty ? "No operator" : info.provider), \(network), \(rsrp.map { "\(Int($0)) dBm" } ?? "No signal data")\(info.roaming ? ", roaming" : "")")
-        .accessibilityHint("Opens connection and signal details")
-        .accessibilityIdentifier("dashboard-cellular-status")
-    }
-}
-
-private struct BatteryStatusButton: View {
-    let viewModel: DashboardViewModel
-    let action: () -> Void
-
-    var body: some View {
-        let battery = viewModel.battery
-        Button(action: action) {
-            HStack(spacing: 6) {
-                BatteryStatusIcon(capacity: battery.capacityPercent)
-                Text(battery.powerText)
-                    .font(.caption.monospacedDigit())
-                    .lineLimit(1)
-                    .foregroundStyle(battery.powerWatts.map { $0 > 0 ? Color.green : Color.secondary } ?? .secondary)
-                    .transaction { $0.animation = nil }
-            }
-            .fixedSize(horizontal: true, vertical: false)
-            .frame(minWidth: 44, minHeight: 44)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Router battery")
-        .accessibilityValue("\(battery.capacityPercent == nil ? "Unavailable" : battery.capacityText)\(battery.charging.isEmpty ? "" : ", \(battery.charging)"), \(battery.powerText)")
-        .accessibilityHint("Opens battery details")
-        .accessibilityIdentifier("dashboard-battery-status")
-    }
-
-}
-
-private struct BatteryStatusIcon: View {
-    let capacity: Int?
-
-    private var fillWidth: CGFloat { CGFloat(capacity ?? 0) / 100 * 30 }
-    private var percentage: some View {
-        Text(capacity.map(String.init) ?? "—")
-            .font(.system(size: 10, weight: .bold, design: .rounded).monospacedDigit())
-            .frame(width: 34, height: 18)
-    }
-
-    var body: some View {
-        ZStack(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 4)
-                .strokeBorder(.primary, lineWidth: 1.5)
-                .frame(width: 34, height: 18)
-            RoundedRectangle(cornerRadius: 2)
-                .fill(.primary)
-                .frame(width: fillWidth, height: 14)
-                .offset(x: 2)
-            percentage.foregroundStyle(.primary)
-            percentage.foregroundStyle(Color(.systemBackground))
-                .mask(alignment: .leading) {
-                    Rectangle().frame(width: fillWidth, height: 14).offset(x: 2)
-                }
-            RoundedRectangle(cornerRadius: 1)
-                .fill(.primary)
-                .frame(width: 2.5, height: 7)
-                .offset(x: 35.5)
-        }
-        .frame(width: 38, height: 18)
-        .accessibilityHidden(true)
-        .transaction { $0.animation = nil }
     }
 }
 

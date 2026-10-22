@@ -1,29 +1,26 @@
 # App navigation
 
 The normal OpenU60 app has four tabs: Home, Calls, Messages, and Settings. Home
-has no large page heading; its compact toolbar leaves room for device status.
+has no navigation bar and states each reading once.
 
-Home places cellular signal and battery in the top-right toolbar, with separate
-44-point tap targets for signal and battery details. Status items have no toolbar
-background capsules. The percentage sits inside the battery icon; measured
-battery power sits beside it, positive while charging and negative while
-discharging. Missing voltage/current displays an unavailable power value. The
-left status shows Local, P2P or Relay for the app-to-router connection and opens a
+Home starts with the internet card: the carrier and network type for SIM
+Hotspot, or the upstream network and band for Wi-Fi Repeater, the connection
+state, live cellular download/upload and the last minute of measured samples.
+Signal, Battery, Devices and CPU tiles follow in a grid (two columns on a phone,
+one row when wide), then the newest unread message thread with its verification
+code. Each tile is one number and one line of facts: SINR and band; battery
+power (positive while charging) and runtime; the hotspot name; CPU temperature.
+A quiet line at the bottom shows Local, P2P or Relay for the app-to-router
+connection, and the data age only once it is ten seconds old; it opens the
 connection-details sheet with the current route, local address, remote pairing
-and server status, and the router's internet source. The main area starts with
-the internet card: source (carrier for SIM Hotspot, upstream network for Wi-Fi
-Repeater), connection state, live cellular download/upload and the last minute
-of measured samples. Signal, Battery, Devices and System tiles follow in a grid
-(two columns on a phone, one row when wide), then the newest unread message
-thread with its verification code. Regular width (the unfolded iPhone Duo, iPad)
-lists connected devices and the three newest threads side by side instead.
-Signal bars derive from the sampled RSRP using the existing thresholds; battery
-percentage uses validated device telemetry. Battery readings older than ten
-seconds are shown dimmed with their age. Unknown values display a dash. Traffic
-rates expire after five seconds without a fresh sample and are explicitly
-labeled cellular traffic; the history chart is cleared whenever the sample chain
-breaks rather than bridging the gap. No generated chart or estimated reading is
-presented as a measured value.
+and server status, and the router's internet source. Regular width (the unfolded
+iPhone Duo, iPad) lists connected devices and the three newest threads side by
+side instead. Battery percentage uses validated device telemetry. Battery
+readings older than ten seconds are shown dimmed with their age. Unknown values
+display a dash. Traffic rates expire after five seconds without a fresh sample
+and are explicitly labeled cellular traffic when stale; the history chart is
+cleared whenever the sample chain breaks rather than bridging the gap. No
+generated chart or estimated reading is presented as a measured value.
 
 A paired router's last confirmed Home readings (not traffic) are stored per
 router UUID and shown at launch with their age until the first refresh. With a
