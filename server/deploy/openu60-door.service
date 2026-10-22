@@ -1,0 +1,29 @@
+# QUIC door for the calling service: forwards UDP/QUIC to the service (or to another door).
+# Install the static relay-tunnel-gateway binary at /opt/openu60/door/, then set the upstream:
+#   systemctl edit openu60-door  ->  Environment=OPENU60_DOOR_UPSTREAM=127.0.0.1:46170
+# The identity (and so the pin) lives in /var/lib/openu60-door and survives upgrades.
+[Unit]
+Description=OpenU60 QUIC door
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=OPENU60_DOOR_LISTEN=0.0.0.0:47853
+Environment=OPENU60_DOOR_UPSTREAM=127.0.0.1:46170
+ExecStart=/opt/openu60/door/relay-tunnel-gateway /var/lib/openu60-door ${OPENU60_DOOR_LISTEN} ${OPENU60_DOOR_UPSTREAM}
+DynamicUser=yes
+StateDirectory=openu60-door
+StateDirectoryMode=0700
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

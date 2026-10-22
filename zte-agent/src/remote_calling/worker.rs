@@ -153,7 +153,7 @@ impl Worker {
         let config = self.config.clone();
         let mut resumed = self.recovery.subscribe();
         let outgoing = self.outgoing.take().ok_or("network_already_started")?;
-        self.network = Some(tokio::spawn(connection(config, outgoing, events, resumed.clone())));
+        self.network = Some(tokio::spawn(connection(config, self.manager.clone(), outgoing, events, resumed.clone())));
         // A modem ID may be reused while the agent is stopped. Do not redial or
         // hang up an unidentified physical call when recovering an old session.
         if self.journal.call().is_some() {
@@ -341,6 +341,12 @@ impl Worker {
                 self.manager.observe_time(value["serverTime"].as_u64().ok_or("invalid_server_clock")?)?;
                 self.ice = serde_json::from_value(value["iceServers"].clone())
                     .map_err(|_| "invalid_ice_servers")?;
+                // Older servers advertise no doors; a malformed entry is skipped, not trusted.
+                let doors: Vec<String> = value["doors"].as_array().map(|doors| doors.iter()
+                    .filter_map(|door| door["address"].as_str())
+                    .filter(|address| relay_tunnel::Door::parse(address).is_ok())
+                    .map(String::from).collect()).unwrap_or_default();
+                if let Err(error) = self.manager.update_doors(doors) { eprintln!("[doors] {error}"); }
                 self.connected = true;
                 self.close_peers().await;
                 self.send(json!({"type":"peer_register","connectionKey":self.connect_identity.public_key()})).await?;
@@ -1087,6 +1093,7 @@ fn cleanup_modem(
 
 async fn connection(
     config: Config,
+    manager: Arc<RemoteCalling>,
     mut outgoing: mpsc::Receiver<Value>,
     incoming: mpsc::Sender<Network>,
     mut resumed: tokio::sync::watch::Receiver<u64>,
@@ -1094,7 +1101,9 @@ async fn connection(
     let mut delay = 1;
     loop {
         let attempt = async {
-            let endpoint = super::url(&config, "v1/socket").map_err(|_| "invalid_server_url")?.replacen("https://", "wss://", 1);
+            // Doors learned since the worker started take part in this attempt's choice.
+            let current = manager.current_config().filter(|c| c.server_url == config.server_url).unwrap_or_else(|| config.clone());
+            let endpoint = manager.doors.select(&current).await.socket_url("v1/socket");
             let mut request = endpoint.into_client_request().map_err(|_| "invalid_websocket_request")?;
             request.headers_mut().insert("Authorization", format!("Bearer {}", config.device_token).parse().map_err(|_| "invalid_device_token")?);
             let mut limits = WebSocketConfig::default(); limits.max_message_size = Some(98304); limits.max_frame_size = Some(98304);

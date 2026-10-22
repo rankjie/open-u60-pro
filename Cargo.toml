@@ -1,5 +1,5 @@
 [workspace]
-members = ["zte-agent", "euicc"]
+members = ["zte-agent", "euicc", "relay-tunnel"]
 exclude = ["vendor/webrtc-ice"]
 resolver = "2"
 

@@ -17,6 +17,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 httpdate = "1"
 # SGP.22 card commands: LGPL-2.1-only Rust translation of lpac's libeuicc (see euicc/).
 euicc = { path = "../euicc" }
+relay-tunnel = { path = "../relay-tunnel" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "net", "macros"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }

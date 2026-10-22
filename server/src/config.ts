@@ -21,5 +21,21 @@ export function configuration(path: string) {
     const value = object(config.apns);
     push = new APNs(text(value.teamId), text(value.keyId), text(value.bundleId), privateFile(text(value.keyFile, 4096)));
   }
-  return { hostname, port: config.port, database, publicURL: publicURL.toString(), turn, push };
+  return { hostname, port: config.port, database, publicURL: publicURL.toString(), turn, push, doors: doors(config.doors) };
+}
+
+export interface Door { address: string; label: string }
+
+/** QUIC doors that forward to this service; clients pick the fastest. The fragment is the
+ *  gateway certificate pin, so the list itself carries no secret. */
+function doors(value: unknown): Door[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 8) throw new Error("Invalid doors");
+  return value.map(item => {
+    const door = object(item), address = text(door.address, 512), label = text(door.label, 32);
+    if (!/^quic:\/\/([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\]):\d{1,5}\/?#[A-Za-z0-9_-]{43}$/.test(address)) throw new Error("Invalid door address");
+    const port = Number(address.match(/:(\d{1,5})\/?#/)![1]);
+    if (port < 1 || port > 65535 || label.length < 1) throw new Error("Invalid door");
+    return { address, label };
+  });
 }

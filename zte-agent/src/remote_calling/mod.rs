@@ -2,6 +2,7 @@ mod audio;
 mod admission;
 mod codec;
 mod connect;
+mod doors;
 mod journal;
 mod media;
 mod peer;
@@ -32,6 +33,9 @@ pub(super) struct Config {
     request_id: Uuid,
     endpoint_id: Option<Uuid>,
     invitation: Option<String>,
+    /// QUIC doors the server advertised, kept for the next connection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    doors: Vec<String>,
 }
 impl Config {
     fn validate(&self) -> Result<(), String> {
@@ -64,6 +68,7 @@ pub struct RemoteCalling {
     config: Mutex<Option<Config>>,
     status: Mutex<Status>,
     changed: Notify,
+    doors: doors::Doors,
 }
 impl RemoteCalling {
     pub fn connection_info(&self) -> Value {
@@ -102,6 +107,7 @@ impl RemoteCalling {
             config: Mutex::new(config),
             status: Mutex::new(status),
             changed: Notify::new(),
+            doors: doors::Doors::default(),
         }
     }
     pub fn status(&self) -> Value {
@@ -111,6 +117,7 @@ impl RemoteCalling {
         json!({"ok":true,"data":{"agentTime":agent_time,"enabled":config.as_ref().is_some_and(|v|v.enabled),
             "configured":config.as_ref().is_some_and(|v|v.endpoint_id.is_some()),"connected":status.connected,
             "serverURL":config.as_ref().map(|v|&v.server_url),"routerId":config.as_ref().and_then(|v|v.endpoint_id),
+            "via":config.as_ref().map(|v|self.doors.route(v).via),"doors":config.as_ref().map(|v|&v.doors),
             "lastError":status.last_error,"callState":status.call_state,"audioAdapterError":audio::available().err()}})
     }
     fn set_status(&self, connected: bool, error: Option<&str>, call: Option<&str>) {
@@ -177,6 +184,20 @@ impl RemoteCalling {
         *current = Some(config);
         Ok(())
     }
+    /// Records the server's advertised doors without restarting the worker.
+    pub(super) fn update_doors(&self, doors: Vec<String>) -> Result<(), String> {
+        let mut current = self.config.lock().unwrap();
+        let Some(config) = current.as_mut() else { return Ok(()) };
+        if config.doors == doors { return Ok(()); }
+        let mut next = config.clone();
+        next.doors = doors;
+        storage::private_write(Path::new(CONFIG), &serde_json::to_vec(&next).map_err(|_| "config_serialize")?)?;
+        *config = next;
+        Ok(())
+    }
+    pub(super) fn current_config(&self) -> Option<Config> {
+        self.config.lock().unwrap().clone()
+    }
     fn persist_enrollment(&self, config: Config) -> Result<(), String> {
         let mut current = self.config.lock().unwrap();
         if current
@@ -213,7 +234,8 @@ impl RemoteCalling {
                     if !state.auth.has_password() {manager.set_status(false,Some("agent_password_required"),None);manager.changed.notified().await;continue;}
                     if config.endpoint_id.is_none() {
                         let candidate=config.clone();
-                        let enrolled=tokio::task::spawn_blocking(move ||enroll(candidate)).await;
+                        let route=manager.doors.route(&candidate);
+                        let enrolled=tokio::task::spawn_blocking(move ||enroll(candidate,&route)).await;
                         match enrolled {
                             Ok(Ok(next))=>{
                                 let current=manager.config.lock().unwrap().clone();
@@ -254,20 +276,13 @@ fn server_url(value: &str) -> Result<reqwest::Url, String> {
     }
     Ok(url)
 }
-fn url(config: &Config, path: &str) -> Result<String, String> {
-    Ok(format!(
-        "{}/{}",
-        config.server_url.trim_end_matches('/'),
-        path
-    ))
-}
-fn request(config: &Config, path: &str, body: Option<Value>) -> Result<Value, String> {
+fn request(config: &Config, route: &doors::Route, path: &str, body: Option<Value>) -> Result<Value, String> {
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|_| "server_transport")?;
-    let endpoint = url(config, path)?;
+    let endpoint = route.url(path);
     let request = if let Some(body) = body {
         client.post(endpoint).json(&body)
     } else {
@@ -294,9 +309,10 @@ fn request(config: &Config, path: &str, body: Option<Value>) -> Result<Value, St
     }
     serde_json::from_slice(&bytes).map_err(|_| "invalid_server_response".into())
 }
-fn enroll(mut config: Config) -> Result<Config, String> {
+fn enroll(mut config: Config, route: &doors::Route) -> Result<Config, String> {
     let response = request(
         &config,
+        route,
         "v1/enroll",
         Some(
             json!({"invitation":config.invitation,"deviceToken":config.device_token,"requestId":config.request_id}),
@@ -364,6 +380,7 @@ pub fn configure(state: &AppState, body: &[u8]) -> (u16, Value) {
                 request_id: Uuid::new_v4(),
                 endpoint_id: None,
                 invitation: None,
+                doors: Vec::new(),
             }
         }
     };
@@ -378,7 +395,8 @@ pub fn configure(state: &AppState, body: &[u8]) -> (u16, Value) {
         return error(500, &code);
     }
     if config.endpoint_id.is_none() {
-        match enroll(config) {
+        let route = state.remote_calling.doors.route(&config);
+        match enroll(config, &route) {
             Ok(enrolled) => {
                 if let Err(code) = state.remote_calling.persist_enrollment(enrolled) {
                     return error(500, &code);
@@ -404,7 +422,8 @@ pub fn pairing(state: &AppState) -> (u16, Value) {
     else {
         return error(409, "remote_calling_not_configured");
     };
-    match request(&config, "v1/pairings", Some(json!({}))) {
+    let route = state.remote_calling.doors.route(&config);
+    match request(&config, &route, "v1/pairings", Some(json!({}))) {
         Ok(data) => (200, json!({"ok":true,"data":data})),
         Err(code) => error(503, &code),
     }
@@ -442,7 +461,7 @@ mod clock_tests {
     fn manager() -> RemoteCalling {
         // An isolated manager avoids opening the router's normal configuration.
         RemoteCalling { recordings: recordings::Recordings::new(), clock: Mutex::new(None), local_commands: Mutex::new(None), configure_lock: Mutex::new(()),
-            config: Mutex::new(None), status: Mutex::new(Status::default()), changed: Notify::new() }
+            config: Mutex::new(None), status: Mutex::new(Status::default()), changed: Notify::new(), doors: doors::Doors::default() }
     }
     #[test]
     fn authenticated_server_time_advances_without_the_device_wall_clock() {

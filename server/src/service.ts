@@ -4,6 +4,7 @@ import { Fault, object, signal, snapshot, text, uuid, type Call, type Endpoint, 
 import { Store } from "./store";
 import type { PushProvider } from "./apns";
 import { AgentRelay } from "./agent-relay";
+import type { Door } from "./config";
 import { SMSNotifications, smsContent } from "./sms-notifications";
 import { PeerRendezvous } from "./peer-rendezvous";
 import { DeviceConnect } from "./device-connect";
@@ -13,6 +14,7 @@ interface SocketData { endpoint: Endpoint; generation: string }
 export interface ServiceOptions {
   hostname?: string; port?: number; store: Store; push?: PushProvider;
   turn?: { urls: string[]; secret: string };
+  doors?: Door[];
   maintenance?: boolean;
 }
 
@@ -132,7 +134,8 @@ export class CallingService {
       if (request.method === "GET" && path === "/v1/status") {
         const call = this.store.currentCall(endpoint.router_id);
         return Response.json({ routerOnline: this.sockets.has(endpoint.router_id),
-          call: call ? this.visibleSnapshot(call, endpoint) : null, voipPushConfigured: !!this.options.push, turnConfigured: !!this.options.turn });
+          call: call ? this.visibleSnapshot(call, endpoint) : null, voipPushConfigured: !!this.options.push, turnConfigured: !!this.options.turn,
+          doors: this.options.doors ?? [] });
       }
       if (request.method === "POST" && path === "/v1/pairings") return Response.json(this.store.pairing(endpoint));
       if (request.method === "DELETE" && path === "/v1/router") {
@@ -232,7 +235,7 @@ export class CallingService {
       role: endpoint.role, calls: visible ? [visible] : [], iceServers: this.ice(endpoint),
       paired: !!this.store.one("SELECT 1 FROM endpoints WHERE router_id=? AND role='phone' AND revoked=0", endpoint.router_id),
       routerOnline: this.sockets.has(endpoint.router_id), voipPushConfigured: !!this.options.push,
-      peerManagement: this.peerRouters.has(endpoint.router_id) });
+      peerManagement: this.peerRouters.has(endpoint.router_id), doors: this.options.doors ?? [] });
     if (endpoint.role === "router") {
       this.presence(endpoint.id, true);
       // A delivered operation may have executed before the disconnect. The device's
