@@ -18,6 +18,7 @@ protocol CallingSocket: AnyObject {
     func cancel(with code: URLSessionWebSocketTask.CloseCode, reason: Data?)
 }
 extension URLSessionWebSocketTask: CallingSocket {}
+extension RelayTunnel: DoorTunnel {}
 
 typealias CallingMediaFactory = @MainActor (UUID, [CallingICEServer], Bool, Bool, @escaping (String, [String: Any]) -> Void,
     @escaping (RTCPeerConnectionState) -> Void) throws -> any CallingMediaConnection
@@ -67,6 +68,10 @@ final class RemoteCallingManager: NSObject {
     private(set) var pairingRevision = UUID()
     private(set) var serverOperationInProgress = false
     private(set) var managementPeerStatus = "Not connected"
+    /// HTTPS and QUIC door paths to the selected service, with their last measured latency.
+    let paths: RelayPaths
+    private(set) var pathPreference: String?
+    @ObservationIgnored private var doors: [CallingDoor] = []
     var hasSavedPairing: Bool { isPaired || servers.contains(where: \.isPaired) }
     var hasPendingPairing: Bool { servers.first(where: { $0.id == serverAddress })?.hasPendingPairing == true }
 
@@ -88,7 +93,7 @@ final class RemoteCallingManager: NSObject {
             let elapsed = observed.duration(to: .now).components
             now = time + Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
         } else { now = Date().timeIntervalSince1970 }
-        return AgentRelayAccess(server: credentials.serverURL, token: credentials.phoneToken, routerID: routerID, serverTime: now)
+        return AgentRelayAccess(server: serverBase(credentials), token: credentials.phoneToken, routerID: routerID, serverTime: now)
     }
     @ObservationIgnored private var socket: (any CallingSocket)?
     @ObservationIgnored private var session: URLSession
@@ -149,6 +154,10 @@ final class RemoteCallingManager: NSObject {
         self.deviceInfo = deviceInfo
         self.loadSavedCredentials = loadCredentials
         self.saveCredentials = saveCredentials
+        paths = RelayPaths(makeTunnel: { door in
+            guard let endpoint = door.endpoint, let pin = RelayTunnel.pin(fromBase64URL: endpoint.pin) else { return nil }
+            return RelayTunnel(host: endpoint.host, port: endpoint.port, pin: pin)
+        })
         super.init()
         provider.setDelegate(self, queue: .main)
         RTCAudioSession.sharedInstance().useManualAudio = true
@@ -198,13 +207,39 @@ final class RemoteCallingManager: NSObject {
             iceServers = []
             errorMessage = nil
             pairingRevision = UUID()
+            paths.stop()
         }
+        doors = saved.doors
+        pathPreference = saved.pathPreference
         servers = saved.choices
         if isPaired { connect() }
     }
     private func requireServerChangeAllowed() throws {
         guard call == nil || call?.state == .ended, pending.isEmpty else { throw CallingError.server("call_in_progress") }
         guard !serverOperationInProgress else { throw CallingError.server("server_operation_in_progress") }
+    }
+    /// The base URL for service requests on the current path: the HTTPS address or a door.
+    private func serverBase(_ credentials: CallingCredentials) -> URL {
+        paths.base(server: credentials.serverURL)
+    }
+    /// nil returns to automatic choice. The socket reconnects on the chosen path.
+    func choosePath(_ preference: String?) throws {
+        var saved = try loadSavedCredentials()
+        saved.pathPreference = preference
+        try saveCredentials(saved)
+        pathPreference = preference
+        disconnect()
+        connect()
+    }
+    private func learnDoors(_ advertised: [CallingDoor]) {
+        guard advertised != doors else { return }
+        do {
+            var saved = try loadSavedCredentials()
+            guard saved.active?.phoneToken == credentials?.phoneToken else { return }
+            saved.doors = advertised
+            try saveCredentials(saved)
+            doors = advertised
+        } catch { present(error) }
     }
     func addServer(_ address: String) throws {
         guard !serverOperationInProgress else { throw CallingError.server("server_operation_in_progress") }
@@ -323,7 +358,7 @@ final class RemoteCallingManager: NSObject {
         defer { serverOperationInProgress = false }
         var saved = try loadSavedCredentials()
         if let credentials = saved.active ?? saved.pending {
-            do { _ = try await http.request("v1/phone", server: credentials.serverURL, token: credentials.phoneToken, method: "DELETE") }
+            do { _ = try await http.request("v1/phone", server: serverBase(credentials), token: credentials.phoneToken, method: "DELETE") }
             catch CallingError.server(let code) where code == "unauthorized" { /* This pairing has already been revoked or was never admitted. */ }
         }
         guard call == nil || call?.state == .ended else { throw CallingError.server("call_in_progress") }
@@ -413,9 +448,14 @@ final class RemoteCallingManager: NSObject {
             var delay = 1
             while !Task.isCancelled, let credentials = self.credentials {
                 do {
-                    var url = credentials.serverURL.appending(path: "v1/socket")
+                    // Every attempt re-measures the paths; a door forwards to the same service.
+                    let base = await self.paths.select(server: serverBase(credentials), token: credentials.phoneToken,
+                                                       doors: self.doors, preference: self.pathPreference)
+                    guard self.connectionGeneration == generation, !Task.isCancelled else { return }
+                    var url = base.appending(path: "v1/socket")
                     guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw CallingError.invalidServer }
-                    components.scheme = "wss"
+                    // TLS on the direct path; a door's QUIC link already encrypts its loopback hop.
+                    components.scheme = base.scheme == "https" ? "wss" : "ws"
                     guard let websocketURL = components.url else { throw CallingError.invalidServer }
                     url = websocketURL
                     var request = URLRequest(url: url)
@@ -659,7 +699,7 @@ final class RemoteCallingManager: NSObject {
         guard let credentials else { throw CallingError.disconnected }
         var request = body
         request["delivery"] = delivery
-        return try await http.request("v1/call-operation", server: credentials.serverURL, token: credentials.phoneToken,
+        return try await http.request("v1/call-operation", server: serverBase(credentials), token: credentials.phoneToken,
                                       method: "POST", body: request)
     }
     private func complete(_ id: UUID, outcome: Result<Void, Error>) {
@@ -683,6 +723,7 @@ final class RemoteCallingManager: NSObject {
                   let servers = value["iceServers"] as? [[String: Any]] else { throw CallingError.invalidResponse }
             iceServers = try JSONDecoder().decode([CallingICEServer].self, from: JSONSerialization.data(withJSONObject: servers))
             peerSupported = value["peerManagement"] as? Bool == true
+            learnDoors(CallingDoor.list(value["doors"]))
             if let time = value["serverTime"] as? Double {
                 guard (946684800..<4102444800).contains(time) else { throw CallingError.invalidResponse }
                 serverClock = (time, .now)
@@ -907,7 +948,7 @@ final class RemoteCallingManager: NSObject {
         guard let credentials, let pushToken else { return }
         guard let environment = Bundle.main.object(forInfoDictionaryKey: "OpenU60PushEnvironment") as? String,
               environment == "sandbox" || environment == "production" else { throw CallingError.server("invalid_push_environment") }
-        _ = try await http.request("v1/push-token", server: credentials.serverURL, token: credentials.phoneToken, method: "PUT",
+        _ = try await http.request("v1/push-token", server: serverBase(credentials), token: credentials.phoneToken, method: "PUT",
             body: ["token": pushToken, "environment": environment])
     }
     private func finish(_ id: UUID, reason: CXCallEndedReason) {
@@ -1042,7 +1083,7 @@ extension RemoteCallingManager: @preconcurrency PKPushRegistryDelegate {
         pushToken = nil
         guard let credentials else { return }
         Task {
-            do { _ = try await http.request("v1/push-token", server: credentials.serverURL, token: credentials.phoneToken, method: "DELETE") }
+            do { _ = try await http.request("v1/push-token", server: serverBase(credentials), token: credentials.phoneToken, method: "DELETE") }
             catch { present(error) }
         }
     }

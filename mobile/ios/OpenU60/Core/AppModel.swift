@@ -22,9 +22,9 @@ final class AppModel {
         signalActivity = SignalActivityManager(client: client)
         client.relayAccess = { [weak calling] in calling?.managementAccess }
         client.peerRequest = { [weak calling] data, id, timeout, access in
+            // The path (HTTPS or a door) may change between attempts; the pairing may not.
             guard let calling, let current = calling.managementAccess,
-                  current.server == access.server, current.routerID == access.routerID,
-                  current.token == access.token else { throw AgentError.remoteUnauthorized }
+                  current.routerID == access.routerID, current.token == access.token else { throw AgentError.remoteUnauthorized }
             return try await calling.peerManagementRequest(data, id: id, timeout: timeout)
         }
         calling.localCommandDelivery = { [weak client] command, routerID in

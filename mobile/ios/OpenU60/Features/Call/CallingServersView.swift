@@ -48,6 +48,9 @@ struct CallingServersView: View {
             } footer: {
                 Text("Remote control and calls use the selected server. Each address keeps its own pairing. Adding an address keeps your current server selected; deploy and pair the new server before using it.")
             }
+            if !manager.paths.options.isEmpty {
+                RelayPathsSection()
+            }
             if manager.call != nil {
                 Section { Text("Finish the current call before switching servers.").foregroundStyle(.secondary) }
             }
@@ -94,5 +97,59 @@ private struct AddCallingServerView: View {
             }
             .task { addressFocused = true }
         }
+    }
+}
+
+/// The ways to reach the selected server. Doors are regional QUIC entries to the same
+/// service; pairing and calls are the same through any of them.
+private struct RelayPathsSection: View {
+    @Environment(RemoteCallingManager.self) private var manager
+    @State private var error: String?
+
+    var body: some View {
+        Section {
+            row(id: nil, title: "Automatic", detail: automaticDetail, latency: nil)
+            ForEach(manager.paths.options) { option in
+                row(id: option.id, title: option.label,
+                    detail: option.id == RelayPaths.direct ? "HTTPS" : "QUIC door",
+                    latency: option.reachable ? option.latency : nil, unreachable: !option.reachable)
+            }
+            if let error { Text(error).foregroundStyle(.red) }
+        } header: {
+            Text("Path")
+        } footer: {
+            Text("Paths are measured before each connection. Automatic uses the fastest that answers; a chosen path is used while it answers.")
+        }
+    }
+
+    private var automaticDetail: String {
+        let current = manager.paths.options.first { $0.id == manager.paths.current }
+        return "Using \(current?.label ?? "Direct")"
+    }
+
+    private func row(id: String?, title: String, detail: String, latency: TimeInterval?, unreachable: Bool = false) -> some View {
+        Button {
+            do { try manager.choosePath(id); error = nil } catch { self.error = error.localizedDescription }
+        } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).foregroundStyle(.primary)
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                if unreachable {
+                    Text("Unreachable").font(.caption).foregroundStyle(.red)
+                } else if let latency {
+                    Text("\(Int((latency * 1000).rounded())) ms").font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                if manager.pathPreference == id {
+                    Image(systemName: "checkmark").font(.body.weight(.semibold))
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(manager.call != nil)
+        .accessibilityValue(manager.pathPreference == id ? "Selected" : "")
     }
 }

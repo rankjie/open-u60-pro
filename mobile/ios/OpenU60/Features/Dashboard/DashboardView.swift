@@ -487,6 +487,9 @@ private struct RouterConnectionDetail: View {
                     LabeledContent("U60 at server", value: remoteCalling.isConnected ?
                         (remoteCalling.routerOnline ? "Online" : "Offline") : "Unknown")
                     LabeledContent("P2P", value: remoteCalling.managementPeerStatus)
+                    if let path = remoteCalling.paths.options.first(where: { $0.id == remoteCalling.paths.current }) {
+                        LabeledContent("Server path", value: path.id == RelayPaths.direct ? "Direct (HTTPS)" : "\(path.label) (QUIC)")
+                    }
                 }
                 NavigationLink { CallingServersView() } label: {
                     LabeledContent("Server", value: remoteCalling.serverAddress)

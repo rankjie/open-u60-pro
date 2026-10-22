@@ -26,6 +26,8 @@ xcrun --sdk iphonesimulator swiftc -swift-version 5 -parse-as-library -sdk "$ope
     "$openu60_root/mobile/ios/OpenU60/Core/Networking/AgentError.swift" \
     "$openu60_root/mobile/ios/OpenU60/Core/RemoteCalling/CallingMedia.swift" \
     "$openu60_root/mobile/ios/OpenU60/Core/RemoteCalling/RemoteCallingManager.swift" \
+    "$openu60_root/mobile/ios/OpenU60/Core/RemoteCalling/RelayPaths.swift" \
+    "$openu60_root/mobile/ios/OpenU60/Core/Networking/RelayTunnel.swift" \
     "$openu60_root/mobile/ios/Tests/CallingTestDoubles.swift" \
     "$openu60_root/mobile/ios/Tests/CallingServerProfileTests.swift" \
     "$openu60_root/mobile/ios/Tests/ManagementPeerTests.swift" \

@@ -1756,7 +1756,9 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "quinn",
+ "quinn-proto",
  "rcgen",
+ "ring",
  "rustls",
  "sha2",
  "tokio",

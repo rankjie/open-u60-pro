@@ -13,6 +13,9 @@ struct CallingServerProfile: Codable {
     let address: URL
     var active: CallingCredentials?
     var pending: CallingCredentials?
+    /// QUIC doors the service advertised, and the chosen path: nil is automatic.
+    var doors: [CallingDoor]?
+    var path: String?
 }
 
 struct CallingServerChoice: Identifiable {
@@ -34,6 +37,14 @@ struct SavedCallingCredentials: Codable {
     var pending: CallingCredentials? {
         get { profiles[selectedIndex].pending }
         set { profiles[selectedIndex].pending = newValue }
+    }
+    var doors: [CallingDoor] {
+        get { profiles[selectedIndex].doors ?? [] }
+        set { profiles[selectedIndex].doors = newValue.isEmpty ? nil : newValue }
+    }
+    var pathPreference: String? {
+        get { profiles[selectedIndex].path }
+        set { profiles[selectedIndex].path = newValue }
     }
     var choices: [CallingServerChoice] {
         profiles.map { CallingServerChoice(address: $0.address, isPaired: $0.active?.endpointId != nil,

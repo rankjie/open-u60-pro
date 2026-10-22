@@ -167,3 +167,51 @@ async fn a_door_can_chain_through_another_door() {
     let client = Tunnel::start(near, near_pin).await.unwrap();
     assert_eq!(exchange(client.local_addr(), b"through two doors").await.unwrap(), b"echo:through two doors");
 }
+
+#[tokio::test]
+async fn a_finished_empty_request_still_reaches_upstream() {
+    // Streams that are opened and never finished (Network.framework's) open no upstream
+    // connection; that is covered by the iOS forwarder test. A clean, empty request does.
+    let dir = temp_dir("empty");
+    let (address, pin, _gateway) = start_gateway(&dir, upstream().await, 0).await;
+    let tunnel = Tunnel::start(address, pin).await.unwrap();
+    assert_eq!(exchange(tunnel.local_addr(), b"").await.unwrap(), b"echo:");
+}
+
+#[tokio::test]
+async fn a_restarted_gateway_resets_old_connections_at_once() {
+    use std::process::{Command, Stdio};
+    use std::io::BufRead;
+    let dir = temp_dir("reset");
+    let upstream = upstream().await;
+    let port = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
+    let start = || {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_relay-tunnel-gateway"))
+            .args([dir.to_str().unwrap(), &format!("127.0.0.1:{port}"), &upstream.to_string()])
+            .stdout(Stdio::piped()).spawn().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        let pin = Pin::parse(line.trim().rsplit(' ').next().unwrap()).unwrap();
+        (child, pin)
+    };
+    let (mut first, pin) = start();
+    let address: SocketAddr = (Ipv4Addr::LOCALHOST, port).into();
+    let tunnel = Tunnel::start(address, pin).await.unwrap();
+    assert_eq!(exchange(tunnel.local_addr(), b"one").await.unwrap(), b"echo:one");
+    // A crash: SIGKILL sends no close; the client still holds the old connection.
+    first.kill().unwrap();
+    first.wait().unwrap();
+    let (mut second, pin_again) = start();
+    assert_eq!(pin_again, pin);
+    // Without the persistent reset key this waits for the 60 s idle timeout.
+    let started = std::time::Instant::now();
+    let mut reply = Err(std::io::Error::other("no attempt"));
+    while started.elapsed() < Duration::from_secs(10) {
+        reply = exchange(tunnel.local_addr(), b"two").await;
+        if matches!(&reply, Ok(r) if r == b"echo:two") { break }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    second.kill().unwrap();
+    assert_eq!(reply.unwrap(), b"echo:two");
+    assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+}

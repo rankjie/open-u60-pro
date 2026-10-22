@@ -90,6 +90,45 @@ All paired phones ring for an incoming call. The first answer owns the call; oth
 phones stop ringing. Each phone receives its own complete SMS notification and
 retains independent push-token and retry state.
 
+## QUIC doors
+
+A door is a regional entry to this same service: a `relay-tunnel-gateway` that accepts
+QUIC on a UDP port and forwards each stream, byte for byte, to the service's loopback
+HTTP port, or to another door. Clients still speak the unchanged HTTP/WebSocket protocol,
+through a local forwarder; identity, pairing, calls and pushes are the service's, so a door
+holds no state. Doors serve where public HTTP/HTTPS is unwanted (mainland hosting without
+an ICP filing): there is no HTTP on the wire, no domain, and no public certificate.
+
+A gateway creates its certificate once and prints its SHA-256 pin. The pin travels in the
+door address, `quic://host:port#pin`, and is the only trust anchor; TLS 1.3 handshake
+signatures are still verified. ALPN is `openu60-tunnel/1`. Pick an otherwise unused high UDP
+port; avoid 443/udp (HTTP/3) and well-known VPN ports (500/4500, 1194, 51820), which some
+networks inspect or throttle.
+
+Build the static binary for the host's architecture and install the unit:
+
+```sh
+cargo zigbuild --release -p relay-tunnel --bin relay-tunnel-gateway --target x86_64-unknown-linux-musl
+install -m 755 relay-tunnel-gateway /opt/openu60/door/
+install -m 644 server/deploy/openu60-door.service /etc/systemd/system/
+systemctl edit openu60-door   # Environment=OPENU60_DOOR_UPSTREAM=…
+systemctl enable --now openu60-door && journalctl -u openu60-door -n 1   # prints the pin
+```
+
+On the service host the upstream is `127.0.0.1:46170`. A distant door chains to a door on
+the service host, `OPENU60_DOOR_UPSTREAM=quic://<service-host>:47853#<pin>`, so the long
+haul is QUIC as well. Allow the UDP port in the host and cloud firewalls.
+
+Advertise doors by adding them to the private configuration and restarting the service:
+
+```json
+"doors": [{ "address": "quic://203.0.113.5:47853#<pin>", "label": "Hangzhou" }]
+```
+
+At most eight doors are accepted; the list is sent in `hello` and `/v1/status`. Routers and
+phones keep the last list, probe the HTTPS address and each door end to end before
+connecting, and use the fastest that answers; the phone also offers a manual choice.
+
 ## Protocol and failure behavior
 
 For an enrolled router, phones can now connect using the device string shown by

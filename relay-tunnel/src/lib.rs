@@ -80,20 +80,30 @@ fn transport(keep_alive: bool) -> Arc<TransportConfig> {
 
 // MARK: - Gateway
 
-/// The gateway's certificate and key, created once and kept so the pin stays stable.
+/// The gateway's certificate and key, created once and kept so the pin stays stable, and the
+/// stateless-reset key: a restarted gateway can then end a client's old connection at once
+/// instead of leaving it to the idle timeout.
 pub struct Identity {
     certificate: CertificateDer<'static>,
     key: PrivatePkcs8KeyDer<'static>,
+    reset: [u8; 32],
 }
 
 impl Identity {
     pub fn load_or_create(directory: &Path) -> io::Result<Self> {
         let certificate_file = directory.join("certificate.der");
         let key_file = directory.join("key.der");
+        let reset_file = directory.join("reset.key");
         if certificate_file.exists() || key_file.exists() {
+            if !reset_file.exists() {
+                write_private(&reset_file, &random()?)?;
+            }
+            let reset = std::fs::read(&reset_file)?.try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "reset key must be 32 bytes"))?;
             return Ok(Identity {
                 certificate: CertificateDer::from(std::fs::read(&certificate_file)?),
                 key: PrivatePkcs8KeyDer::from(std::fs::read(&key_file)?),
+                reset,
             });
         }
         let generated = rcgen::generate_simple_self_signed(vec![SERVER_NAME.to_string()])
@@ -101,8 +111,10 @@ impl Identity {
         let identity = Identity {
             certificate: generated.cert.der().clone(),
             key: PrivatePkcs8KeyDer::from(generated.key_pair.serialize_der()),
+            reset: random()?,
         };
         std::fs::create_dir_all(directory)?;
+        write_private(&reset_file, &identity.reset)?;
         write_private(&key_file, identity.key.secret_pkcs8_der())?;
         write_private(&certificate_file, identity.certificate.as_ref())?;
         Ok(identity)
@@ -111,6 +123,13 @@ impl Identity {
     pub fn pin(&self) -> Pin {
         Pin::of(self.certificate.as_ref())
     }
+}
+
+fn random() -> io::Result<[u8; 32]> {
+    use ring::rand::SecureRandom;
+    let mut bytes = [0; 32];
+    ring::rand::SystemRandom::new().fill(&mut bytes).map_err(|_| io::Error::other("no random source"))?;
+    Ok(bytes)
 }
 
 fn write_private(file: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -138,7 +157,20 @@ pub fn gateway(identity: &Identity, listen: SocketAddr) -> io::Result<Endpoint> 
     let crypto = QuicServerConfig::try_from(crypto).map_err(io::Error::other)?;
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
     config.transport_config(transport(false));
-    Endpoint::server(config, listen)
+    let reset = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &identity.reset);
+    // Connection IDs are validated with a keyed hash; a per-process key would make a restarted
+    // gateway discard an old client's packets as invalid instead of answering with a reset.
+    let cid_key = u64::from_le_bytes(identity.reset[..8].try_into().expect("8 bytes"))
+        ^ u64::from_le_bytes(identity.reset[24..].try_into().expect("8 bytes"));
+    let mut endpoint_config = quinn::EndpointConfig::new(Arc::new(reset));
+    endpoint_config.cid_generator(move || Box::new(quinn_proto::HashedConnectionIdGenerator::from_key(cid_key)));
+    let socket = std::net::UdpSocket::bind(listen)?;
+    Endpoint::new(
+        endpoint_config,
+        Some(config),
+        socket,
+        Arc::new(quinn::TokioRuntime),
+    )
 }
 
 /// Forwards every stream of every connection to `upstream` until the endpoint closes.
@@ -146,10 +178,20 @@ pub async fn serve(endpoint: Endpoint, upstream: SocketAddr) {
     while let Some(incoming) = endpoint.accept().await {
         tokio::spawn(async move {
             let Ok(connection) = incoming.await else { return };
-            while let Ok((send, recv)) = connection.accept_bi().await {
+            while let Ok((send, mut recv)) = connection.accept_bi().await {
                 tokio::spawn(async move {
+                    // Upstream is opened by the first byte or a clean finish: a client may open a
+                    // stream it never uses (Network.framework does), which must not hold a service
+                    // connection until the QUIC connection ends. An empty, finished request is
+                    // still a request and reaches upstream as an immediate EOF.
+                    let mut first = vec![0; 16384];
+                    match recv.read(&mut first).await {
+                        Ok(Some(length)) => first.truncate(length),
+                        Ok(None) => first.clear(),
+                        Err(_) => return,
+                    }
                     let Ok(tcp) = TcpStream::connect(upstream).await else { return };
-                    pipe(tcp, send, recv).await;
+                    pipe(tcp, send, recv, &first).await;
                 });
             }
         });
@@ -334,7 +376,7 @@ impl Tunnel {
                 tokio::spawn(async move {
                     // A failed open drops the TCP connection; the caller sees a closed socket.
                     if let Ok((send, recv)) = state.open().await {
-                        pipe(tcp, send, recv).await;
+                        pipe(tcp, send, recv, &[]).await;
                     }
                 });
             }
@@ -369,9 +411,12 @@ impl Drop for Tunnel {
 
 /// Copies both directions, preserving half-close: an HTTP client that finishes its request
 /// still receives the response.
-async fn pipe(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream) {
+async fn pipe(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream, first: &[u8]) {
     let _ = tcp.set_nodelay(true);
     let (mut tcp_read, mut tcp_write) = tcp.into_split();
+    if tcp_write.write_all(first).await.is_err() {
+        return;
+    }
     let outbound = async {
         let _ = tokio::io::copy(&mut tcp_read, &mut send).await;
         let _ = send.finish();
