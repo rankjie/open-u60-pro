@@ -37,61 +37,41 @@ final class DNSSettingsViewModel {
 
     private let client: AgentClient
     private let authManager: AuthManager
-    private var initialLoadDone = false
 
     init(client: AgentClient, authManager: AuthManager) {
         self.client = client
         self.authManager = authManager
     }
 
+    /// Both the DNS record and the DoH status must load before anything can be applied: the
+    /// mode is derived from both, and a guess would wipe custom DNS or DoH.
+    private(set) var isLoaded = false
+
     func refresh() async {
         isLoading = true
         message = nil
-
         do {
-            let data = try await client.getJSON("/api/router/dns")
-            config = DNSParser.parse(data)
-            if !initialLoadDone {
-                editPrimary = config.primaryDns
-                editSecondary = config.secondaryDns
-            }
+            async let dnsCall = client.getJSON("/api/router/dns")
+            async let dohCall = client.getJSON("/api/doh/status")
+            let (dnsData, dohData) = try await (dnsCall, dohCall)
+            config = DNSParser.parse(dnsData)
+            doh = DoHParser.parse(dohData)
+            // Every successful load shows the router's current state, never an older visit's.
+            editPrimary = config.primaryDns
+            editSecondary = config.secondaryDns
+            editUpstream = doh.upstreamUrl
+            selectedMode = doh.enabled ? .doh : config.isManual ? .custom : .auto
+            isLoaded = true
+            if doh.enabled { await refreshCache() }
         } catch {
-            showMessage("Failed to load DNS: \(error.localizedDescription)", isError: true)
+            isLoaded = false
+            showMessage("Failed to load DNS settings: \(error.localizedDescription)", isError: true)
         }
-
-        // DoH status (independent, don't fail the whole refresh)
-        do {
-            let data = try await client.getJSON("/api/doh/status")
-            doh = DoHParser.parse(data)
-            if !initialLoadDone && editUpstream.isEmpty {
-                editUpstream = doh.upstreamUrl
-            }
-            if doh.enabled {
-                await refreshCache()
-            }
-        } catch {
-            doh = .empty
-            if message == nil {
-                showMessage("DoH status unavailable", isError: false)
-            }
-        }
-
-        // Derive mode from state only on initial load
-        if !initialLoadDone {
-            if doh.enabled {
-                selectedMode = .doh
-            } else if config.isManual {
-                selectedMode = .custom
-            } else {
-                selectedMode = .auto
-            }
-            initialLoadDone = true
-        }
-
         isLoading = false
     }
 
     func apply() async {
+        guard isLoaded else { return }
         switch selectedMode {
         case .auto:
             await applyAuto()
@@ -226,7 +206,6 @@ final class DNSSettingsViewModel {
     }
 
     func applyPreset(primary: String, secondary: String, upstream: String) {
-        initialLoadDone = true
         if selectedMode == .auto {
             selectedMode = .custom
         }

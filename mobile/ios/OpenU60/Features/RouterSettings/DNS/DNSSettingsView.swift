@@ -58,7 +58,7 @@ struct DNSSettingsView: View {
                     Text("Apply")
                         .frame(maxWidth: .infinity)
                 }
-                .disabled(viewModel.isLoading)
+                .disabled(viewModel.isLoading || !viewModel.isLoaded)
             }
 
             // MARK: - Quick Setup

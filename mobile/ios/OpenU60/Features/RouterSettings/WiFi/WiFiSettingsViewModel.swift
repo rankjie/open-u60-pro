@@ -5,6 +5,9 @@ import SwiftUI
 final class WiFiSettingsViewModel {
     var config: WiFiConfig = .empty
     var isLoading: Bool = false
+    /// Saving stays off until a load succeeded: a failed load leaves defaults (empty SSIDs and
+    /// keys) that must never be written.
+    private(set) var isLoaded = false
     var message: String?
     var messageIsError: Bool = false
 
@@ -45,6 +48,7 @@ final class WiFiSettingsViewModel {
            wifiData["htmode_2g"] != nil {
             config = WiFiParser.parse(wifiData)
             syncEditFields()
+            isLoaded = true
             isLoading = false
             return
         }
@@ -53,28 +57,14 @@ final class WiFiSettingsViewModel {
         isLoading = false
     }
 
+    var hasChanges: Bool { isLoaded && !changedFields(editedParams, from: loadedParams).isEmpty }
+
     func apply() async {
+        guard isLoaded else { return }
+        // Only what the user edited; the agent keeps every other field as the router has it.
+        let params = changedFields(editedParams, from: loadedParams)
+        guard !params.isEmpty else { return }
         isLoading = true
-        let params: [String: Any] = [
-            "ssid_2g": editSSID2g,
-            "ssid_5g": editSSID5g,
-            "key_2g": editKey2g,
-            "key_5g": editKey5g,
-            "channel_2g": editChannel2g,
-            "channel_5g": editChannel5g,
-            "txpower_2g": editTxpower2g,
-            "txpower_5g": editTxpower5g,
-            "encryption_2g": editEncryption2g,
-            "encryption_5g": editEncryption5g,
-            "hidden_2g": editHidden2g ? "1" : "0",
-            "hidden_5g": editHidden5g ? "1" : "0",
-            "wifi_onoff": editWifiOnOff ? "1" : "0",
-            "radio2_disabled": editRadio2gDisabled ? "1" : "0",
-            "radio5_disabled": editRadio5gDisabled ? "1" : "0",
-            "wifi6_switch": editWifi7Enabled ? "1" : "0",
-            "htmode_2g": editBandwidth2g,
-            "htmode_5g": editBandwidth5g
-        ]
 
         do {
             let _ = try await client.putJSON("/api/wifi/settings", body: params)
@@ -85,6 +75,40 @@ final class WiFiSettingsViewModel {
         }
 
         isLoading = false
+    }
+
+    private var loadedParams: [String: Any] { Self.params(config) }
+    private var editedParams: [String: Any] {
+        Self.params(WiFiConfig(ssid2g: editSSID2g, ssid5g: editSSID5g, key2g: editKey2g, key5g: editKey5g,
+                               channel2g: editChannel2g, channel5g: editChannel5g,
+                               txpower2g: editTxpower2g, txpower5g: editTxpower5g,
+                               encryption2g: editEncryption2g, encryption5g: editEncryption5g,
+                               wifiOnOff: editWifiOnOff, hidden2g: editHidden2g, hidden5g: editHidden5g,
+                               radio2gDisabled: editRadio2gDisabled, radio5gDisabled: editRadio5gDisabled,
+                               wifi7Enabled: editWifi7Enabled, bandwidth2g: editBandwidth2g, bandwidth5g: editBandwidth5g))
+    }
+
+    private static func params(_ config: WiFiConfig) -> [String: Any] {
+        [
+            "ssid_2g": config.ssid2g,
+            "ssid_5g": config.ssid5g,
+            "key_2g": config.key2g,
+            "key_5g": config.key5g,
+            "channel_2g": config.channel2g,
+            "channel_5g": config.channel5g,
+            "txpower_2g": config.txpower2g,
+            "txpower_5g": config.txpower5g,
+            "encryption_2g": config.encryption2g,
+            "encryption_5g": config.encryption5g,
+            "hidden_2g": config.hidden2g ? "1" : "0",
+            "hidden_5g": config.hidden5g ? "1" : "0",
+            "wifi_onoff": config.wifiOnOff ? "1" : "0",
+            "radio2_disabled": config.radio2gDisabled ? "1" : "0",
+            "radio5_disabled": config.radio5gDisabled ? "1" : "0",
+            "wifi6_switch": config.wifi7Enabled ? "1" : "0",
+            "htmode_2g": config.bandwidth2g,
+            "htmode_5g": config.bandwidth5g
+        ]
     }
 
     private func updateConfigFromEdits() {

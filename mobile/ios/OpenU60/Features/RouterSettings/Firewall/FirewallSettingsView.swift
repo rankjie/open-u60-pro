@@ -15,7 +15,7 @@ struct FirewallSettingsView: View {
                 Button(viewModel.config.enabled ? "Disable Firewall" : "Enable Firewall") {
                     Task { await viewModel.toggleFirewall(enabled: !viewModel.config.enabled) }
                 }
-                .disabled(viewModel.isLoading)
+                .disabled(viewModel.isLoading || !viewModel.isLoaded)
 
                 if viewModel.config.enabled {
                     Picker("Level", selection: Binding(
@@ -26,7 +26,7 @@ struct FirewallSettingsView: View {
                         Text("Medium").tag("medium")
                         Text("High").tag("high")
                     }
-                    .disabled(viewModel.isLoading)
+                    .disabled(viewModel.isLoading || !viewModel.isLoaded)
                 }
 
                 LabeledContent("WAN Ping", value: viewModel.config.wanPingFilter ? "Blocked" : "Allowed")
@@ -37,13 +37,13 @@ struct FirewallSettingsView: View {
                     get: { viewModel.config.nat },
                     set: { enabled in Task { await viewModel.toggleNAT(enabled: enabled) } }
                 ))
-                .disabled(viewModel.isLoading)
+                .disabled(viewModel.isLoading || !viewModel.isLoaded)
 
                 Toggle("UPnP", isOn: Binding(
                     get: { viewModel.upnpEnabled },
                     set: { enabled in Task { await viewModel.toggleUPnP(enabled: enabled) } }
                 ))
-                .disabled(viewModel.isLoading)
+                .disabled(viewModel.isLoading || !viewModel.upnpLoaded)
             }
 
             Section("DMZ") {
@@ -59,7 +59,7 @@ struct FirewallSettingsView: View {
                     Text("Apply DMZ")
                         .frame(maxWidth: .infinity)
                 }
-                .disabled(viewModel.isLoading)
+                .disabled(viewModel.isLoading || !viewModel.isLoaded)
             }
 
             Section("Port Forwarding") {
@@ -67,7 +67,7 @@ struct FirewallSettingsView: View {
                     get: { viewModel.config.portForwardEnabled },
                     set: { enabled in Task { await viewModel.togglePortForward(enabled: enabled) } }
                 ))
-                .disabled(viewModel.isLoading)
+                .disabled(viewModel.isLoading || !viewModel.isLoaded)
 
                 if viewModel.config.portForwardEnabled {
                     Button {

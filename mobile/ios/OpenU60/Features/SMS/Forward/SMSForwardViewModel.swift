@@ -10,6 +10,8 @@ final class SMSForwardViewModel {
     var message: String?
     var messageIsError = false
     var presentedSheet: Sheet?
+    /// Settings change only after a load succeeded; a failed load would save forwarding as off.
+    private(set) var isLoaded = false
 
     enum Sheet: Identifiable {
         case add
@@ -37,27 +39,38 @@ final class SMSForwardViewModel {
         message = nil
         do {
             let data = try await client.getJSON("/api/sms/forward/config")
-            if let configDict = data["config"] as? [String: Any] {
-                config = SMSForwardParser.parseConfig(configDict)
+            guard let configDict = data["config"] as? [String: Any] else {
+                throw AgentError.decodingError("The forwarding settings are missing.")
             }
+            config = SMSForwardParser.parseConfig(configDict)
+            isLoaded = true
             lastForwardedId = (data["last_forwarded_id"] as? Int)
                 ?? (data["last_forwarded_id"] as? NSNumber)?.intValue
                 ?? 0
         } catch {
+            isLoaded = false
             report(error, as: "Failed to load")
         }
         isLoading = false
     }
 
     func updateConfig(enabled: Bool, pollIntervalSecs: Int, markRead: Bool, deleteAfter: Bool) async {
+        guard isLoaded else { return }
+        // Only what changed; the agent keeps the other settings as they are on the router.
+        let body = changedFields([
+            "enabled": enabled,
+            "poll_interval_secs": pollIntervalSecs,
+            "mark_read_after_forward": markRead,
+            "delete_after_forward": deleteAfter,
+        ], from: [
+            "enabled": config.enabled,
+            "poll_interval_secs": config.pollIntervalSecs,
+            "mark_read_after_forward": config.markReadAfterForward,
+            "delete_after_forward": config.deleteAfterForward,
+        ])
+        guard !body.isEmpty else { showMessage("No changes", isError: false); return }
         isLoading = true
         do {
-            let body: [String: Any] = [
-                "enabled": enabled,
-                "poll_interval_secs": pollIntervalSecs,
-                "mark_read_after_forward": markRead,
-                "delete_after_forward": deleteAfter,
-            ]
             let _ = try await client.putJSON("/api/sms/forward/config", body: body)
             config.enabled = enabled
             config.pollIntervalSecs = pollIntervalSecs
@@ -71,15 +84,12 @@ final class SMSForwardViewModel {
     }
 
     func toggleEnabled(_ enabled: Bool) async {
+        guard isLoaded else { return }
         let previous = config.enabled
         config.enabled = enabled  // optimistic
         do {
-            let _ = try await client.putJSON("/api/sms/forward/config", body: [
-                "enabled": enabled,
-                "poll_interval_secs": config.pollIntervalSecs,
-                "mark_read_after_forward": config.markReadAfterForward,
-                "delete_after_forward": config.deleteAfterForward,
-            ])
+            // The switch alone; the agent keeps the other settings as they are on the router.
+            let _ = try await client.putJSON("/api/sms/forward/config", body: ["enabled": enabled])
             config.enabled = enabled  // re-assert in case refresh() overwrote during await
         } catch {
             config.enabled = previous  // revert on failure

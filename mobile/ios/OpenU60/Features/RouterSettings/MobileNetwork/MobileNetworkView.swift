@@ -122,15 +122,15 @@ struct MobileNetworkView: View {
     }
 
     private var mobileDataFooter: String {
-        if !viewModel.config.isDataEnabled && viewModel.config.isConnected {
-            return "Mobile data setting is off, but the connection is still active."
-        } else if !viewModel.config.isDataEnabled {
-            return "Mobile data is disabled."
-        } else if viewModel.config.isConnected {
+        // The router reports its data switch as off after every boot while automatic connection
+        // keeps data up, so a live session is what shows data is on.
+        if viewModel.config.isConnected {
             let status = viewModel.config.connectStatus
                 .replacingOccurrences(of: "_", with: " ")
                 .capitalized
             return "Connected — \(status)"
+        } else if !viewModel.config.isDataEnabled {
+            return "Mobile data is disabled."
         } else if !viewModel.config.connectStatus.isEmpty {
             return "Disconnected"
         } else {

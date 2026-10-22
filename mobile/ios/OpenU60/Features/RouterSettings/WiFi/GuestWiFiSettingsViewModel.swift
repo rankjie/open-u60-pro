@@ -18,6 +18,8 @@ final class GuestWiFiSettingsViewModel {
     var editIsolate: Bool = true
     var editActiveTime: Int = 0
     var remainingSeconds: Int = -1
+    /// Saving stays off until a load succeeded, so defaults (empty name and key) are never written.
+    private(set) var isLoaded = false
 
     private let client: AgentClient
     private let authManager: AuthManager
@@ -37,26 +39,43 @@ final class GuestWiFiSettingsViewModel {
            data["ssid"] != nil {
             config = GuestWiFiParser.parse(data)
             syncEditFields()
+            isLoaded = true
             isLoading = false
             return
         }
 
+        isLoaded = false
         showMessage("Failed to load guest WiFi settings", isError: true)
         isLoading = false
     }
 
-    func apply() async {
-        isLoading = true
-        let params: [String: Any] = [
-            "guest_ssid": editSsid,
-            "guest_key": editKey,
-            "guest_encryption": editEncryption,
-            "guest_disabled_2g": editEnabled2g ? "0" : "1",
-            "guest_disabled_5g": editEnabled5g ? "0" : "1",
-            "guest_hidden": editHidden ? "1" : "0",
-            "guest_isolate": editIsolate ? "1" : "0",
-            "guest_active_time": "\(editActiveTime)"
+    var hasChanges: Bool { isLoaded && !changedFields(Self.params(edited), from: Self.params(config)).isEmpty }
+
+    private var edited: GuestWiFiConfig {
+        GuestWiFiConfig(enabled2g: editEnabled2g, enabled5g: editEnabled5g, ssid: editSsid, key: editKey,
+                        encryption: editEncryption, hidden: editHidden, isolate: editIsolate,
+                        activeTime: editActiveTime, remainingSeconds: remainingSeconds)
+    }
+
+    private static func params(_ config: GuestWiFiConfig) -> [String: Any] {
+        [
+            "guest_ssid": config.ssid,
+            "guest_key": config.key,
+            "guest_encryption": config.encryption,
+            "guest_disabled_2g": config.enabled2g ? "0" : "1",
+            "guest_disabled_5g": config.enabled5g ? "0" : "1",
+            "guest_hidden": config.hidden ? "1" : "0",
+            "guest_isolate": config.isolate ? "1" : "0",
+            "guest_active_time": "\(config.activeTime)"
         ]
+    }
+
+    func apply() async {
+        guard isLoaded else { return }
+        // Only what the user edited; untouched guest settings stay as the router has them.
+        let params = changedFields(Self.params(edited), from: Self.params(config))
+        guard !params.isEmpty else { return }
+        isLoading = true
 
         do {
             let _ = try await client.putJSON("/api/wifi/guest", body: params)

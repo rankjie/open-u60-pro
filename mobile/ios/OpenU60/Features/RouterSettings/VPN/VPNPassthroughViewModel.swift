@@ -20,6 +20,9 @@ final class VPNPassthroughViewModel {
         self.authManager = authManager
     }
 
+    /// Apply stays off until a load succeeded; otherwise all three switches would be sent as off.
+    private(set) var isLoaded = false
+
     func refresh() async {
         isLoading = true
         message = nil
@@ -30,7 +33,9 @@ final class VPNPassthroughViewModel {
             editL2tp = config.l2tp
             editPptp = config.pptp
             editIpsec = config.ipsec
+            isLoaded = true
         } catch {
+            isLoaded = false
             showMessage("Failed to load VPN: \(error.localizedDescription)", isError: true)
         }
 
@@ -38,6 +43,7 @@ final class VPNPassthroughViewModel {
     }
 
     func apply() async {
+        guard isLoaded else { return }
         isLoading = true
 
         do {

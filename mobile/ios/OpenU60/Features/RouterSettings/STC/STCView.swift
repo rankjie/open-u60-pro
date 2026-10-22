@@ -29,24 +29,24 @@ struct STCView: View {
                     Text("Apply Parameters")
                         .frame(maxWidth: .infinity)
                 }
-                .disabled(viewModel.isLoading)
+                .disabled(viewModel.isLoading || !viewModel.isLoaded)
             }
 
             Section("Controls") {
                 Button("Enable STC") {
                     Task { await viewModel.enable() }
                 }
-                .disabled(viewModel.isLoading || viewModel.config.enabled)
+                .disabled(viewModel.isLoading || !viewModel.isLoaded || viewModel.config.enabled)
 
                 Button("Disable STC") {
                     Task { await viewModel.disable() }
                 }
-                .disabled(viewModel.isLoading || !viewModel.config.enabled)
+                .disabled(viewModel.isLoading || !viewModel.isLoaded || !viewModel.config.enabled)
 
                 Button("Reset Whitelist", role: .destructive) {
                     Task { await viewModel.reset() }
                 }
-                .disabled(viewModel.isLoading)
+                .disabled(viewModel.isLoading || !viewModel.isLoaded)
             }
         }
         .navigationTitle("Smart Tower Connect")

@@ -64,7 +64,7 @@ struct GuestWiFiSettingsView: View {
                     Text("Apply")
                         .frame(maxWidth: .infinity)
                 }
-                .disabled(viewModel.isLoading)
+                .disabled(viewModel.isLoading || !viewModel.hasChanges)
             }
         }
         .navigationTitle("Guest WiFi")

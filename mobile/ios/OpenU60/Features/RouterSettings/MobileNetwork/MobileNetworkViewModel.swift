@@ -26,10 +26,12 @@ final class MobileNetworkViewModel {
         self.authManager = authManager
     }
 
+    /// Choices are compared with the record loaded when the screen last appeared; nothing can be
+    /// applied before a load succeeded, so defaults are never written.
     var hasChanges: Bool {
-        selectedConnectMode != config.connectMode
+        initialLoadDone && (selectedConnectMode != config.connectMode
             || selectedRoaming != config.isRoamingEnabled
-            || selectedNetSelectMode != config.netSelectMode
+            || selectedNetSelectMode != config.netSelectMode)
     }
 
     // MARK: - Refresh
@@ -59,14 +61,16 @@ final class MobileNetworkViewModel {
                 operators: config.operators,
                 scanStatus: config.scanStatus
             )
-            if !initialLoadDone {
-                selectedConnectMode = config.connectMode
-                selectedRoaming = config.isRoamingEnabled
-                selectedDataEnabled = config.isDataEnabled || config.isConnected
-                selectedNetSelectMode = config.netSelectMode
-                initialLoadDone = true
-            }
+            // This model lives for the whole session; every successful load resets the choices
+            // to the router's state, so an earlier visit's values are never applied later.
+            selectedConnectMode = config.connectMode
+            selectedRoaming = config.isRoamingEnabled
+            selectedDataEnabled = config.isDataEnabled || config.isConnected
+            selectedNetSelectMode = config.netSelectMode
+            initialLoadDone = true
         } catch {
+            // Without a current record, a change could only be compared with an old one.
+            initialLoadDone = false
             showMessage("Failed to load: \(error.localizedDescription)", isError: true)
         }
 
@@ -78,8 +82,8 @@ final class MobileNetworkViewModel {
     func setMobileData(enabled: Bool) async {
         isLoading = true
         do {
-            // Only the data switch (and automatic connection when turning on); roaming and the
-            // rest come from the modem's current record on the agent, never from this copy.
+            // Only the data switch (and automatic connection when turning on); the router keeps
+            // every field a request does not name, so roaming is never written from this copy.
             var params: [String: Any] = ["cid": 1, "enable": enabled ? 1 : 0]
             if enabled { params["connect_mode"] = 1 }
             if !enabled {
@@ -116,6 +120,7 @@ final class MobileNetworkViewModel {
     // MARK: - Apply Connection Settings
 
     func applySettings() async {
+        guard hasChanges else { return }
         isLoading = true
 
         do {

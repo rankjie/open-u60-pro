@@ -19,7 +19,7 @@ struct VPNPassthroughView: View {
                     Text("Apply")
                         .frame(maxWidth: .infinity)
                 }
-                .disabled(viewModel.isLoading)
+                .disabled(viewModel.isLoading || !viewModel.isLoaded)
             }
         }
         .navigationTitle("VPN Passthrough")

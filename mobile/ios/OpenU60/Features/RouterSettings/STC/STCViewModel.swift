@@ -21,6 +21,9 @@ final class STCViewModel {
         self.authManager = authManager
     }
 
+    /// Controls act only on a loaded record; a failed load would send empty parameters.
+    private(set) var isLoaded = false
+
     func refresh() async {
         isLoading = true
         message = nil
@@ -37,7 +40,9 @@ final class STCViewModel {
             editNrsaTimer = config.nrsaCollectTimer
             editLteMax = config.lteWhitelistMax
             editNrsaMax = config.nrsaWhitelistMax
+            isLoaded = true
         } catch {
+            isLoaded = false
             showMessage("Failed to load STC: \(error.localizedDescription)", isError: true)
         }
 
@@ -45,6 +50,7 @@ final class STCViewModel {
     }
 
     func applyParams() async {
+        guard isLoaded else { return }
         isLoading = true
 
         do {

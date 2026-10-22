@@ -17,13 +17,19 @@ final class TelemetryBlockerViewModel {
         self.authManager = authManager
     }
 
+    /// The router's rule list. Ids come only from here: rules added in this app are re-read
+    /// rather than given local ids the router would not recognise when deleting.
+    private func reload() async throws {
+        let data = try await client.getJSON("/api/router/domain-filter")
+        filterConfig = TelemetryParser.parseDomainFilter(data)
+    }
+
     func refresh() async {
         isLoading = true
         message = nil
 
         do {
-            let data = try await client.getJSON("/api/router/domain-filter")
-            filterConfig = TelemetryParser.parseDomainFilter(data)
+            try await reload()
         } catch {
             showMessage("Failed to load filters: \(error.localizedDescription)", isError: true)
         }
@@ -62,7 +68,7 @@ final class TelemetryBlockerViewModel {
             ])
             newDomain = ""
             showMessage("Added \(trimmed)", isError: false)
-            filterConfig.rules.append(DomainFilterRule(id: UUID().uuidString, domain: trimmed, enabled: true))
+            try? await reload()
         } catch {
             showMessage("Failed: \(error.localizedDescription)", isError: true)
         }
@@ -74,12 +80,20 @@ final class TelemetryBlockerViewModel {
         isLoading = true
 
         do {
+            // Ids may be list positions; re-read so the delete names the rule as it is now,
+            // not where it sat when this screen loaded (another client may have changed it).
+            try await reload()
+            guard let current = filterConfig.rules.first(where: { $0.domain == rule.domain }) else {
+                showMessage("\(rule.domain) is no longer blocked", isError: false)
+                isLoading = false
+                return
+            }
             let _ = try await client.putJSON("/api/router/domain-filter", body: [
                 "action": "delete",
-                "id": rule.id
+                "id": current.id
             ])
             showMessage("Removed \(rule.domain)", isError: false)
-            filterConfig.rules.removeAll { $0.id == rule.id }
+            try? await reload()
         } catch {
             showMessage("Failed: \(error.localizedDescription)", isError: true)
         }
@@ -101,12 +115,12 @@ final class TelemetryBlockerViewModel {
                     "enabled": "1"
                 ])
                 added += 1
-                filterConfig.rules.append(DomainFilterRule(id: UUID().uuidString, domain: domain, enabled: true))
             } catch {
                 // Continue with remaining domains
             }
         }
 
+        try? await reload()
         if added > 0 {
             showMessage("Blocked \(added) telemetry domain\(added == 1 ? "" : "s")", isError: false)
         } else {

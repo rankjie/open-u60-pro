@@ -14,6 +14,7 @@ struct SMSForwardConfigView: View {
                     get: { viewModel.config.enabled },
                     set: { val in Task { await viewModel.toggleEnabled(val) } }
                 ))
+                .disabled(!viewModel.isLoaded)
 
                 Toggle("Mark Read After Forward", isOn: $markRead)
 
@@ -32,6 +33,7 @@ struct SMSForwardConfigView: View {
                     Text("Save Settings")
                         .frame(maxWidth: .infinity)
                 }
+                .disabled(!viewModel.isLoaded || viewModel.isLoading)
             }
 
             if viewModel.config.rules.isEmpty && !viewModel.isLoading {

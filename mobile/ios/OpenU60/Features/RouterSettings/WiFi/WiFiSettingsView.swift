@@ -137,7 +137,7 @@ struct WiFiSettingsView: View {
                     Text("Apply")
                         .frame(maxWidth: .infinity)
                 }
-                .disabled(viewModel.isLoading)
+                .disabled(viewModel.isLoading || !viewModel.hasChanges)
             } footer: {
                 Text("Applying changes will briefly disconnect WiFi while settings are restarted")
             }

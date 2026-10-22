@@ -32,6 +32,13 @@ struct SchedulerView: View {
                             }
                             .contentShape(Rectangle())
                             .onTapGesture {
+                                // The form can only express its own templates; a job with any
+                                // other action would be saved as the form's default instead.
+                                guard ActionTemplate.from(method: job.actionMethod, path: job.actionPath) != nil else {
+                                    viewModel.message = "This job's action can't be edited here. Delete and recreate it to change it."
+                                    viewModel.messageIsError = true
+                                    return
+                                }
                                 viewModel.presentedSheet = .edit(job)
                             }
                             Spacer()

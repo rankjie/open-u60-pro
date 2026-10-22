@@ -213,8 +213,8 @@ struct MobileNetworkConfig: Equatable {
     )
 
     /// Body for `PUT /api/modem/data` when the connect mode or roaming changes: only what changed.
-    /// The agent fills the rest of the data-call record from the modem's current state, so this
-    /// copy's data switch, possibly stale, is never sent. While a roaming SIM has roaming off the
+    /// The router keeps every field a request does not name, so this copy's data switch, which
+    /// reads off after every boot even while data is up, is never sent. While a roaming SIM has roaming off the
     /// router refuses to dial and reports data as off, so turning roaming on also turns data on.
     func connectionBody(connectMode: Int, roaming: Bool) -> [String: Any] {
         var body: [String: Any] = ["cid": 1]

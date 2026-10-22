@@ -7,6 +7,10 @@ final class FirewallSettingsViewModel {
     var portForwardRules: [PortForwardRule] = []
     var filterRules: [FilterRule] = []
     var upnpEnabled: Bool = false
+    /// Controls act only on a loaded record: a failed load leaves defaults (DMZ off, UPnP
+    /// interval 60) that must not be written back.
+    private(set) var isLoaded = false
+    private(set) var upnpLoaded = false
     /// The firmware's setter replaces the whole UPnP record; toggles resend these as read.
     private var upnpNotifyInterval = 60
     private var upnpNATPMP = 0
@@ -41,6 +45,7 @@ final class FirewallSettingsViewModel {
             config = FirewallParser.parseConfig(data)
             editDmzEnabled = config.dmzEnabled
             editDmzIP = config.dmzHost
+            isLoaded = true
 
             async let pfResult = fetchPortForwardRules()
             async let filterResult = fetchFilterRules()
@@ -50,8 +55,12 @@ final class FirewallSettingsViewModel {
             portForwardRules = rules ?? []
             portForwardListIsStale = rules == nil
             filterRules = await filterResult
-            upnpEnabled = await upnpResult
+            let upnp = await upnpResult
+            upnpLoaded = upnp != nil
+            upnpEnabled = upnp ?? false
         } catch {
+            isLoaded = false
+            upnpLoaded = false
             if !error.isCancellation {
                 showMessage("Failed to load firewall: \(error.localizedDescription)", isError: true)
             }
@@ -92,7 +101,8 @@ final class FirewallSettingsViewModel {
         }
     }
 
-    private func fetchUPnP() async -> Bool {
+    /// nil when the record could not be read; the switch then stays unavailable.
+    private func fetchUPnP() async -> Bool? {
         do {
             // zwrt_router.api router_get_upnp: string fields from the upnpd UCI section.
             let data = try await client.getJSON("/api/router/firewall/upnp")
@@ -100,7 +110,7 @@ final class FirewallSettingsViewModel {
             if let natpmp = (data["enable_natpmp"] as? String).flatMap(Int.init) { upnpNATPMP = natpmp }
             return data["enable_upnp"] as? String == "1"
         } catch {
-            return false
+            return nil
         }
     }
 
@@ -141,6 +151,7 @@ final class FirewallSettingsViewModel {
     }
 
     func toggleUPnP(enabled: Bool) async {
+        guard upnpLoaded else { return }
         isLoading = true
         do {
             // router_set_upnp_switch takes integers.
@@ -156,6 +167,7 @@ final class FirewallSettingsViewModel {
     }
 
     func applyDMZ() async {
+        guard isLoaded else { return }
         isLoading = true
         do {
             let _ = try await client.putJSON("/api/router/firewall/dmz", body: [
@@ -224,14 +236,18 @@ final class FirewallSettingsViewModel {
     func deletePortForward(_ rule: PortForwardRule) async {
         isLoading = true
 
-        // Sending an id from a list we know is out of sync would delete whichever rule now sits at
-        // that index. Reload first and let the user re-pick from the authoritative list.
-        if portForwardListIsStale {
-            if await reloadPortForwardRules() {
-                showMessage("The rule list was out of date and has been reloaded. Try again.", isError: true)
-            } else {
-                showMessage("The rule list is out of date and could not be reloaded. Pull to refresh.", isError: true)
-            }
+        // Ids may be list positions, so an id from an older read can name a different rule.
+        // Re-read and delete the rule with the same contents as the one the user chose.
+        guard await reloadPortForwardRules() else {
+            showMessage("The rule list could not be reloaded, so nothing was deleted. Pull to refresh.", isError: true)
+            isLoading = false
+            return
+        }
+        guard let current = portForwardRules.first(where: {
+            $0.name == rule.name && $0.protocol_ == rule.protocol_ && $0.wanPort == rule.wanPort
+                && $0.lanIP == rule.lanIP && $0.lanPort == rule.lanPort
+        }) else {
+            showMessage("That rule is no longer on the router.", isError: false)
             isLoading = false
             return
         }
@@ -239,7 +255,7 @@ final class FirewallSettingsViewModel {
         do {
             let _ = try await client.postJSON("/api/router/firewall/port-forward", body: [
                 "action": "delete",
-                "id": rule.id
+                "id": current.id
             ])
             // Deleting shifts the remaining rules up, so ids derived from the array index no longer
             // match. Re-read for the same reason the add path does.
