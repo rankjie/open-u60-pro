@@ -12,6 +12,7 @@ swiftc -module-cache-path "$test_dir/cache" \
     mobile/ios/OpenU60/Core/Networking/AgentError.swift \
     mobile/ios/OpenU60/Core/Concurrency/PollingLoop.swift \
     mobile/ios/OpenU60/Features/RouterSettings/SIM/ESim/RouterESimModels.swift \
+    mobile/ios/OpenU60/Core/Extensions/ColorExtensions.swift \
     mobile/ios/OpenU60/Features/RouterSettings/SIM/ESim/RouterESimViewModel.swift \
     mobile/ios/Tests/RouterESimFlowTests.swift -o "$test_dir/router-esim-flow-tests"
 "$test_dir/router-esim-flow-tests"

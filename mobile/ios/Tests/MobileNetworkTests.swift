@@ -21,14 +21,16 @@ struct MobileNetworkTests {
         precondition(on["roam_enable"] as? Int == 1)
         precondition(on["enable"] as? Int == 1, "turning roaming on also turns mobile data on")
 
-        // Other changes keep the user's mobile data choice.
+        // Other changes never send the data switch: the agent keeps the modem's current value,
+        // so a stale copy here cannot turn data off (roaming off did on 2026-10-22).
         let modeOnly = blocked.connectionBody(connectMode: 0, roaming: false)
-        precondition(modeOnly["enable"] as? Int == 0, "data the user turned off stays off")
+        precondition(modeOnly["enable"] == nil && modeOnly["roam_enable"] == nil && modeOnly["connect_mode"] as? Int == 0)
         var roaming = blocked
         roaming.roamEnable = 1
-        roaming.dataEnabled = 1
-        precondition(roaming.connectionBody(connectMode: 1, roaming: false)["enable"] as? Int == 1)
-        precondition(roaming.connectionBody(connectMode: 1, roaming: false)["roam_enable"] as? Int == 0)
+        roaming.dataEnabled = 0  // stale: the modem's data is on
+        let roamingOff = roaming.connectionBody(connectMode: 1, roaming: false)
+        precondition(roamingOff["enable"] == nil, "turning roaming off must not send the data switch")
+        precondition(roamingOff["roam_enable"] as? Int == 0 && roamingOff["connect_mode"] == nil)
         print("MobileNetworkTests: cellular connection states, roaming and mobile data settings passed")
     }
 }

@@ -212,17 +212,16 @@ struct MobileNetworkConfig: Equatable {
         netSelectMode: "auto_select", operators: [], scanStatus: ""
     )
 
-    /// Body for `PUT /api/modem/data` when the connect mode or roaming changes. While a roaming
-    /// SIM has roaming off, the router refuses to dial and reports mobile data as off, so
-    /// re-sending that value would leave data off after roaming is turned on. Turning roaming on
-    /// therefore also turns mobile data on.
+    /// Body for `PUT /api/modem/data` when the connect mode or roaming changes: only what changed.
+    /// The agent fills the rest of the data-call record from the modem's current state, so this
+    /// copy's data switch, possibly stale, is never sent. While a roaming SIM has roaming off the
+    /// router refuses to dial and reports data as off, so turning roaming on also turns data on.
     func connectionBody(connectMode: Int, roaming: Bool) -> [String: Any] {
-        [
-            "cid": 1,
-            "connect_mode": connectMode,
-            "roam_enable": roaming ? 1 : 0,
-            "enable": roaming && !isRoamingEnabled ? 1 : dataEnabled,
-        ]
+        var body: [String: Any] = ["cid": 1]
+        if connectMode != self.connectMode { body["connect_mode"] = connectMode }
+        if roaming != isRoamingEnabled { body["roam_enable"] = roaming ? 1 : 0 }
+        if roaming && !isRoamingEnabled { body["enable"] = 1 }
+        return body
     }
 }
 

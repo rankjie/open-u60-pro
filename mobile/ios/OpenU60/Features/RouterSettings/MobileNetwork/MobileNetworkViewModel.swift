@@ -78,12 +78,10 @@ final class MobileNetworkViewModel {
     func setMobileData(enabled: Bool) async {
         isLoading = true
         do {
-            var params: [String: Any] = [
-                "cid": 1,
-                "connect_mode": enabled ? 1 : config.connectMode,
-                "roam_enable": config.roamEnable,
-                "enable": enabled ? 1 : 0
-            ]
+            // Only the data switch (and automatic connection when turning on); roaming and the
+            // rest come from the modem's current record on the agent, never from this copy.
+            var params: [String: Any] = ["cid": 1, "enable": enabled ? 1 : 0]
+            if enabled { params["connect_mode"] = 1 }
             if !enabled {
                 params["connect_status"] = "disconnected"
             }
