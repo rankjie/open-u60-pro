@@ -8,15 +8,28 @@ Home places cellular signal and battery in the top-right toolbar, with separate
 background capsules. The percentage sits inside the battery icon; measured
 battery power sits beside it, positive while charging and negative while
 discharging. Missing voltage/current displays an unavailable power value. The
-left status shows Local or Remote for the app-to-router connection and opens a
+left status shows Local, P2P or Relay for the app-to-router connection and opens a
 connection-details sheet with the current route, local address, remote pairing
-and server status, and the router's internet source. The main area contains the
-internet source and cellular traffic cards; hotspot clients and system health
-use shorter rows. Signal bars derive from the sampled RSRP using
-the existing thresholds; battery percentage uses validated device telemetry.
-Unknown values display a dash. Traffic rates expire after five seconds without
-a fresh sample and are explicitly labeled cellular traffic. No generated chart
-or estimated reading is presented as a measured value.
+and server status, and the router's internet source. The main area starts with
+the internet card: source (carrier for SIM Hotspot, upstream network for Wi-Fi
+Repeater), connection state, live cellular download/upload and the last minute
+of measured samples. Signal, Battery, Devices and System tiles follow in a grid
+(two columns on a phone, one row when wide), then the newest unread message
+thread with its verification code. Regular width (the unfolded iPhone Duo, iPad)
+lists connected devices and the three newest threads side by side instead.
+Signal bars derive from the sampled RSRP using the existing thresholds; battery
+percentage uses validated device telemetry. Battery readings older than ten
+seconds are shown dimmed with their age. Unknown values display a dash. Traffic
+rates expire after five seconds without a fresh sample and are explicitly
+labeled cellular traffic; the history chart is cleared whenever the sample chain
+breaks rather than bridging the gap. No generated chart or estimated reading is
+presented as a measured value.
+
+A paired router's last confirmed Home readings (not traffic) are stored per
+router UUID and shown at launch with their age until the first refresh. With a
+saved password the app opens straight to the tabs and signs in behind them; an
+unreachable router leaves it marked offline on cached state, and only a refused
+password returns to the login screen.
 
 The USB phone-charging switch stays in a small strip above the cards, only when
 USB is connected. Signal Live Activity controls live inside signal details. Wi-Fi
@@ -40,6 +53,11 @@ mode starts with the upstream → U60 → hotspot diagram, then the selected ban
 and network list. Accessibility text sizes use a vertical path.
 
 Settings groups device networking, cellular/SIM, security, and system controls.
+Hub rows show the last known state (connected devices, network type, battery,
+unread messages, connection route) without issuing requests of their own; opening
+Settings before Home has polled triggers one batched refresh. Settings screens
+report progress in the navigation bar and results in a bottom banner: errors stay
+until dismissed or replaced, confirmations fade after four seconds.
 Service settings contain message notifications/forwarding, schedules, diagnostics,
 and advanced tools. App connection, appearance/refresh, and About have their own
 pages. Common actions precede radio locks and other advanced settings. Tools that
@@ -70,7 +88,14 @@ the current call controls directly. The isolated lifecycle checks cover the
 answer request before asynchronous work, repeated ringing snapshots, foreground
 reopening, restoration of ongoing calls and stale actions after call end.
 
-Message
+Messages shows an unread badge on its tab, updated by push delivery as well as
+list reads. Threads from service senders are named by their signature (for
+example 【京东】), which is removed from the preview. A 4–8 digit code within 40
+characters of a code keyword is offered as a one-tap copy chip on the thread row,
+in the conversation and on Home, for incoming messages from the last day. The
+SIM line is shown on rows only when the inbox spans more than one line, and in a
+conversation only where it starts or changes. At regular width Messages is a
+split view of threads and the open conversation. Message
 settings have one shared destination from Settings and the contextual Messages
 menu. Messages always shows all storage locations together. Compose and message
 screens keep explicit keyboard dismissal and normal back/cancel navigation.

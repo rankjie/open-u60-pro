@@ -83,7 +83,7 @@ private struct HeroTraffic: View {
                     direction("arrow.down", .blue, fresh ? viewModel.speed.downloadBytesPerSec : nil)
                     direction("arrow.up", .teal, fresh ? viewModel.speed.uploadBytesPerSec : nil)
                 }
-                chart(fresh: fresh)
+                TrafficHistoryChart(viewModel: viewModel, fresh: fresh)
                 Text(CellularCardView.caption(updatedAt: viewModel.trafficUpdatedAt, available: viewModel.isTrafficAvailable,
                                               source: viewModel.trafficStats.source, now: context.date))
                     .font(.caption2).foregroundStyle(.secondary)
@@ -100,20 +100,34 @@ private struct HeroTraffic: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder private func chart(fresh: Bool) -> some View {
+}
+
+/// The last minute of measured throughput; shows nothing while samples are stale.
+struct TrafficHistoryChart: View {
+    let viewModel: DashboardViewModel
+    let fresh: Bool
+    var height: CGFloat = 44
+    var showsPeak = false
+
+    var body: some View {
         let history = fresh ? viewModel.speedHistory : []
         let down = history.map(\.downloadBytesPerSec), up = history.map(\.uploadBytesPerSec)
         let ceiling = max(down.max() ?? 0, up.max() ?? 0)
         let slots = DashboardViewModel.speedHistoryLimit
-        ZStack {
+        ZStack(alignment: .topLeading) {
             Sparkline(values: down, ceiling: ceiling, area: true, capacity: slots)
                 .fill(LinearGradient(colors: [.blue.opacity(0.22), .blue.opacity(0.02)], startPoint: .top, endPoint: .bottom))
             Sparkline(values: down, ceiling: ceiling, capacity: slots)
                 .stroke(.blue, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
             Sparkline(values: up, ceiling: ceiling, capacity: slots)
                 .stroke(.teal.opacity(0.8), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            if showsPeak, ceiling > 0 {
+                let peak = DeviceParser.speedComponents(ceiling)
+                Text("Peak \(peak.number, specifier: "%.\(peak.decimalPlaces)f") \(peak.unit.trimmingCharacters(in: .whitespaces)) · last \(history.count)s")
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            }
         }
-        .frame(height: 44)
+        .frame(height: height)
         .background(alignment: .bottom) { Rectangle().fill(Color(uiColor: .separator)).frame(height: 0.5) }
         .accessibilityHidden(true)
     }

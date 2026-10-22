@@ -124,6 +124,14 @@ domain with the original remaining deadline; only method/path/body define the
 device effect fingerprint. The last 1,024 outcomes are retained by admission
 order; unfinished effects are never evicted to make them executable again.
 
+Reads that start together share one `POST /api/batch` (at most 16 GET paths; the
+agent runs up to six at a time). Sub-paths follow the management path rules and
+batches do not nest, so batching never reaches a route the relay forbids. The
+journal and relay classify the batch as a read. Each sub-response keeps its own
+status. An agent without the route answers 404 once; that router and route then
+read individually. All local, management and relay requests share one
+four-connection keep-alive pool, matching the agent's HTTP worker count.
+
 Call control retains server admission and the existing single call journal:
 admit a stable call-operation UUID centrally, deliver its canonical command over
 the verified local path first, then relay the same command/expiry if needed.

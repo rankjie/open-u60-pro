@@ -11,7 +11,7 @@ struct DashboardView: View {
 
     @State private var signalMonitorVM: SignalMonitorViewModel?
     @State private var networkModeVM: NetworkModeViewModel?
-    @State private var detail: DashboardDetail?
+    @State private var detail: DashboardDetail? = DashboardDetail.debugInitial
     @State private var showCPUDetails = false
     @State private var showAllDevices = true
     @State private var showWiFiShare = false
@@ -162,6 +162,13 @@ struct DashboardView: View {
                     VStack(spacing: 12) {
                         if selected == .traffic {
                             CellularCardScope(viewModel: viewModel)
+                            TimelineView(.periodic(from: .now, by: 1)) { context in
+                                TrafficHistoryChart(viewModel: viewModel, fresh: viewModel.isTrafficAvailable
+                                    && viewModel.trafficUpdatedAt.map { context.date.timeIntervalSince($0) < 5 } == true,
+                                    height: 140, showsPeak: true)
+                                    .padding(16)
+                                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: .rect(cornerRadius: Design.corner))
+                            }
                             Text("These speeds show current cellular traffic across all connected devices. A speed test reports throughput over its test period; the live numbers change throughout that period.")
                                 .font(.subheadline).foregroundStyle(.secondary)
                         } else {
@@ -478,7 +485,7 @@ private struct TemperatureCardScope: View {
     }
 }
 
-private enum DashboardDetail: String, Identifiable {
+private enum DashboardDetail: String, Identifiable, CaseIterable {
     case routerConnection = "Connection details"
     case internet = "Internet"
     case connection = "Connection & signal"
@@ -487,6 +494,16 @@ private enum DashboardDetail: String, Identifiable {
     case health = "CPU & temperatures"
     case wifi = "Wi-Fi & devices"
     var id: String { rawValue }
+
+    static var debugInitial: DashboardDetail? {
+#if DEBUG
+        // Simulator screenshots: `-debug_detail connection`.
+        if let name = UserDefaults.standard.string(forKey: "debug_detail") {
+            return allCases.first { "\($0)" == name }
+        }
+#endif
+        return nil
+    }
 }
 
 private struct OverviewHeading: View {
