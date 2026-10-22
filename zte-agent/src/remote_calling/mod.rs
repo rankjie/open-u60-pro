@@ -1,7 +1,11 @@
 mod audio;
+mod admission;
 mod codec;
+mod connect;
 mod journal;
 mod media;
+mod peer;
+pub(crate) mod recordings;
 pub(crate) mod storage;
 mod worker;
 
@@ -53,7 +57,8 @@ struct Status {
     call_state: Option<String>,
 }
 pub struct RemoteCalling {
-    clock: Mutex<Option<(u64, std::time::Instant)>>,
+    pub recordings: Arc<recordings::Recordings>,
+    clock: Mutex<Option<(u64, Duration)>>,
     local_commands: Mutex<Option<tokio::sync::mpsc::Sender<LocalCommand>>>,
     configure_lock: Mutex<()>,
     config: Mutex<Option<Config>>,
@@ -61,6 +66,13 @@ pub struct RemoteCalling {
     changed: Notify,
 }
 impl RemoteCalling {
+    pub fn connection_info(&self) -> Value {
+        let config = self.config.lock().unwrap();
+        match config.as_ref().filter(|c|c.enabled).and_then(|c|c.endpoint_id.map(|id|(c,id))) {
+            Some((config, id)) => json!({"ok":true,"data":{"connectionString":format!("U60-{id}"),"serverURL":config.server_url}}),
+            None => json!({"ok":false,"error":"remote_access_not_configured"}),
+        }
+    }
     pub fn new() -> Self {
         let mut status = Status::default();
         let config = if Path::new(CONFIG).exists() {
@@ -83,6 +95,7 @@ impl RemoteCalling {
             None
         };
         Self {
+            recordings: recordings::Recordings::new(),
             clock: Mutex::new(None),
             local_commands: Mutex::new(None),
             configure_lock: Mutex::new(()),
@@ -102,18 +115,21 @@ impl RemoteCalling {
     }
     fn set_status(&self, connected: bool, error: Option<&str>, call: Option<&str>) {
         let mut status = self.status.lock().unwrap();
+        if status.connected != connected || status.last_error.as_deref() != error {
+            eprintln!("[remote-calling] connected={connected} error={}", error.unwrap_or("none"));
+        }
         status.connected = connected;
         status.last_error = error.map(String::from);
         status.call_state = call.map(String::from);
     }
     pub(crate) fn observe_time(&self, unix: u64) -> Result<(), &'static str> {
         if !(946684800..4102444800).contains(&unix) { return Err("invalid_server_clock"); }
-        *self.clock.lock().unwrap() = Some((unix, std::time::Instant::now()));
+        *self.clock.lock().unwrap() = Some((unix, crate::power::boot_time()?));
         Ok(())
     }
     pub(crate) fn unix_time(&self) -> Result<u64, &'static str> {
         if let Some((unix, anchor)) = *self.clock.lock().unwrap() {
-            return unix.checked_add(anchor.elapsed().as_secs()).ok_or("invalid_server_clock");
+            return trusted_time(unix, anchor, crate::power::boot_time()?);
         }
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
             .map(|time|time.as_secs()).map_err(|_|"invalid_device_clock")
@@ -140,6 +156,18 @@ impl RemoteCalling {
             Err(_) => (504, json!({"ok":false,"error":"calling_admission_unknown"})),
         }
     }
+    pub fn peer_command(&self, phone: Uuid, id: Uuid, value: Value, proof: Value) -> (u16, Value) {
+        let command: journal::Command = match serde_json::from_value(value.clone()) {
+            Ok(command) => command,
+            Err(_) => return (400, json!({"ok":false,"error":"invalid_peer_call"})),
+        };
+        let config = self.config.lock().unwrap();
+        let verified = config.as_ref().filter(|c|c.enabled).ok_or("calling_disabled")
+            .and_then(|config|admission::verify(&config.device_token, phone, &command, &proof));
+        drop(config);
+        if id != command.request_id || verified.is_err() { return (403, json!({"ok":false,"error":"invalid_call_admission"})); }
+        self.local_command(&serde_json::to_vec(&value).expect("JSON Value serialization"))
+    }
     fn persist(&self, config: Config) -> Result<(), String> {
         let mut current = self.config.lock().unwrap();
         storage::private_write(
@@ -164,7 +192,7 @@ impl RemoteCalling {
         *current = Some(config);
         Ok(())
     }
-    pub fn start(self: &Arc<Self>, state: Arc<AppState>) {
+    pub fn start(self: &Arc<Self>, state: Arc<AppState>, recovery: Arc<crate::power::Recovery>) {
         let manager = self.clone();
         crate::system::spawn_named("remote-calling", move || {
             let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -196,7 +224,7 @@ impl RemoteCalling {
                             _=>{manager.set_status(false,Some("enrollment_failed"),None);tokio::select!{_=tokio::time::sleep(Duration::from_secs(10))=>{},_=manager.changed.notified()=>{}};continue;}
                         }
                     }
-                    let mut worker=match worker::Worker::new(state.clone(),manager.clone(),config) {Ok(worker)=>worker,Err(error)=>{manager.set_status(false,Some(&error),None);manager.changed.notified().await;continue;}};
+                    let mut worker=match worker::Worker::new(state.clone(),manager.clone(),config,recovery.clone()) {Ok(worker)=>worker,Err(error)=>{manager.set_status(false,Some(&error),None);manager.changed.notified().await;continue;}};
                     let outcome=worker.run().await;
                     let cleanup=worker.shutdown().await;
                     if let Err(error)=cleanup.and(outcome) {manager.set_status(false,Some(&error),None);manager.changed.notified().await;}
@@ -207,6 +235,11 @@ impl RemoteCalling {
 }
 
 type LocalCommand = (journal::Command, std::sync::mpsc::SyncSender<Result<(), String>>);
+
+fn trusted_time(unix: u64, anchor: Duration, now: Duration) -> Result<u64, &'static str> {
+    let elapsed = now.checked_sub(anchor).ok_or("power_clock_regressed")?;
+    unix.checked_add(elapsed.as_secs()).ok_or("invalid_server_clock")
+}
 
 fn server_url(value: &str) -> Result<reqwest::Url, String> {
     let url = reqwest::Url::parse(value).map_err(|_| "invalid_server_url")?;
@@ -408,14 +441,14 @@ mod clock_tests {
     use super::*;
     fn manager() -> RemoteCalling {
         // An isolated manager avoids opening the router's normal configuration.
-        RemoteCalling { clock: Mutex::new(None), local_commands: Mutex::new(None), configure_lock: Mutex::new(()),
+        RemoteCalling { recordings: recordings::Recordings::new(), clock: Mutex::new(None), local_commands: Mutex::new(None), configure_lock: Mutex::new(()),
             config: Mutex::new(None), status: Mutex::new(Status::default()), changed: Notify::new() }
     }
     #[test]
     fn authenticated_server_time_advances_without_the_device_wall_clock() {
         let manager = manager();
         manager.observe_time(1800000000).unwrap();
-        *manager.clock.lock().unwrap() = Some((1800000000, std::time::Instant::now() - Duration::from_secs(5)));
+        *manager.clock.lock().unwrap() = Some((1800000000, crate::power::boot_time().unwrap() - Duration::from_secs(5)));
         assert!(manager.unix_time().unwrap() >= 1800000005);
     }
     #[test]
@@ -424,6 +457,19 @@ mod clock_tests {
         for invalid in [0, 1234, u64::MAX] { assert_eq!(manager.observe_time(invalid), Err("invalid_server_clock")); }
         assert!(manager.unix_time().unwrap() >= 1800000000);
         assert!(manager.unix_time().unwrap() < 1800000100);
+    }
+    #[test]
+    fn time_spent_suspended_expires_a_command_even_with_an_unchanged_wall_clock() {
+        let command: journal::Command = serde_json::from_value(json!({
+            "type":"command","requestId":Uuid::new_v4(),"callId":Uuid::new_v4(),
+            "action":"dial","number":"12345","expiresAt":1800000020
+        })).unwrap();
+        let anchor = Duration::from_secs(100);
+        let before = trusted_time(1800000000, anchor, anchor + Duration::from_secs(5)).unwrap();
+        assert_eq!(command.remaining(before).unwrap(), Duration::from_secs(15));
+        let resumed = trusted_time(1800000000, anchor, anchor + Duration::from_secs(65)).unwrap();
+        assert_eq!(command.remaining(resumed), Err("operation_expired"));
+        assert_eq!(trusted_time(1800000000, anchor, Duration::from_secs(90)), Err("power_clock_regressed"));
     }
     #[test]
     fn configuration_accepts_the_ios_server_url_field() {

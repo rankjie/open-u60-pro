@@ -11,6 +11,7 @@ import UIKit
 
 @MainActor
 protocol CallingSocket: AnyObject {
+    var response: URLResponse? { get }
     func resume()
     func receive() async throws -> URLSessionWebSocketTask.Message
     func send(_ message: URLSessionWebSocketTask.Message) async throws
@@ -33,21 +34,41 @@ struct RemoteCall: Decodable, Identifiable {
     let mediaReady: Bool
     let updatedAt: Int
     let sequence: Int
+    var answeredAt: Int? = nil
+    var phone: CallPhone? = nil
     var id: UUID { callId }
+    var connectedDate: Date? {
+        guard state == .active, let answeredAt, answeredAt > 0 else { return nil }
+        return Date(timeIntervalSince1970: Double(answeredAt))
+    }
+}
+
+struct CallPresentationRequest: Equatable {
+    let callID: UUID
+    let revision = UUID()
 }
 
 @Observable @MainActor
 final class RemoteCallingManager: NSObject {
     private(set) var isPaired = false
+    private(set) var pairingRejected = false
     private(set) var isConnected = false
     private(set) var routerOnline = false
-    private(set) var call: RemoteCall?
+    private(set) var call: RemoteCall? { didSet { onCallChanged?(call) } }
+    private(set) var callPresentationRequest: CallPresentationRequest?
     private(set) var muted = false
     private(set) var speaker = false
+    @ObservationIgnored private var audioSessionActive = false
     private(set) var errorMessage: String?
     private(set) var pushConfigured = false
     private(set) var audioConnected = false
-    var serverAddress = "https://nl1.gmdns.net/openu60"
+    private(set) var serverAddress = SavedCallingCredentials.defaultServer.absoluteString
+    private(set) var servers: [CallingServerChoice] = []
+    private(set) var pairingRevision = UUID()
+    private(set) var serverOperationInProgress = false
+    private(set) var managementPeerStatus = "Not connected"
+    var hasSavedPairing: Bool { isPaired || servers.contains(where: \.isPaired) }
+    var hasPendingPairing: Bool { servers.first(where: { $0.id == serverAddress })?.hasPendingPairing == true }
 
     @ObservationIgnored private let provider: CXProvider
     @ObservationIgnored private let controller = CXCallController()
@@ -56,7 +77,9 @@ final class RemoteCallingManager: NSObject {
     @ObservationIgnored private var credentials: CallingCredentials?
     @ObservationIgnored var localCommandDelivery: (@MainActor ([String:Any], UUID) async throws -> Bool)?
     @ObservationIgnored var commandAdmission: (@MainActor ([String:Any], String) async throws -> [String:Any])?
-    @ObservationIgnored var onSMSReceived: (@MainActor (UUID, UUID, String?) -> Void)?
+    @ObservationIgnored var deviceConnectionRequest: (@MainActor (String, URL, String, [String:Any]?) async throws -> [String:Any])?
+    @ObservationIgnored var onSMSReceived: (@MainActor (UUID, UUID, String?, [String: Any]) -> Void)?
+    @ObservationIgnored var onCallChanged: (@MainActor (RemoteCall?) -> Void)?
     @ObservationIgnored private var serverClock: (TimeInterval, ContinuousClock.Instant)?
     var managementAccess: AgentRelayAccess? {
         guard isPaired, let credentials, let routerID = credentials.routerId else { return nil }
@@ -85,15 +108,28 @@ final class RemoteCallingManager: NSObject {
     @ObservationIgnored private var requestedMedia: UUID?
     @ObservationIgnored private var relayFallbackCall: UUID?
     @ObservationIgnored private var mediaRecovery: Task<Void, Never>?
+    @ObservationIgnored private var managementPeer: (any ManagementPeerConnection)?
+    @ObservationIgnored private var peerSessionID: UUID?
+    @ObservationIgnored private var peerLease: Task<Void, Never>?
+    @ObservationIgnored private var peerRetryAfter: ContinuousClock.Instant = .now
+    @ObservationIgnored private var peerSupported = false
     @ObservationIgnored private let logger = Logger(subsystem: "com.beexio.openu60", category: "RemoteCalling")
 
     @ObservationIgnored private let socketFactory: @MainActor (URLRequest) -> any CallingSocket
     @ObservationIgnored private let mediaFactory: CallingMediaFactory
+    @ObservationIgnored private let peerFactory: ManagementPeerFactory
     @ObservationIgnored private let requestMicrophone: @MainActor () async -> Bool
+    @ObservationIgnored private let deviceInfo: @MainActor () throws -> CallingDeviceInfo
+    @ObservationIgnored private let loadSavedCredentials: @MainActor () throws -> SavedCallingCredentials
+    @ObservationIgnored private let saveCredentials: @MainActor (SavedCallingCredentials) throws -> Void
 
     init(provider injectedProvider: CXProvider? = nil, credentials injectedCredentials: CallingCredentials? = nil,
          bootstrap: Bool = true, socketFactory: (@MainActor (URLRequest) -> any CallingSocket)? = nil,
+         loadCredentials: @escaping @MainActor () throws -> SavedCallingCredentials = { try CallingCredentialStore.load() },
+         saveCredentials: @escaping @MainActor (SavedCallingCredentials) throws -> Void = { try CallingCredentialStore.save($0) },
          requestMicrophone: @escaping @MainActor () async -> Bool = { await AVAudioApplication.requestRecordPermission() },
+         deviceInfo: @escaping @MainActor () throws -> CallingDeviceInfo = { try CallingDeviceInfo.current() },
+         peerFactory: @escaping ManagementPeerFactory = { try ManagementPeer(id: $0, router: $1, servers: $2, send: $3, failed: $4) },
          mediaFactory: @escaping CallingMediaFactory = { try CallingMedia(callId: $0, servers: $1, muted: $2, relayOnly: $3, send: $4, stateChanged: $5) }) {
         let configuration = CXProviderConfiguration()
         configuration.supportsVideo = false
@@ -108,7 +144,11 @@ final class RemoteCallingManager: NSObject {
         session = nativeSession
         self.socketFactory = socketFactory ?? { nativeSession.webSocketTask(with: $0) }
         self.mediaFactory = mediaFactory
+        self.peerFactory = peerFactory
         self.requestMicrophone = requestMicrophone
+        self.deviceInfo = deviceInfo
+        self.loadSavedCredentials = loadCredentials
+        self.saveCredentials = saveCredentials
         super.init()
         provider.setDelegate(self, queue: .main)
         RTCAudioSession.sharedInstance().useManualAudio = true
@@ -116,6 +156,7 @@ final class RemoteCallingManager: NSObject {
         if !bootstrap {
             credentials = injectedCredentials
             isPaired = injectedCredentials?.endpointId != nil
+            if let injectedCredentials { serverAddress = injectedCredentials.serverURL.absoluteString }
             return
         }
         let registry = PKPushRegistry(queue: .main)
@@ -123,6 +164,11 @@ final class RemoteCallingManager: NSObject {
         registry.desiredPushTypes = [.voIP]
         self.registry = registry
         do { try reloadCredentials() } catch { present(error) }
+    }
+
+    func requestCallPresentation() {
+        guard let call, call.state != .ended else { return }
+        callPresentationRequest = CallPresentationRequest(callID: call.callId)
     }
 
     func foreground() {
@@ -134,21 +180,82 @@ final class RemoteCallingManager: NSObject {
         if let call, call.state == .ended { finish(call.callId, reason: .remoteEnded) }
     }
     private func reloadCredentials() throws {
-        let saved = try CallingCredentialStore.load()
-        credentials = saved.active
-        isPaired = saved.active?.endpointId != nil
-        if let active = saved.active { serverAddress = active.serverURL.absoluteString }
+        try applySavedCredentials(loadSavedCredentials())
+    }
+    private func applySavedCredentials(_ saved: SavedCallingCredentials) throws {
+        let changed = serverAddress != saved.selectedServer.absoluteString ||
+            credentials?.endpointId != saved.active?.endpointId || credentials?.phoneToken != saved.active?.phoneToken
+        if changed {
+            guard call == nil || call?.state == .ended else { throw CallingError.server("call_in_progress") }
+            disconnect()
+            credentials = saved.active
+            serverAddress = saved.selectedServer.absoluteString
+            isPaired = saved.active?.endpointId != nil
+            pairingRejected = false
+            pushConfigured = false
+            serverClock = nil
+            lastSignalingReceipt = nil
+            iceServers = []
+            errorMessage = nil
+            pairingRevision = UUID()
+        }
+        servers = saved.choices
         if isPaired { connect() }
     }
+    private func requireServerChangeAllowed() throws {
+        guard call == nil || call?.state == .ended, pending.isEmpty else { throw CallingError.server("call_in_progress") }
+        guard !serverOperationInProgress else { throw CallingError.server("server_operation_in_progress") }
+    }
+    func addServer(_ address: String) throws {
+        guard !serverOperationInProgress else { throw CallingError.server("server_operation_in_progress") }
+        var saved = try loadSavedCredentials()
+        try saved.addServer(CallingCredentialStore.serverURL(address))
+        try saveCredentials(saved)
+        servers = saved.choices
+    }
+    func selectServer(_ address: URL) throws {
+        try requireServerChangeAllowed()
+        var saved = try loadSavedCredentials()
+        try saved.selectServer(address)
+        try saveCredentials(saved)
+        try applySavedCredentials(saved)
+        Task { do { try await registerPushToken() } catch { present(error) } }
+    }
+    func selectScannedDevice(_ connection: DeviceConnectionQRCode) throws {
+        try requireServerChangeAllowed()
+        let device = try DeviceConnectionCode(connection.code)
+        var saved = try loadSavedCredentials()
+        if !saved.choices.contains(where: { $0.address == connection.server }) { try saved.addServer(connection.server) }
+        try saved.selectServer(connection.server)
+        if let active = saved.active, active.routerId != device.routerID {
+            throw CallingError.server("already_connected_to_another_router")
+        }
+        if let pending = saved.pending, let router = pending.routerId, router != device.routerID {
+            throw CallingError.server("pending_connection_other_router")
+        }
+        try saveCredentials(saved)
+        try applySavedCredentials(saved)
+        Task { do { try await registerPushToken() } catch { present(error) } }
+    }
+    func removeServer(_ address: URL) throws {
+        guard !serverOperationInProgress else { throw CallingError.server("server_operation_in_progress") }
+        var saved = try loadSavedCredentials()
+        try saved.removeServer(address)
+        try saveCredentials(saved)
+        servers = saved.choices
+    }
     func pair(server: String, code: String) async throws {
-        guard call == nil || call?.state == .ended else { throw CallingError.server("call_in_progress") }
+        try requireServerChangeAllowed()
+        serverOperationInProgress = true
+        defer { serverOperationInProgress = false }
         let url = try CallingCredentialStore.serverURL(server)
-        var saved = try CallingCredentialStore.load()
+        var saved = try loadSavedCredentials()
+        guard saved.selectedServer == url else { throw CallingError.server("select_server_first") }
         let next: CallingCredentials
         if let pending = saved.pending, pending.serverURL == url { next = pending }
         else { next = CallingCredentials(serverURL: url, phoneToken: try CallingCredentialStore.token(), requestId: UUID()) }
         saved.pending = next
-        try CallingCredentialStore.save(saved)
+        try saveCredentials(saved)
         let response = try await http.request("v1/pair", server: url, method: "POST",
             body: ["code": code, "phoneToken": next.phoneToken, "requestId": next.requestId.uuidString.lowercased()])
         guard let endpoint = response["endpointId"] as? String, let endpointId = UUID(uuidString: endpoint),
@@ -156,29 +263,80 @@ final class RemoteCallingManager: NSObject {
         var active = next
         active.endpointId = endpointId
         active.routerId = routerId
+        guard call == nil || call?.state == .ended else { throw CallingError.server("call_in_progress") }
         saved.active = active
         saved.pending = nil
-        try CallingCredentialStore.save(saved)
-        disconnect()
-        credentials = active
-        isPaired = true
-        serverAddress = url.absoluteString
-        errorMessage = nil
-        connect()
+        try saveCredentials(saved)
+        try applySavedCredentials(saved)
         try await registerPushToken()
     }
+    func connectDevice(code: String, password: String) async throws {
+        try requireServerChangeAllowed()
+        let device = try DeviceConnectionCode(code)
+        if isPaired, !pairingRejected, credentials?.routerId == device.routerID { resumeSignaling(); return }
+        serverOperationInProgress = true
+        defer { serverOperationInProgress = false }
+        var saved = try loadSavedCredentials()
+        let server = saved.selectedServer
+        guard saved.active == nil || (pairingRejected && saved.active?.routerId == device.routerID) else { throw CallingError.server("already_connected_to_another_router") }
+        var next: CallingCredentials
+        if let pending = saved.pending {
+            guard pending.routerId == nil || pending.routerId == device.routerID else { throw CallingError.server("pending_connection_other_router") }
+            next = pending
+        }
+        else { next = CallingCredentials(serverURL:server, phoneToken:try CallingCredentialStore.token(), requestId:UUID()) }
+        next.routerId = device.routerID
+        saved.pending = next
+        try saveCredentials(saved)
+        servers = saved.choices
+        do {
+            let key = try await connectionHTTP("v1/connect/\(device.routerID.uuidString.lowercased())", server:server, method:"GET")
+            guard let raw = key["publicKey"] as? String, let publicKey = Data(base64Encoded:raw), publicKey.count == 65,
+                  let time = key["serverTime"] as? Double, (946684800..<4102444800).contains(time),
+                  (key["routerId"] as? String).flatMap(UUID.init(uuidString:)) == device.routerID else { throw CallingError.invalidResponse }
+            let envelope = try DeviceConnectionCode.seal(password:password, publicKey:publicKey, routerID:device.routerID,
+                requestID:next.requestId, phoneToken:next.phoneToken, serverTime:time)
+            let result = try await connectionHTTP("v1/connect", server:server, method:"POST", body:envelope)
+            guard result["role"] as? String == "phone", let raw = result["endpointId"] as? String, let endpoint = UUID(uuidString:raw),
+                  (result["routerId"] as? String).flatMap(UUID.init(uuidString:)) == device.routerID else { throw CallingError.invalidResponse }
+            var active = next; active.endpointId = endpoint; active.routerId = device.routerID
+            saved.active = active; saved.pending = nil
+            try saveCredentials(saved)
+            try applySavedCredentials(saved)
+            try await registerPushToken()
+        } catch {
+            if case CallingError.server(let code) = error,
+               ["incorrect_router_password", "connection_login_expired", "invalid_connection_envelope", "connection_rate_limited", "connection_verification_failed"].contains(code) {
+                saved.pending = nil; try saveCredentials(saved)
+                servers = saved.choices
+            }
+            throw error
+        }
+    }
+    private func connectionHTTP(_ path: String, server: URL, method: String, body: [String:Any]? = nil) async throws -> [String:Any] {
+        if let deviceConnectionRequest { return try await deviceConnectionRequest(path, server, method, body) }
+        return try await http.request(path, server:server, method:method, body:body)
+    }
     func forgetPairing() async throws {
+        try requireServerChangeAllowed()
+        serverOperationInProgress = true
+        defer { serverOperationInProgress = false }
+        var saved = try loadSavedCredentials()
+        if let credentials = saved.active ?? saved.pending {
+            do { _ = try await http.request("v1/phone", server: credentials.serverURL, token: credentials.phoneToken, method: "DELETE") }
+            catch CallingError.server(let code) where code == "unauthorized" { /* This pairing has already been revoked or was never admitted. */ }
+        }
         guard call == nil || call?.state == .ended else { throw CallingError.server("call_in_progress") }
-        guard let credentials else { throw CallingError.disconnected }
-        do { _ = try await http.request("v1/phone", server: credentials.serverURL, token: credentials.phoneToken, method: "DELETE") }
-        catch CallingError.server(let code) where code == "unauthorized" { /* The server has already revoked this pairing. */ }
-        try CallingCredentialStore.save(SavedCallingCredentials())
-        disconnect()
-        self.credentials = nil
-        isPaired = false
+        saved.active = nil
+        saved.pending = nil
+        try saveCredentials(saved)
+        try applySavedCredentials(saved)
     }
     func enableRouter(client: AgentClient, invitation: String, server: String) async throws {
-        _ = try CallingCredentialStore.serverURL(server)
+        try requireServerChangeAllowed()
+        guard try CallingCredentialStore.serverURL(server) == CallingCredentialStore.serverURL(serverAddress) else {
+            throw CallingError.server("select_server_first")
+        }
         _ = try await client.postJSON("/api/remote-calling/configure", body: ["serverURL": server, "invitation": invitation])
         let pairing = try await client.postJSON("/api/remote-calling/pairing")
         guard let code = pairing["code"] as? String else { throw CallingError.invalidResponse }
@@ -189,6 +347,9 @@ final class RemoteCallingManager: NSObject {
         guard status["enabled"] as? Bool == true, status["configured"] as? Bool == true,
               let server = status["serverURL"] as? String, let router = status["routerId"] as? String,
               UUID(uuidString:router) != nil else { throw CallingError.server("router_setup_required") }
+        guard try CallingCredentialStore.serverURL(server) == CallingCredentialStore.serverURL(serverAddress) else {
+            throw CallingError.server("router_uses_different_server")
+        }
         let pairing = try await client.postJSON("/api/remote-calling/pairing")
         guard pairing["routerId"] as? String == router, let code = pairing["code"] as? String else { throw CallingError.invalidResponse }
         try await pair(server:server,code:code)
@@ -225,10 +386,11 @@ final class RemoteCallingManager: NSObject {
         try await controller.request(CXTransaction(action: CXPlayDTMFCallAction(call: call.callId, digits: digits, type: .singleTone)))
     }
     func toggleSpeaker() throws {
+        guard call != nil else { throw CallingError.server("no_active_call") }
         let audio = RTCAudioSession.sharedInstance()
         audio.lockForConfiguration()
         defer { audio.unlockForConfiguration() }
-        try audio.overrideOutputAudioPort(speaker ? .none : .speaker)
+        if audioSessionActive { try audio.overrideOutputAudioPort(speaker ? .none : .speaker) }
         speaker.toggle()
     }
     func present(_ error: Error) {
@@ -243,7 +405,7 @@ final class RemoteCallingManager: NSObject {
         connect()
     }
     func connect() {
-        guard connectionTask == nil, credentials != nil else { return }
+        guard connectionTask == nil, credentials != nil, !pairingRejected else { return }
         let generation = UUID()
         connectionGeneration = generation
         connectionTask = Task { [weak self] in
@@ -277,22 +439,30 @@ final class RemoteCallingManager: NSObject {
                         delay = 1
                     }
                 } catch {
-                    if !Task.isCancelled { self.present(error) }
+                    if self.connectionGeneration == generation, !Task.isCancelled {
+                        if (self.socket?.response as? HTTPURLResponse)?.statusCode == 401 {
+                            self.pairingRejected = true
+                            self.present(CallingError.server("pairing_revoked"))
+                        } else { self.present(error) }
+                    }
                 }
                 guard self.connectionGeneration == generation else { return }
                 self.isConnected = false
+                self.closeManagementPeer(retry: false)
                 self.routerOnline = false
                 self.heartbeat?.cancel()
                 self.socket?.cancel(with: .goingAway, reason: nil)
                 self.socket = nil
                 for id in Array(self.pending.keys) { self.complete(id, outcome: .failure(CallingError.disconnected)) }
-                if Task.isCancelled { break }
+                if Task.isCancelled || self.pairingRejected { break }
                 do { try await Task.sleep(for: .seconds(delay)) } catch { break }
                 delay = min(delay * 2, 30)
             }
         }
     }
     func disconnect() {
+        closeManagementPeer(retry: false)
+        peerSupported = false
         connectionGeneration = UUID()
         connectionTask?.cancel(); connectionTask = nil
         heartbeat?.cancel(); heartbeat = nil
@@ -320,6 +490,93 @@ final class RemoteCallingManager: NSObject {
         defer { watchdog.cancel() }
         try await socket.send(.string(string))
     }
+    func peerManagementRequest(_ data: Data, id: UUID, timeout: TimeInterval) async throws -> AgentHTTPResponse? {
+        guard isConnected, routerOnline, peerSupported, timeout > 1 else { return nil }
+        let generation = connectionGeneration
+        if peerSessionID == nil {
+            guard .now >= peerRetryAfter else { return nil }
+            let sessionID = UUID()
+            peerSessionID = sessionID
+            managementPeerStatus = "Connecting"
+            do { try await send(["type": "peer_open", "sessionId": sessionID.uuidString.lowercased()]) }
+            catch {
+                if peerSessionID == sessionID { closeManagementPeer(retry: true) }
+                if error.isCancellation { throw error }
+                if error is URLError { return nil }
+                if let calling = error as? CallingError, case .disconnected = calling { return nil }
+                throw error
+            }
+        }
+        guard connectionGeneration == generation else { throw CancellationError() }
+        guard let sessionID = peerSessionID else { return nil }
+        let until = ContinuousClock.now.advanced(by: .seconds(min(4, timeout / 2)))
+        while peerSessionID == sessionID, managementPeer?.isReady != true, .now < until {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard connectionGeneration == generation else { throw CancellationError() }
+        guard peerSessionID == sessionID, let peer = managementPeer, peer.isReady else {
+            if peerSessionID == sessionID { closeManagementPeer(retry: true, notify: true) }
+            return nil
+        }
+        managementPeerStatus = "Connected"
+        do { return try await peer.request(data, id: id, timeout: min(4, timeout / 2)) }
+        catch {
+            if error is URLError, !error.isCancellation, peerSessionID == sessionID { closeManagementPeer(retry: true, notify: true) }
+            throw error
+        }
+    }
+    private func closeManagementPeer(retry: Bool, notify: Bool = false) {
+        let id = peerSessionID
+        peerSessionID = nil
+        managementPeer?.close(); managementPeer = nil
+        peerLease?.cancel(); peerLease = nil
+        peerRetryAfter = .now.advanced(by: .seconds(retry ? 15 : 0))
+        managementPeerStatus = retry ? "Using relay; retrying automatically" : "Not connected"
+        if notify, let id, isConnected {
+            Task { [weak self] in
+                do { try await self?.send(["type": "peer_close", "sessionId": id.uuidString.lowercased()]) }
+                catch { if !error.isCancellation { self?.logger.notice("Management peer close was not delivered") } }
+            }
+        }
+    }
+    private func receivePeer(_ value: [String: Any]) async throws {
+        guard let raw = value["sessionId"] as? String, let id = UUID(uuidString: raw) else { throw CallingError.invalidResponse }
+        guard id == peerSessionID else { return }
+        if value["type"] as? String == "peer_closed" { closeManagementPeer(retry: true); return }
+        do {
+            if value["type"] as? String == "peer_session" {
+                guard managementPeer == nil, let credentials,
+                      (value["phoneId"] as? String).flatMap(UUID.init(uuidString:)) == credentials.endpointId,
+                      (value["routerId"] as? String).flatMap(UUID.init(uuidString:)) == credentials.routerId,
+                      let router = credentials.routerId, let expires = value["expiresAt"] as? Double,
+                      let now = managementAccess?.serverTime, expires > now, expires <= now + 301,
+                      let servers = value["iceServers"] as? [[String: Any]] else { throw CallingError.invalidResponse }
+                let ice = try JSONDecoder().decode([CallingICEServer].self, from: JSONSerialization.data(withJSONObject: servers))
+                guard ice.allSatisfy({ $0.urls.allSatisfy { $0.hasPrefix("stun:") } }) else { throw CallingError.invalidResponse }
+                managementPeer = try peerFactory(id, router, ice, { [weak self] kind, payload in
+                    Task { @MainActor in
+                        guard let self, self.peerSessionID == id else { return }
+                        do { try await self.send(["type":"peer_signal", "sessionId":id.uuidString.lowercased(), kind:payload]) }
+                        catch { self.closeManagementPeer(retry: true) }
+                    }
+                }, { [weak self] in
+                    guard let self, self.peerSessionID == id else { return }
+                    self.closeManagementPeer(retry: true, notify: true)
+                })
+                peerLease = Task { [weak self] in
+                    do { try await Task.sleep(for: .seconds(expires - now)) } catch { return }
+                    if self?.peerSessionID == id { self?.closeManagementPeer(retry: false, notify: true) }
+                }
+            } else {
+                guard let peer = managementPeer else { throw CallingError.invalidResponse }
+                try await peer.signal(value)
+            }
+        } catch {
+            // A failed P2P negotiation leaves the authenticated relay available.
+            closeManagementPeer(retry: true, notify: true)
+            logger.notice("Management peer negotiation failed: \(String(reflecting: type(of: error)), privacy: .public)")
+        }
+    }
     private func command(_ action: String, callId: UUID, number: String? = nil, digits: String? = nil) async throws {
         try await ready()
         guard action == "hangup" || (call?.callId == callId && !ended.contains(callId)) else { throw CallingError.server("call_ended") }
@@ -327,6 +584,10 @@ final class RemoteCallingManager: NSObject {
         var body: [String: Any] = ["type": "command", "requestId": id.uuidString.lowercased(), "callId": callId.uuidString.lowercased(), "action": action]
         if let number { body["number"] = number }
         if let digits { body["digits"] = digits }
+        if action == "dial" || action == "answer" {
+            let device = try deviceInfo()
+            body["device"] = ["name": device.name, "model": device.model]
+        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             pending[id] = continuation
             deadlines[id] = Task { [weak self] in
@@ -368,6 +629,29 @@ final class RemoteCallingManager: NSObject {
         }
         if try await localCommandDelivery(command, routerID) { return }
         guard pending[id] != nil else { return }
+        if let rawProof = admission["proof"] {
+            guard let proof = rawProof as? [String:Any],
+                  (proof["phoneId"] as? String).flatMap(UUID.init(uuidString:)) == credentials?.endpointId,
+                  let mac = proof["mac"] as? String, mac.range(of:"^[A-Za-z0-9_-]{43}$", options:.regularExpression) != nil else { throw CallingError.invalidResponse }
+            do {
+                let data = try JSONSerialization.data(withJSONObject: ["type":"peer_call", "requestId":id.uuidString.lowercased(), "command":command, "proof":proof])
+                if let response = try await peerManagementRequest(data, id: id, timeout: 8) {
+                    if response.status == 202 {
+                        guard let value = try JSONSerialization.jsonObject(with: response.data) as? [String:Any],
+                              value["ok"] as? Bool == true, let payload = value["data"] as? [String:Any], payload["queued"] as? Bool == true,
+                              (payload["requestId"] as? String).flatMap(UUID.init(uuidString:)) == id else { throw CallingError.invalidResponse }
+                        return
+                    }
+                    if ![429,503,504].contains(response.status) {
+                        guard let value = try JSONSerialization.jsonObject(with:response.data) as? [String:Any] else { throw CallingError.invalidResponse }
+                        throw CallingError.server(try Self.errorCode(value["error"]))
+                    }
+                }
+            } catch let error as URLError where error.code != .cancelled {
+                // Admission and execution retain their original ID and expiry on relay retry.
+            }
+        }
+        guard pending[id] != nil else { return }
         _ = try await admit(body, delivery: "relay")
     }
     private func admit(_ body: [String:Any], delivery: String) async throws -> [String:Any] {
@@ -389,7 +673,7 @@ final class RemoteCallingManager: NSObject {
             guard let event = value["eventId"] as? String, let eventID = UUID(uuidString:event),
                   let router = value["routerId"] as? String, let routerID = UUID(uuidString:router),
                   routerID == credentials?.routerId else { throw CallingError.invalidResponse }
-            onSMSReceived?(eventID, routerID, value["messageId"] as? String)
+            onSMSReceived?(eventID, routerID, value["messageId"] as? String, value)
         case "hello":
             guard value["protocol"] as? Int == 1, value["role"] as? String == "phone",
                   let endpoint = value["endpointId"] as? String, UUID(uuidString: endpoint) == credentials?.endpointId,
@@ -398,6 +682,7 @@ final class RemoteCallingManager: NSObject {
                   let calls = value["calls"] as? [[String: Any]],
                   let servers = value["iceServers"] as? [[String: Any]] else { throw CallingError.invalidResponse }
             iceServers = try JSONDecoder().decode([CallingICEServer].self, from: JSONSerialization.data(withJSONObject: servers))
+            peerSupported = value["peerManagement"] as? Bool == true
             if let time = value["serverTime"] as? Double {
                 guard (946684800..<4102444800).contains(time) else { throw CallingError.invalidResponse }
                 serverClock = (time, .now)
@@ -424,6 +709,7 @@ final class RemoteCallingManager: NSObject {
             if calls.isEmpty, let call, reported.contains(call.callId) { finish(call.callId, reason: .remoteEnded) }
             if let call { try await requestMediaIfNeeded(call) }
             Task { do { try await registerPushToken() } catch { present(error) } }
+        case "peer_session", "peer_signal", "peer_closed": try await receivePeer(value)
         case "ice_servers":
             guard let servers = value["iceServers"] as? [[String: Any]] else { throw CallingError.invalidResponse }
             iceServers = try JSONDecoder().decode([CallingICEServer].self, from: JSONSerialization.data(withJSONObject: servers))
@@ -435,12 +721,17 @@ final class RemoteCallingManager: NSObject {
             else { complete(id, outcome: .failure(CallingError.server(try Self.errorCode(value["error"])))) }
         case "error":
             let code = try Self.errorCode(value["error"])
+            if let raw = value["requestId"] as? String, let id = UUID(uuidString: raw), id == peerSessionID {
+                closeManagementPeer(retry: true); break
+            }
             if let raw = value["requestId"] as? String, let id = UUID(uuidString: raw) { complete(id, outcome: .failure(CallingError.server(code))) }
             else if code != "call_ended" { present(CallingError.server(code)) }
         case "pong", "accepted": break
         case "presence":
             guard let online = value["routerOnline"] as? Bool else { throw CallingError.invalidResponse }
             routerOnline = online
+            peerSupported = value["peerManagement"] as? Bool == true
+            if !online { closeManagementPeer(retry: false) }
             if online, media == nil, let call { requestedMedia = nil; try await requestMediaIfNeeded(call) }
         default: throw CallingError.invalidResponse
         }
@@ -451,12 +742,22 @@ final class RemoteCallingManager: NSObject {
         if ended.contains(next.callId) { return }
         if let call, call.callId == next.callId, next.sequence < call.sequence { return }
         if next.state == .ended {
-            finish(next.callId, reason: next.reason == "no_answer" ? .unanswered : next.reason == "remote_hangup" ? .remoteEnded : .failed)
+            let reason: CXCallEndedReason
+            switch next.reason {
+            case "answered_elsewhere": reason = .answeredElsewhere
+            case "declined_on_device": reason = .declinedElsewhere
+            case "no_answer": reason = .unanswered
+            case "remote_hangup": reason = .remoteEnded
+            default: reason = .failed
+            }
+            finish(next.callId, reason: reason)
             return
         }
         if let current = call, current.callId != next.callId { finish(current.callId, reason: .failed) }
+        let restoringCall = call?.callId != next.callId && next.state != .ringing
         if call?.callId != next.callId { errorMessage = nil }
         call = next
+        if restoringCall { requestCallPresentation() }
         if next.direction == .incoming, next.state == .ringing, !reported.contains(next.callId) {
             reportIncoming(id: next.callId, number: next.number, expired: false, completion: {})
         }
@@ -466,6 +767,8 @@ final class RemoteCallingManager: NSObject {
         }
     }
     private func requestMediaIfNeeded(_ call: RemoteCall) async throws {
+        // Every paired phone rings; only the phone whose answer was admitted owns audio.
+        guard call.direction != .incoming || call.state != .ringing else { return }
         guard call.state != .ended, media == nil, requestedMedia != call.callId else { return }
         requestedMedia = call.callId
         try await send(["type": "media_request", "callId": call.callId.uuidString.lowercased()])
@@ -616,6 +919,7 @@ final class RemoteCallingManager: NSObject {
             mediaRecovery?.cancel(); mediaRecovery = nil; relayFallbackCall = nil
             mediaGeneration = nil
             media?.close(); media = nil; call = nil; requestedMedia = nil
+            callPresentationRequest = nil
             audioConnected = false; muted = false; speaker = false; candidates.removeAll()
             RTCAudioSession.sharedInstance().isAudioEnabled = false
         }
@@ -652,6 +956,7 @@ extension RemoteCallingManager: @preconcurrency CXProviderDelegate {
     }
     func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
         guard call?.callId == action.callUUID, !ended.contains(action.callUUID) else { action.fail(); return }
+        requestCallPresentation()
         Task {
             do {
                 try configureAudioSession()
@@ -665,6 +970,8 @@ extension RemoteCallingManager: @preconcurrency CXProviderDelegate {
     }
     func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         guard call?.callId == action.callUUID, !ended.contains(action.callUUID) else { action.fail(); return }
+        // CallKit can answer without changing the call ID or foregrounding our view.
+        requestCallPresentation()
         Task {
             do {
                 let allowed = await requestMicrophone()
@@ -674,7 +981,13 @@ extension RemoteCallingManager: @preconcurrency CXProviderDelegate {
                 guard call?.callId == action.callUUID, !ended.contains(action.callUUID) else { action.fail(); return }
                 action.fulfill()
             }
-            catch { present(error); action.fail(); finish(action.callUUID, reason: .failed) }
+            catch {
+                action.fail()
+                if !ended.contains(action.callUUID) {
+                    present(error)
+                    finish(action.callUUID, reason: .failed)
+                }
+            }
         }
     }
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
@@ -684,8 +997,8 @@ extension RemoteCallingManager: @preconcurrency CXProviderDelegate {
         Task { do { try await command("hangup", callId: id) } catch { present(error) } }
     }
     func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
-        guard call?.callId == action.callUUID, let media else { action.fail(); return }
-        media.mute(action.isMuted)
+        guard call?.callId == action.callUUID, !ended.contains(action.callUUID) else { action.fail(); return }
+        media?.mute(action.isMuted)
         muted = action.isMuted
         action.fulfill()
     }
@@ -695,14 +1008,24 @@ extension RemoteCallingManager: @preconcurrency CXProviderDelegate {
     func provider(_ provider: CXProvider, timedOutPerforming action: CXAction) {
         guard let callAction = action as? CXCallAction else { return }
         let id = callAction.callUUID
+        guard !ended.contains(id) else { return }
         finish(id, reason: .failed)
         Task { do { try await command("hangup", callId: id) } catch { present(error) } }
     }
     func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
+        audioSessionActive = true
         RTCAudioSession.sharedInstance().audioSessionDidActivate(audioSession)
         RTCAudioSession.sharedInstance().isAudioEnabled = call.map { !ended.contains($0.callId) } == true
+        if speaker {
+            let audio = RTCAudioSession.sharedInstance()
+            audio.lockForConfiguration()
+            defer { audio.unlockForConfiguration() }
+            do { try audio.overrideOutputAudioPort(.speaker) }
+            catch { present(error) }
+        }
     }
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+        audioSessionActive = false
         RTCAudioSession.sharedInstance().isAudioEnabled = false
         RTCAudioSession.sharedInstance().audioSessionDidDeactivate(audioSession)
     }

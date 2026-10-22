@@ -61,9 +61,12 @@ impl Drop for Execution {
 pub struct Worker {
     state: Arc<AppState>,
     manager: Arc<RemoteCalling>,
+    recovery: Arc<crate::power::Recovery>,
     config: Config,
     journal: Journal,
     media: Option<Media>,
+    peers: HashMap<Uuid, super::peer::Peer>,
+    connect_identity: Arc<super::connect::Identity>,
     network: Option<JoinHandle<()>>,
     connected: bool,
     paired: bool,
@@ -88,13 +91,25 @@ pub struct Worker {
     physical_direction: Option<String>,
     local_commands: mpsc::Receiver<super::LocalCommand>,
 }
+impl Drop for Worker {
+    fn drop(&mut self) {
+        if let Some(call)=self.journal.call() {
+            let result=self.manager.unix_time().map_err(String::from).and_then(|now|self.manager.recordings.observe(
+                call.id,call.number.clone(),self.physical_direction.as_deref()==Some("mt"),"ended",now,Some("calling_worker_stopped"),call.line.clone()));
+            if let Err(error)=result {self.manager.recordings.note_error(error);}
+            self.manager.recordings.stop(call.id);
+        }
+    }
+}
 impl Worker {
     pub fn new(
         state: Arc<AppState>,
         manager: Arc<RemoteCalling>,
         config: Config,
+        recovery: Arc<crate::power::Recovery>,
     ) -> Result<Self, String> {
         let journal = Journal::open(std::path::Path::new(super::JOURNAL))?;
+        let connect_identity = Arc::new(super::connect::Identity::load()?);
         let (signals, outgoing) = mpsc::channel(64);
         let (failures, failure_rx) = mpsc::channel(8);
         let (local_sender, local_commands) = mpsc::channel(8);
@@ -102,9 +117,12 @@ impl Worker {
         Ok(Self {
             state,
             manager,
+            recovery,
             config,
             journal,
             media: None,
+            peers: HashMap::new(),
+            connect_identity,
             network: None,
             connected: false,
             paired: false,
@@ -133,8 +151,9 @@ impl Worker {
     pub async fn run(&mut self) -> Result<(), String> {
         let (events, mut incoming) = mpsc::channel(64);
         let config = self.config.clone();
+        let mut resumed = self.recovery.subscribe();
         let outgoing = self.outgoing.take().ok_or("network_already_started")?;
-        self.network = Some(tokio::spawn(connection(config, outgoing, events)));
+        self.network = Some(tokio::spawn(connection(config, outgoing, events, resumed.clone())));
         // A modem ID may be reused while the agent is stopped. Do not redial or
         // hang up an unidentified physical call when recovering an old session.
         if self.journal.call().is_some() {
@@ -146,8 +165,14 @@ impl Worker {
         loop {
             tokio::select! {
                 _ = self.manager.changed.notified() => return Ok(()),
+                change = resumed.changed() => {
+                    change.map_err(|_| "wake_recovery_channel_closed")?;
+                    self.next_poll = Instant::now();
+                    self.next_sms = Instant::now();
+                },
+                _ = self.state.sms_notifications.changed.notified() => self.next_sms = Instant::now(),
                 message = incoming.recv() => match message.ok_or("network_worker_stopped")? {
-                    Network::Offline(error) => { self.connected = false; self.status(Some(error)); },
+                    Network::Offline(error) => { self.connected = false; self.close_peers().await; self.status(Some(error)); },
                     Network::Message(value) => self.message(value).await?,
                 },
                 local = self.local_commands.recv() => {
@@ -173,6 +198,11 @@ impl Worker {
     }
     fn status(&self, error: Option<&str>) {
         let call = self.journal.call();
+        if let Some(call)=&call {
+            let result=self.manager.unix_time().map_err(String::from).and_then(|now|self.manager.recordings.observe(
+                call.id,call.number.clone(),self.physical_direction.as_deref()==Some("mt")||call.state=="ringing",&call.state,now,error,call.line.clone()));
+            if let Err(error)=result {self.manager.recordings.note_error(error);}
+        }
         self.manager.set_status(
             self.connected,
             error,
@@ -184,6 +214,14 @@ impl Worker {
             .send(value)
             .await
             .map_err(|_| "network_worker_stopped".into())
+    }
+    fn record_phone(&self, command: &Command) {
+        self.status(None);
+        if let Some(phone) = &command.phone {
+            if let Err(error) = self.manager.recordings.assign_phone(command.call_id, phone) {
+                self.manager.recordings.note_error(error);
+            }
+        }
     }
     async fn event(
         &mut self,
@@ -223,6 +261,57 @@ impl Worker {
     }
     async fn message(&mut self, value: Value) -> Result<(), String> {
         match value["type"].as_str().ok_or("invalid_server_message")? {
+            "connect_request" => {
+                let id = value["requestId"].as_str().and_then(|v|Uuid::parse_str(v).ok()).ok_or("invalid_connection_id")?;
+                let router = self.config.endpoint_id.ok_or("missing_router_identity")?;
+                let token = value["phoneToken"].as_str().ok_or("invalid_connection_token")?.to_string();
+                let state = self.state.clone(); let identity = self.connect_identity.clone(); let signals = self.signals.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let now = state.remote_calling.unix_time()?;
+                        identity.authorize(&value, router, now, |password|state.auth.verify_password(password))
+                    }).await;
+                    let (ok, error) = match result {
+                        Ok(Ok(true)) => (true, None),
+                        Ok(Ok(false)) => (false, Some("incorrect_router_password")),
+                        Ok(Err(code)) => (false, Some(code)),
+                        Err(_) => { eprintln!("[connect] verification worker failed"); (false, Some("connection_verification_failed")) },
+                    };
+                    let _ = signals.send(json!({"type":"connect_result","requestId":id,"phoneToken":token,"ok":ok,"error":error})).await;
+                });
+            }
+            "peer_session" => {
+                let id = value["sessionId"].as_str().and_then(|v|Uuid::parse_str(v).ok()).ok_or("invalid_peer_session")?;
+                let opened: Result<(), &'static str> = async {
+                    let router = value["routerId"].as_str().and_then(|v|Uuid::parse_str(v).ok()).ok_or("invalid_peer_router")?;
+                    let phone = value["phoneId"].as_str().and_then(|v|Uuid::parse_str(v).ok()).ok_or("invalid_peer_phone")?;
+                    let expires = value["expiresAt"].as_u64().ok_or("invalid_peer_expiry")?;
+                    let now = self.manager.unix_time()?;
+                    if Some(router) != self.config.endpoint_id || expires <= now || expires > now + 302 { return Err("invalid_peer_session"); }
+                    let ice = super::peer::ice_servers(&value["iceServers"])?;
+                    if self.peers.len() >= 8 || self.peers.contains_key(&id) { return Err("peer_capacity"); }
+                    let peer = super::peer::Peer::new(id, router, phone, expires, ice, self.state.clone(), self.signals.clone()).await?;
+                    self.peers.insert(id, peer);
+                    Ok(())
+                }.await;
+                if let Err(code) = opened {
+                    eprintln!("[peer] {code}"); self.send(json!({"type":"peer_close","sessionId":id})).await?;
+                }
+            }
+            "peer_signal" => {
+                let id = value["sessionId"].as_str().and_then(|v|Uuid::parse_str(v).ok()).ok_or("invalid_peer_session")?;
+                if let Some(peer) = self.peers.get_mut(&id) {
+                    if let Err(code) = peer.signal(&value).await {
+                        eprintln!("[peer] {code}");
+                        self.peers.remove(&id).unwrap().close().await;
+                        self.send(json!({"type":"peer_close","sessionId":id})).await?;
+                    }
+                }
+            }
+            "peer_closed" => {
+                let id = value["sessionId"].as_str().and_then(|v|Uuid::parse_str(v).ok()).ok_or("invalid_peer_session")?;
+                if let Some(peer) = self.peers.remove(&id) { peer.close().await; }
+            }
             "agent_request" => {
                 let request_id = value["requestId"].as_str().ok_or("invalid_management_id")?.to_string();
                 Uuid::parse_str(&request_id).map_err(|_| "invalid_management_id")?;
@@ -241,6 +330,7 @@ impl Worker {
                 });
             }
             "hello" => {
+                self.next_sms = Instant::now();
                 if value["protocol"] != 1
                     || value["role"] != "router"
                     || value["endpointId"].as_str()
@@ -252,6 +342,8 @@ impl Worker {
                 self.ice = serde_json::from_value(value["iceServers"].clone())
                     .map_err(|_| "invalid_ice_servers")?;
                 self.connected = true;
+                self.close_peers().await;
+                self.send(json!({"type":"peer_register","connectionKey":self.connect_identity.public_key()})).await?;
                 let calls = value["calls"].as_array().ok_or("invalid_server_calls")?;
                 if self.journal.call().is_some_and(|call| {
                     !calls.iter().any(|snapshot| {
@@ -381,7 +473,17 @@ impl Worker {
         }
         Ok(())
     }
+    async fn close_peers(&mut self) {
+        for (_, peer) in self.peers.drain() { peer.close().await; }
+    }
     async fn tick(&mut self) -> Result<(), String> {
+        self.recovery.call(self.journal.call().is_some() || self.inflight.is_some()
+            || self.waiting.is_some() || !self.queue.is_empty())?;
+        let now = self.manager.unix_time()?;
+        let expired: Vec<_> = self.peers.iter().filter(|(_, peer)| peer.expires_at <= now || matches!(peer.peer.connection_state(),
+            webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed |
+            webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Closed)).map(|(id, _)| *id).collect();
+        for id in expired { self.peers.remove(&id).unwrap().close().await; }
         if self.connected && self.paired && Instant::now() >= self.next_sms {
             self.next_sms = Instant::now() + Duration::from_secs(5);
             match self.state.sms_notifications.pending() {
@@ -461,8 +563,10 @@ impl Worker {
                     } else if let Err(error) = audio::available() {
                         Err(error)
                     } else {
+                        let line = capture_line(self.state.clone()).await?;
                         self.journal
-                            .start(command.call_id, "dialing", command.number.clone())?;
+                            .start(command.call_id, "dialing", command.number.clone(), line)?;
+                        self.record_phone(&command);
                         self.call_started = Instant::now();
                         self.modem_seen = false;
                         self.modem_active = false;
@@ -488,6 +592,7 @@ impl Worker {
                     } else if let Err(error) = audio::available() {
                         Err(error)
                     } else {
+                        self.record_phone(&command);
                         if self.media.is_none() && self.new_media(command.call_id).await.is_err() {
                             self.completed(&command, Err("media_prepare_failed"))
                                 .await?;
@@ -548,7 +653,7 @@ impl Worker {
         if let Some(call) = self.journal.call() {
             if let Some(media) = self.media.as_mut() {
                 if self.modem_active && media.is_connected() && call.state != "ringing" {
-                    if let Err(error) = media.start_audio() {
+                    if let Err(error) = media.start_audio(&self.manager.recordings) {
                         self.cleanup = Some(error);
                         return Ok(());
                     }
@@ -585,11 +690,12 @@ impl Worker {
         let cancelled = execution.cancelled.clone();
         self.execution = Some(execution);
         let state = self.state.clone();
+        let expected_line = self.journal.call().and_then(|call| call.line);
         let (tx, rx) = oneshot::channel();
         self.work = Some(rx);
         self.inflight = Some(command.clone());
         tokio::task::spawn_blocking(move || {
-            let (outcome, submitted) = execute(&state, &command, &cancelled);
+            let (outcome, submitted) = execute(&state, &command, &cancelled, expected_line.as_ref());
             let _ = tx.send(Work::Command(command, outcome, submitted));
         });
         Ok(())
@@ -659,7 +765,8 @@ impl Worker {
                             .as_str()
                             .filter(|number| !number.is_empty())
                             .map(String::from);
-                        self.journal.start(Uuid::new_v4(), "ringing", number)?;
+                        let line = capture_line(self.state.clone()).await?;
+                        self.journal.start(Uuid::new_v4(), "ringing", number, line)?;
                         self.modem_seen = true;
                         self.modem_active = false;
                         self.physical_id = Some(id);
@@ -692,7 +799,7 @@ impl Worker {
                     "active" => {
                         if let Some(media) = self.media.as_mut() {
                             if media.is_connected() {
-                                if let Err(error) = media.start_audio() {
+                                if let Err(error) = media.start_audio(&self.manager.recordings) {
                                     self.cleanup = Some(error);
                                 }
                             }
@@ -711,6 +818,7 @@ impl Worker {
     }
     async fn finish(&mut self, reason: &'static str) -> Result<(), String> {
         self.cleanup = None;
+        let recording_id=self.journal.call().map(|call|call.id);
         if let Some((command, _)) = self.waiting.take() {
             self.completed(&command, Err("call_ended")).await?;
         }
@@ -721,6 +829,7 @@ impl Worker {
         if let Some(media) = self.media.take() {
             media.close().await;
         }
+        if let Some(id)=recording_id {self.manager.recordings.stop(id);}
         self.physical_id = None;
         self.physical_direction = None;
         self.modem_seen = false;
@@ -740,6 +849,10 @@ impl Worker {
         Ok(())
     }
     pub async fn shutdown(&mut self) -> Result<(), String> {
+        if self.journal.call().is_some() {
+            if let Err(code) = self.recovery.notification() { eprintln!("[remote-calling] {code}"); }
+        }
+        self.close_peers().await;
         *self.manager.local_commands.lock().unwrap() = None;
         if let Some(execution) = &self.execution {
             execution.cancel();
@@ -788,6 +901,7 @@ impl Worker {
             let _ = task.await;
         }
         self.manager.set_status(false, failure.as_deref(), None);
+        self.recovery.call(false)?;
         match failure {
             Some(error) => Err(error),
             None => Ok(()),
@@ -823,13 +937,18 @@ fn remaining_window(
 fn terminal_ok(response: &str) -> bool {
     response
         .lines()
+        .filter(|line| !line.trim().is_empty())
         .last()
         .is_some_and(|line| line.trim() == "OK")
 }
 fn read_calls(state: &AppState) -> Result<Vec<Value>, &'static str> {
     let raw = at_cmd::send_cancellable(&state.at_port, "AT+CLCC", 2, &AtomicBool::new(false))
         .map_err(|_| "modem_status_unavailable")?;
-    parse_status(&raw)
+    let parsed = parse_status(&raw);
+    if parsed.is_err() {
+        eprintln!("[calling-status] bytes={} lines={} ok={} error={} last_blank={}",raw.len(),raw.lines().count(),raw.lines().any(|line|line.trim()=="OK"),raw.lines().any(|line|line.trim()=="ERROR"),raw.lines().last().is_some_and(|line|line.trim().is_empty()));
+    }
+    parsed
 }
 fn parse_status(raw: &str) -> Result<Vec<Value>, &'static str> {
     if !terminal_ok(raw) {
@@ -860,12 +979,22 @@ fn parse_status(raw: &str) -> Result<Vec<Value>, &'static str> {
     {
         return Err("invalid_modem_status");
     }
-    Ok(calls)
+    // CLCC on this modem also lists its cellular data sessions. Pure data/fax
+    // entries must not block a voice dial or become an incoming phone call.
+    Ok(calls.into_iter().filter(|call| !matches!(call["mode"].as_i64(),Some(1|2))).collect())
 }
+async fn capture_line(state: Arc<AppState>) -> Result<Option<crate::cellular_line::CellularLine>, String> {
+    tokio::task::spawn_blocking(move || match crate::sim::capture_line(&state) {
+        Ok(line) => Some(line),
+        Err(error) => { eprintln!("[call-line] {error}"); None }
+    }).await.map_err(|_| "call_line_worker_stopped".into())
+}
+
 fn execute(
     state: &AppState,
     command: &Command,
     cancelled: &AtomicBool,
+    expected_line: Option<&crate::cellular_line::CellularLine>,
 ) -> (Result<(), &'static str>, bool) {
     let submitted = AtomicBool::new(false);
     let outcome = (|| {
@@ -875,6 +1004,10 @@ fn execute(
         }
         let code = match command.action.as_str() {
             "dial" => {
+                if let Some(expected) = expected_line {
+                    let current = crate::sim::capture_line(state).map_err(|_| "sim_line_unavailable")?;
+                    if current.iccid != expected.iccid { return Err("sim_line_changed"); }
+                }
                 if !read_calls(state)?.is_empty() {
                     return Err("modem_busy");
                 }
@@ -956,10 +1089,11 @@ async fn connection(
     config: Config,
     mut outgoing: mpsc::Receiver<Value>,
     incoming: mpsc::Sender<Network>,
+    mut resumed: tokio::sync::watch::Receiver<u64>,
 ) {
     let mut delay = 1;
     loop {
-        let result = async {
+        let attempt = async {
             let endpoint = super::url(&config, "v1/socket").map_err(|_| "invalid_server_url")?.replacen("https://", "wss://", 1);
             let mut request = endpoint.into_client_request().map_err(|_| "invalid_websocket_request")?;
             request.headers_mut().insert("Authorization", format!("Bearer {}", config.device_token).parse().map_err(|_| "invalid_device_token")?);
@@ -968,41 +1102,90 @@ async fn connection(
             let (socket, _) = loop { tokio::select! { result = &mut connect => break result.map_err(|_| "signaling_timeout")?.map_err(|_| "signaling_connect_failed")?, value = outgoing.recv() => { if value.is_none() { return Ok::<(), &'static str>(()); } } } };
             let (mut write, mut read) = socket.split(); delay = 1;
             let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+            let mut last_read = Instant::now();
             loop {
                 tokio::select! {
                     input = read.next() => match input {
-                        Some(Ok(Message::Text(text))) => { let value = serde_json::from_str(&text).map_err(|_| "invalid_server_message")?; incoming.send(Network::Message(value)).await.map_err(|_| "worker_stopped")?; },
-                        Some(Ok(Message::Ping(bytes))) => { tokio::time::timeout(Duration::from_secs(5), write.send(Message::Pong(bytes))).await.map_err(|_| "signaling_send_timeout")?.map_err(|_| "signaling_send_failed")?; },
-                        Some(Ok(Message::Pong(_))) => {},
+                        Some(Ok(Message::Text(text))) => { last_read = Instant::now(); let value = serde_json::from_str(&text).map_err(|_| "invalid_server_message")?; incoming.send(Network::Message(value)).await.map_err(|_| "worker_stopped")?; },
+                        Some(Ok(Message::Ping(bytes))) => { last_read = Instant::now(); tokio::time::timeout(Duration::from_secs(5), write.send(Message::Pong(bytes))).await.map_err(|_| "signaling_send_timeout")?.map_err(|_| "signaling_send_failed")?; },
+                        Some(Ok(Message::Pong(_))) => { last_read = Instant::now(); },
                         _ => return Err("signaling_disconnected"),
                     },
                     value = outgoing.recv() => {
                         let Some(value) = value else { return Ok(()); };
                         tokio::time::timeout(Duration::from_secs(5), write.send(Message::Text(value.to_string().into()))).await.map_err(|_| "signaling_send_timeout")?.map_err(|_| "signaling_send_failed")?;
                     },
-                    _ = heartbeat.tick() => { tokio::time::timeout(Duration::from_secs(5), write.send(Message::Text(json!({"type": "ping"}).to_string().into()))).await.map_err(|_| "signaling_send_timeout")?.map_err(|_| "signaling_send_failed")?; }
+                    _ = heartbeat.tick() => { if last_read.elapsed() >= Duration::from_secs(30) { return Err("signaling_liveness_timeout"); } tokio::time::timeout(Duration::from_secs(5), write.send(Message::Text(json!({"type": "ping"}).to_string().into()))).await.map_err(|_| "signaling_send_timeout")?.map_err(|_| "signaling_send_failed")?; }
                 }
             }
-        }.await;
-        let error = match result {
-            Ok(()) => return,
-            Err(error) => error,
+        };
+        let result = until_resume(&mut resumed, attempt).await;
+        let (error, reset) = match result {
+            Ok(Ok(())) => return,
+            Ok(Err(error)) => (error, false),
+            Err(()) => ("signaling_resuming", true),
         };
         if incoming.send(Network::Offline(error)).await.is_err() {
             return;
         }
-        let sleep = tokio::time::sleep(Duration::from_secs(delay));
-        tokio::pin!(sleep);
-        loop {
-            tokio::select! { _ = &mut sleep => break, value = outgoing.recv() => if value.is_none() { return; } }
+        if reset { delay = 1; continue; }
+        let backoff = async {
+            let sleep = tokio::time::sleep(Duration::from_secs(delay));
+            tokio::pin!(sleep);
+            loop {
+                tokio::select! { _ = &mut sleep => return true, value = outgoing.recv() => if value.is_none() { return false; } }
+            }
+        };
+        match until_resume(&mut resumed, backoff).await {
+            Ok(false) => return,
+            Ok(true) => delay = (delay * 2).min(30),
+            Err(()) => delay = 1,
         }
-        delay = (delay * 2).min(30);
+    }
+}
+
+
+// Cancelling this future drops the stale socket or its backoff timer. The call
+// owner and durable journals live outside it and survive the transport reset.
+async fn until_resume<T>(resumed: &mut tokio::sync::watch::Receiver<u64>, work: impl std::future::Future<Output = T>) -> Result<T, ()> {
+    tokio::select! {
+        biased;
+        changed = resumed.changed() => { changed.expect("wake recovery owner outlives signaling"); Err(()) },
+        value = work => Ok(value),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn resume_cancels_a_stale_socket_or_backoff_without_waiting_for_its_timeout() {
+        for connecting in [true, false] {
+            let (wake, mut resumed) = tokio::sync::watch::channel(0);
+            let dropped = Arc::new(AtomicBool::new(false));
+            struct Pending(Arc<AtomicBool>);
+            impl Drop for Pending { fn drop(&mut self) { self.0.store(true, Ordering::Release); } }
+            let marker = Pending(dropped.clone());
+            let (entered, started) = oneshot::channel();
+            let work = async move {
+                let _marker = marker;
+                entered.send(()).unwrap();
+                if connecting { std::future::pending::<()>().await; }
+                else { tokio::time::sleep(Duration::from_secs(30)).await; }
+            };
+            let owner = tokio::spawn(async move {
+                let outcome = until_resume(&mut resumed, work).await;
+                (outcome, resumed)
+            });
+            started.await.unwrap();
+            wake.send_replace(1);
+            let (outcome, mut resumed) = tokio::time::timeout(Duration::from_secs(1), owner).await.unwrap().unwrap();
+            assert_eq!(outcome, Err(()));
+            assert!(dropped.load(Ordering::Acquire));
+            // The new connection proceeds after consuming this generation.
+            assert_eq!(until_resume(&mut resumed, async { 42 }).await, Ok(42));
+        }
+    }
     #[test]
     fn cancellation_preserves_a_different_call_waiting_for_media() {
         let id = Uuid::new_v4();
@@ -1015,6 +1198,7 @@ mod tests {
             expires_at: 1000,
             number: None,
             digits: None,
+            phone: None,
         };
         let mut waiting = Some((command, Instant::now()));
         assert!(take_waiting_for_call(&mut waiting, Uuid::new_v4()).is_none());
@@ -1035,6 +1219,7 @@ mod tests {
             expires_at: 1000,
             number: Some("123".into()),
             digits: None,
+            phone: None,
         };
         let admitted = Instant::now();
         assert_eq!(
@@ -1086,6 +1271,10 @@ mod tests {
             assert!(parse_status(raw).is_err(), "{raw}");
         }
         assert!(parse_status("AT+CLCC\r\n\r\nOK\r\n").unwrap().is_empty());
+        assert!(parse_status("\r\n+CLCC: 1,1,0,1,0\r\n+CLCC: 2,1,0,2,0\r\nOK\r\n\r\n").unwrap().is_empty());
+        let mixed=parse_status("+CLCC: 1,1,0,1,0\r\n+CLCC: 3,0,2,0,0,\"123\",129\r\nOK\r\n\r\n").unwrap();
+        assert_eq!(mixed.len(),1);
+        assert_eq!(mixed[0]["id"],3);
         assert_eq!(
             parse_status("+CLCC: 2,1,4,0,0,\"123\",129\r\nOK").unwrap()[0]["id"],
             2

@@ -11,6 +11,10 @@ final class TestEndAction: CXEndCallAction {
     private(set) var fulfilled = false
     override func fulfill() { fulfilled = true; super.fulfill() }
 }
+final class TestAnswerAction: CXAnswerCallAction {
+    private(set) var fulfilled = false
+    override func fulfill() { fulfilled = true; super.fulfill() }
+}
 final class TestDTMFAction: CXPlayDTMFCallAction {
     private(set) var fulfilled = false
     override func fulfill() { fulfilled = true; super.fulfill() }
@@ -18,13 +22,18 @@ final class TestDTMFAction: CXPlayDTMFCallAction {
 
 @MainActor final class TestProvider: CXProvider {
     var endedCalls: [UUID] = []
+    var endedReasons: [UUID: CXCallEndedReason] = [:]
     init() { super.init(configuration: CXProviderConfiguration()) }
-    override func reportCall(with UUID: UUID, endedAt dateEnded: Date?, reason endedReason: CXCallEndedReason) { endedCalls.append(UUID) }
+    override func reportCall(with UUID: UUID, endedAt dateEnded: Date?, reason endedReason: CXCallEndedReason) {
+        endedCalls.append(UUID)
+        endedReasons[UUID] = endedReason
+    }
     override func reportNewIncomingCall(with UUID: UUID, update: CXCallUpdate, completion: @escaping (Error?) -> Void) { completion(nil) }
     override func reportOutgoingCall(with UUID: UUID, connectedAt dateConnected: Date?) {}
 }
 
 @MainActor final class TestSocket: CallingSocket {
+    var response: URLResponse?
     var queue: [URLSessionWebSocketTask.Message] = []
     var receiving: CheckedContinuation<URLSessionWebSocketTask.Message, Error>?
     var messages: [[String: Any]] = []
@@ -76,6 +85,19 @@ final class TestDTMFAction: CXPlayDTMFCallAction {
     func close() { closed = true }
 }
 
+@MainActor final class TestManagementPeer: ManagementPeerConnection {
+    var isReady = true
+    var closed = false
+    var requests: [Data] = []
+    var onRequest: ((Data) throws -> AgentHTTPResponse)?
+    func signal(_ value: [String: Any]) async throws {}
+    func request(_ data: Data, id: UUID, timeout: TimeInterval) async throws -> AgentHTTPResponse {
+        requests.append(data)
+        return try onRequest?(data) ?? AgentHTTPResponse(status:200, data:Data("{}".utf8))
+    }
+    func close() { closed = true; isReady = false }
+}
+
 @MainActor final class Fixture {
     let provider = TestProvider()
     var sockets = [TestSocket()]
@@ -90,6 +112,8 @@ final class TestDTMFAction: CXPlayDTMFCallAction {
     let router = UUID()
     let endpoint = UUID()
     var media: [TestMedia] = []
+    var peers: [TestManagementPeer] = []
+    var peerReady = true
     lazy var manager = RemoteCallingManager(provider: provider,
         credentials: CallingCredentials(serverURL: URL(string: "https://synthetic.invalid")!, phoneToken: String(repeating:"x",count:43),
             requestId: UUID(), endpointId: endpoint, routerId: router), bootstrap: false,
@@ -98,10 +122,15 @@ final class TestDTMFAction: CXPlayDTMFCallAction {
             if self.holdPermission { return await withCheckedContinuation { self.permission = $0 } }
             return true
         },
+        deviceInfo: { CallingDeviceInfo(name: "iPhone 16 Pro", model: "iPhone17,1") },
+        peerFactory: { [unowned self] _,_,_,_,_ in
+            let peer = TestManagementPeer(); peer.isReady = self.peerReady; self.peers.append(peer); return peer
+        },
         mediaFactory: { [unowned self] _,_,muted,relayOnly,sender,changed in let value = TestMedia(muted:muted,relayOnly:relayOnly,sender:sender,changed: changed); self.media.append(value); return value })
     func snapshot(_ id: UUID, state: String = "active", sequence: Int = 1) -> [String: Any] {
         ["type":"call", "callId":id.uuidString, "routerId":router.uuidString, "direction":"incoming", "state":state,
-         "number":"12345", "mediaReady":state == "active", "updatedAt":1_800_000_000, "sequence":sequence]
+         "number":"12345", "mediaReady":state == "active", "updatedAt":1_800_000_000, "sequence":sequence,
+         "answeredAt": state == "active" ? 1_800_000_000 as Any : NSNull()]
     }
     func offer(_ id: UUID) { socket.emit(["type":"signal","callId":id.uuidString,"description":["type":"offer","sdp":"v=0\r\n"]]) }
     func connect(calls: [[String:Any]]) async throws {

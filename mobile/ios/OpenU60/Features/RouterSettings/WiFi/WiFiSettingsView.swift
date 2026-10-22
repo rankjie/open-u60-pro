@@ -151,6 +151,7 @@ struct WiFiSettingsView: View {
             }
         }
         .navigationTitle("WiFi Settings")
+        .keyboardDismissal()
         .refreshable { await viewModel.refresh() }
         .overlay {
             if viewModel.isLoading {

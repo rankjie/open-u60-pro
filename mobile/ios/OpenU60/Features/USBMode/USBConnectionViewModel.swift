@@ -8,6 +8,8 @@ final class USBConnectionViewModel {
     var message: String?
     var messageIsError: Bool = false
     var powerStateUnknown = false
+    var powerReserve: USBPowerReserveStatus?
+    var reserveError: String?
 
     /// Refresh the compact dashboard control while the app is active.
     nonisolated static let defaultPollInterval: TimeInterval = 10
@@ -45,6 +47,12 @@ final class USBConnectionViewModel {
             let usb = try await client.getJSON("/api/usb/status")
             guard !changing, !isLoading, started == revision else { return true }
             let status = try DeviceParser.parseUSBStatus(usb)
+            if let reserve = usb["power_reserve"] as? [String: Any] {
+                powerReserve = try JSONDecoder().decode(USBPowerReserveStatus.self, from: JSONSerialization.data(withJSONObject: reserve))
+                reserveError = powerReserve?.error
+            } else {
+                powerReserve = nil
+            }
             powerStateUnknown = false
             if pollError { message = nil; messageIsError = false; pollError = false }
             if status != usbStatus { usbStatus = status }
@@ -66,6 +74,36 @@ final class USBConnectionViewModel {
 
     func disablePowerbank() async {
         await setPowerbank(false)
+    }
+
+    func loadPowerReserve() async {
+        let started = revision
+        do {
+            let status: USBPowerReserveStatus = try await client.get("/api/usb/power-reserve")
+            guard !isLoading, started == revision else { return }
+            powerReserve = status
+            reserveError = status.error
+        } catch {
+            guard !error.isCancellation, started == revision else { return }
+            reserveError = error.localizedDescription
+        }
+    }
+
+    func savePowerReserve(_ policy: USBPowerReservePolicy) async -> Bool {
+        guard !isLoading else { return false }
+        revision += 1
+        isLoading = true
+        reserveError = nil
+        defer { isLoading = false; revision += 1 }
+        do {
+            let status: USBPowerReserveStatus = try await client.put("/api/usb/power-reserve", body: policy)
+            powerReserve = status
+            reserveError = status.error
+            return true
+        } catch {
+            reserveError = error.localizedDescription
+            return false
+        }
     }
 
     private func setPowerbank(_ enabled: Bool) async {

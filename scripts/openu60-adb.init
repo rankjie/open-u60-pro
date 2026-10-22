@@ -1,0 +1,25 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+
+start() {
+    ubus -t 30 wait_for zwrt_bsp.usb || {
+        echo "OpenU60: USB control service did not become ready" >&2
+        return 1
+    }
+    ubus -t 5 call zwrt_bsp.usb set '{"mode":"debug"}' >/dev/null || {
+        echo "OpenU60: cannot enable USB debugging" >&2
+        return 1
+    }
+    local attempt mode
+    for attempt in 1 2 3 4 5; do
+        mode=$(ubus -t 3 call zwrt_bsp.usb list | jsonfilter -e '@.mode') || return 1
+        if [ "$mode" = debug ]; then
+            echo "OpenU60: USB debugging enabled"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "OpenU60: USB debugging was not enabled" >&2
+    return 1
+}

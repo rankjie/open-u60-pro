@@ -26,7 +26,7 @@ struct CellularCardView: View, Equatable {
         CardView {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Label(compact ? "Live traffic" : "Cellular Connection", systemImage: "arrow.up.arrow.down")
+                    Label("Cellular traffic", systemImage: "arrow.up.arrow.down")
                         .font(.subheadline.weight(.semibold))
                     Spacer()
                     if compact { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary) }
@@ -55,32 +55,24 @@ struct CellularCardView: View, Equatable {
                     }
                 }
 
-                Divider()
-
-                HStack {
-                    VStack(spacing: 4) {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .foregroundStyle(.blue)
-                        LiveTrafficValue(bytesPerSecond: trafficUpdatedAt == nil ? nil : speed.downloadBytesPerSec,
-                                         sampleInterval: trafficSampleInterval)
-                        Text("Download")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let fresh = isTrafficAvailable && trafficUpdatedAt.map { context.date.timeIntervalSince($0) < 5 } == true
+                    HStack(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("Download", systemImage: "arrow.down").font(.caption).foregroundStyle(.secondary)
+                            LiveTrafficValue(bytesPerSecond: fresh ? speed.downloadBytesPerSec : nil,
+                                             sampleInterval: trafficSampleInterval)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        Divider()
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("Upload", systemImage: "arrow.up").font(.caption).foregroundStyle(.secondary)
+                            LiveTrafficValue(bytesPerSecond: fresh ? speed.uploadBytesPerSec : nil,
+                                             sampleInterval: trafficSampleInterval)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxWidth: .infinity)
-
-                    Divider()
-
-                    VStack(spacing: 4) {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .foregroundStyle(.blue)
-                        LiveTrafficValue(bytesPerSecond: trafficUpdatedAt == nil ? nil : speed.uploadBytesPerSec,
-                                         sampleInterval: trafficSampleInterval)
-                        Text("Upload")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
 
                 TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -89,14 +81,13 @@ struct CellularCardView: View, Equatable {
                         .foregroundStyle(.secondary)
                 }
 
-                Divider()
-
-                // The totals advance on the same poll as the live values, so they share its
-                // measured cadence. `AnimatedNumber` now crossfades the unit itself.
-                TrafficTotalRow(label: "Total DL", bytes: trafficStats.rxBytes,
-                                sampleInterval: trafficSampleInterval)
-                TrafficTotalRow(label: "Total UL", bytes: trafficStats.txBytes,
-                                sampleInterval: trafficSampleInterval)
+                if !compact {
+                    Divider()
+                    TrafficTotalRow(label: "Downloaded", bytes: trafficStats.rxBytes,
+                                    sampleInterval: trafficSampleInterval)
+                    TrafficTotalRow(label: "Uploaded", bytes: trafficStats.txBytes,
+                                    sampleInterval: trafficSampleInterval)
+                }
             }
         }
     }

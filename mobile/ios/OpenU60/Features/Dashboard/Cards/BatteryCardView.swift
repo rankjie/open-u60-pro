@@ -1,159 +1,121 @@
 import SwiftUI
 
-struct BatteryCardView: View, Equatable {
+struct BatteryOverviewCard: View {
     let battery: BatteryStatus
-    var compact = false
+    let updatedAt: Date?
+    let powerbankActive: Bool
 
     var body: some View {
-        CardView {
-            VStack(alignment: compact ? .leading : .center, spacing: 10) {
-                HStack {
-                    Label("Battery", systemImage: batteryIcon(battery.capacity))
-                        .font(.subheadline.weight(.semibold))
-                    if compact {
-                        Spacer(minLength: 4)
-                        Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
+        TimelineView(.periodic(from: .now, by: 2)) { context in
+            let fresh = updatedAt.map { context.date.timeIntervalSince($0) < 10 } ?? false
+            let current = fresh ? battery : .empty
+            CardView {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        Label("Battery & power", systemImage: "battery.100").font(.headline)
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                    }
+                    HStack(alignment: .top, spacing: 16) {
+                        metric("Remaining", value: current.capacityText, detail: current.remainingChargeText)
+                        metric(current.powerWatts.map { $0 > 0.05 ? "Battery charging" : powerbankActive ? "Total battery draw" : "Battery draw" } ?? "Battery power",
+                               value: current.powerWatts.map { String(format: "%.1f W", abs($0)) } ?? "— W",
+                               detail: current.statusText)
+                    }
+                    Divider()
+                    powerRow("Estimated runtime", value: current.usbPower.externalPower == true ? "External power" : current.runtimeText)
+                    if let input = current.usbPower.inputWatts {
+                        powerRow("USB input", value: String(format: "%.1f W", input))
+                    }
+                    if powerbankActive || current.usbPower.role == "source" {
+                        powerRow("USB output", value: "Live power unavailable")
+                        if let limit = current.usbPower.outputLimitWatts {
+                            powerRow("Negotiated limit", value: String(format: "Up to %.1f W", limit))
+                        }
+                    }
+                    if !fresh {
+                        Text("No recent battery data").font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                // A battery percentage must render as one exact value, not independent reels.
-                Text(battery.capacityText)
-                    .font(.title3.weight(.bold).monospacedDigit())
-                    .transaction { $0.animation = nil }
-                batteryStatusLine
-                if !compact {
-                    TemperatureValueText(value: battery.temperature)
-                        .font(.caption).foregroundStyle(.secondary)
-                } else {
-                    Text("Power details").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: compact ? .leading : .center)
-        }
-    }
-
-    @ViewBuilder
-    private var batteryStatusLine: some View {
-        HStack(spacing: 4) {
-            batteryStatusText
-            if let ma = battery.currentMA {
-                Text("\u{00B7}").font(.caption).foregroundStyle(.secondary)
-                if let mv = battery.voltageMV {
-                    let watts = Double(mv) * Double(abs(ma)) / 1_000_000.0
-                    AnimatedNumber(value: watts, decimalPlaces: 1,
-                                   font: .caption.monospacedDigit(),
-                                   textColor: batteryStatusColor,
-                                   suffix: "W")
-                } else {
-                    AnimatedNumber(value: ma,
-                                   font: .caption.monospacedDigit(),
-                                   textColor: batteryStatusColor,
-                                   prefix: ma >= 0 ? "+" : nil,
-                                   suffix: "mA")
-                }
             }
         }
-        .lineLimit(1)
-        .minimumScaleFactor(0.8)
+        .accessibilityIdentifier("dashboard-battery-power")
+        .accessibilityHint("Opens battery details")
     }
 
-    @ViewBuilder
-    private var batteryStatusText: some View {
-        switch battery.charging {
-        case "stopped":
-            Text("Charge Stopped")
-                .font(.caption)
-                .foregroundStyle(.orange)
-        case "charging":
-            if battery.capacityPercent == 100 {
-                Text("Full")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-            } else if battery.currentMA != nil {
-                Text("Charging")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-            } else if battery.timeToFull > 0 {
-                Text("Charging \u{00B7} \(formatETA(battery.timeToFull))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.green)
-            } else {
-                Text("Charging")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-            }
-        case "":
-            Text("Unavailable").font(.caption).foregroundStyle(.secondary)
-        default:
-            if battery.timeToEmpty > 0 {
-                if battery.currentMA != nil {
-                    Text(formatETA(battery.timeToEmpty))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(Color.batteryColor(battery.capacity))
-                } else {
-                    Text("\(formatETA(battery.timeToEmpty)) left")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(Color.batteryColor(battery.capacity))
-                }
-            } else {
-                Text("Discharging")
-                    .font(.caption)
-                    .foregroundStyle(Color.batteryColor(battery.capacity))
-            }
+    private func metric(_ title: String, value: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.title2.weight(.semibold)).monospacedDigit()
+            Text(detail).font(.caption).foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
     }
 
-    private var batteryStatusColor: Color {
-        switch battery.charging {
-        case "stopped": return .orange
-        case "charging": return .green
-        default: return Color.batteryColor(battery.capacity)
+    private func powerRow(_ title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Text(value).monospacedDigit().multilineTextAlignment(.trailing)
         }
-    }
-
-    private func formatETA(_ minutes: Int) -> String {
-        if minutes >= 1440 {
-            let d = minutes / 1440, h = (minutes % 1440) / 60, m = minutes % 60
-            return "\(d)d \(h)h \(m)m"
-        }
-        return minutes >= 60 ? "\(minutes / 60)h \(minutes % 60)m" : "\(minutes)m"
-    }
-
-    private func batteryIcon(_ percent: Int) -> String {
-        guard (0...100).contains(percent) else { return "battery.0" }
-        if percent >= 75 { return "battery.100" }
-        if percent >= 50 { return "battery.75" }
-        if percent >= 25 { return "battery.50" }
-        return "battery.25"
+        .font(.subheadline)
+        .accessibilityElement(children: .combine)
     }
 }
 
 struct BatteryDetailSheet: View {
     let battery: BatteryStatus
+    let updatedAt: Date?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         NavigationStack {
-            List {
-                row("Capacity", icon: batteryIcon(battery.capacity), value: battery.capacityText)
-                row("Status", icon: "bolt.fill", value: statusLabel)
-                if let mv = battery.voltageMV {
-                    numericRow("Voltage", icon: "bolt.circle", value: Double(mv) / 1000, decimals: 3, unit: " V")
+            TimelineView(.periodic(from: .now, by: 2)) { context in
+                let fresh = updatedAt.map { context.date.timeIntervalSince($0) < 10 } ?? false
+                List {
+                    if !fresh { Text("No recent battery data").foregroundStyle(.secondary) }
+                    if fresh {
+                        row("Capacity", icon: batteryIcon(battery.capacity), value: battery.capacityText)
+                        row("Estimated remaining", icon: "battery.75", value: battery.remainingChargeText)
+                        if let full = battery.fullChargeMAH, full.isFinite, full > 0 {
+                            numericRow("Full charge capacity", icon: "battery.100", value: full, decimals: 0, unit: " mAh")
+                        }
+                        row("Status", icon: "bolt.fill", value: battery.statusText)
+                        if let mv = battery.voltageMV {
+                            numericRow("Voltage", icon: "bolt.circle", value: Double(mv) / 1000, decimals: 3, unit: " V")
+                        }
+                        if let ma = battery.currentMA {
+                            numericRow("Current", icon: "arrow.left.arrow.right", value: Double(ma), decimals: 0, unit: " mA")
+                        }
+                        if let watts = battery.powerWatts {
+                            numericRow(watts > 0.05 ? "Battery charging" : "Battery draw", icon: "flame", value: abs(watts), decimals: 1, unit: " W")
+                        }
+                        HStack {
+                            Label("Temperature", systemImage: "thermometer.medium")
+                            Spacer()
+                            TemperatureValueText(value: battery.temperature).foregroundStyle(.secondary)
+                        }
+                        row("Time to Full", icon: "battery.100.bolt", value: battery.charging == "charging" && battery.timeToFull > 0 ? formatETA(battery.timeToFull) : "—")
+                        row("Estimated runtime", icon: "clock", value: battery.usbPower.externalPower == true ? "External power" : battery.runtimeText)
+                        if let input = battery.usbPower.inputWatts {
+                            numericRow("USB input", icon: "arrow.down", value: input, decimals: 1, unit: " W")
+                        }
+                        if battery.usbPower.role == "source" {
+                            row("USB output", icon: "arrow.up", value: "Live power unavailable")
+                            if let limit = battery.usbPower.outputLimitWatts {
+                                numericRow("Negotiated output limit", icon: "bolt", value: limit, decimals: 1, unit: " W")
+                            }
+                            Text("The router reports its USB power contract, but not the actual output current.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Text("Remaining charge uses the fuel gauge percentage and full charge capacity. Runtime uses recent average battery current and changes with network load and USB charging.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text("Battery draw includes the router, conversion losses and connected USB devices. USB input includes battery charging.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
-                if let ma = battery.currentMA {
-                    numericRow("Current", icon: "arrow.left.arrow.right", value: Double(ma), decimals: 0, unit: " mA")
-                }
-                if let mv = battery.voltageMV, let ma = battery.currentMA {
-                    let watts = Double(mv) * Double(abs(ma)) / 1_000_000.0
-                    numericRow("Power", icon: "flame", value: watts, decimals: 1, unit: " W")
-                }
-                HStack {
-                    Label("Temperature", systemImage: "thermometer.medium")
-                    Spacer()
-                    TemperatureValueText(value: battery.temperature).foregroundStyle(.secondary)
-                }
-                row("Time to Full", icon: "battery.100.bolt", value: battery.charging == "charging" && battery.timeToFull > 0 ? formatETA(battery.timeToFull) : "—")
-                row("Time to Empty", icon: "battery.25", value: battery.charging == "discharging" && battery.timeToEmpty > 0 ? formatETA(battery.timeToEmpty) : "—")
             }
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .navigationTitle("Battery Details")
@@ -177,15 +139,6 @@ struct BatteryDetailSheet: View {
             Text(value)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
-        }
-    }
-
-    private var statusLabel: String {
-        switch battery.charging {
-        case "stopped": return "Charge Stopped"
-        case "charging": return battery.capacityPercent == 100 ? "Full" : "Charging"
-        case "": return "Unavailable"
-        default: return "Discharging"
         }
     }
 

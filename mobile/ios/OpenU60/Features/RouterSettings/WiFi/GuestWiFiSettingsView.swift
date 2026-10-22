@@ -76,6 +76,7 @@ struct GuestWiFiSettingsView: View {
             }
         }
         .navigationTitle("Guest WiFi")
+        .keyboardDismissal()
         .refreshable { await viewModel.refresh() }
         .overlay {
             if viewModel.isLoading {

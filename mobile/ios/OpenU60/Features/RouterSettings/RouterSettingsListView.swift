@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct RouterSettingsListView: View {
+    @Environment(AppModel.self) private var app
     let client: AgentClient
     let authManager: AuthManager
 
@@ -9,8 +10,8 @@ struct RouterSettingsListView: View {
     private var title: String {
         switch category {
         case .cellular: "Cellular & SIM"
-        case .connectivity: "Wi-Fi & LAN"
-        case .security: "Security & QoS"
+        case .connectivity: "Wi-Fi & network"
+        case .security: "Security & traffic"
         case .system: "Power & system"
         }
     }
@@ -48,102 +49,103 @@ struct RouterSettingsListView: View {
         Group {
             List {
                 if category == .cellular {
-                    Section("Cellular") {
-                        NavigationLink { destination(for: .apn) } label: {
-                            Label("APN", systemImage: "simcard")
-                        }
-
-                        NavigationLink { destination(for: .bandLock) } label: { Label("Band Lock", systemImage: "lock.fill") }
+                    Section("Mobile data") {
                         NavigationLink { destination(for: .mobileNetwork) } label: {
-                            Label("Mobile Network", systemImage: "cellularbars")
-                        }
-
+                            SettingsRow(title: "Mobile data", icon: "cellularbars", color: .green)
+                        }.listRowInsets(SettingsRow.insets)
                         NavigationLink { destination(for: .networkMode) } label: {
-                            Label("Network Mode", systemImage: "antenna.radiowaves.left.and.right")
-                        }
-
-                        NavigationLink { destination(for: .cellLock) } label: {
-                            Label("Cell Lock", systemImage: "lock.fill")
-                        }
-
-                        NavigationLink { destination(for: .smartTowerConnect) } label: {
-                            Label("Smart Tower Connect", systemImage: "antenna.radiowaves.left.and.right")
-                        }
-
-                        NavigationLink { destination(for: .signalDetection) } label: {
-                            Label("Signal Detection", systemImage: "waveform.badge.magnifyingglass")
-                        }
-
-                        NavigationLink { destination(for: .sim) } label: {
-                            Label("SIM Card", systemImage: "simcard")
-                        }
-
-                        NavigationLink { destination(for: .routerESim) } label: {
-                            Label("eSIM Profiles", systemImage: "simcard.2")
-                        }
-
-                        NavigationLink { destination(for: .simServices) } label: {
-                            Label("SIM Services", systemImage: "phone.badge.waveform")
-                        }
+                            SettingsRow(title: "Network mode", icon: "antenna.radiowaves.left.and.right", color: .green)
+                        }.listRowInsets(SettingsRow.insets)
+                        NavigationLink { destination(for: .apn) } label: {
+                            SettingsRow(title: "APN", icon: "network", color: .green)
+                        }.listRowInsets(SettingsRow.insets)
                     }
-
+                    Section("SIM") {
+                        NavigationLink { destination(for: .sim) } label: {
+                            SettingsRow(title: "SIM card", icon: "simcard.fill", color: .green)
+                        }.listRowInsets(SettingsRow.insets)
+                        NavigationLink { destination(for: .routerESim) } label: {
+                            SettingsRow(title: "eSIM profiles", icon: "simcard.2.fill", color: .green)
+                        }.listRowInsets(SettingsRow.insets)
+                        NavigationLink { destination(for: .simServices) } label: {
+                            SettingsRow(title: "SIM services", icon: "phone.badge.waveform.fill", color: .green)
+                        }.listRowInsets(SettingsRow.insets)
+                    }
+                    Section("Advanced radio") {
+                        NavigationLink { destination(for: .bandLock) } label: {
+                            SettingsRow(title: "Band lock", icon: "lock.fill", color: .gray)
+                        }.listRowInsets(SettingsRow.insets)
+                        NavigationLink { destination(for: .cellLock) } label: {
+                            SettingsRow(title: "Cell lock", icon: "lock.fill", color: .gray)
+                        }.listRowInsets(SettingsRow.insets)
+                        NavigationLink { destination(for: .smartTowerConnect) } label: {
+                            SettingsRow(title: "Smart tower connect", icon: "antenna.radiowaves.left.and.right", color: .gray)
+                        }.listRowInsets(SettingsRow.insets)
+                        NavigationLink { destination(for: .signalDetection) } label: {
+                            SettingsRow(title: "Signal scan", icon: "waveform.badge.magnifyingglass", color: .gray)
+                        }.listRowInsets(SettingsRow.insets)
+                    }
                 }
                 if category == .connectivity {
-                    Section("Connectivity") {
+                    Section("Wi-Fi") {
                         NavigationLink { destination(for: .clients) } label: {
-                            Label("Connected Devices", systemImage: "laptopcomputer.and.iphone")
-                        }
+                            SettingsRow(title: "Connected devices", icon: "laptopcomputer.and.iphone")
+                        }.listRowInsets(SettingsRow.insets)
                         NavigationLink { destination(for: .wifi) } label: {
-                            Label("WiFi", systemImage: "wifi")
-                        }
+                            SettingsRow(title: "Internet & hotspot", icon: "wifi")
+                        }.listRowInsets(SettingsRow.insets)
 
                         NavigationLink { destination(for: .guestWiFi) } label: {
-                            Label("Guest WiFi", systemImage: "person.2")
-                        }
+                            SettingsRow(title: "Guest hotspot", icon: "person.2")
+                        }.listRowInsets(SettingsRow.insets)
 
+                    }
+                    Section("Local network") {
                         NavigationLink { destination(for: .lan) } label: {
-                            Label("LAN / DHCP", systemImage: "network")
-                        }
+                            SettingsRow(title: "LAN & DHCP", icon: "network")
+                        }.listRowInsets(SettingsRow.insets)
 
                         NavigationLink { destination(for: .dns) } label: {
-                            Label("DNS", systemImage: "globe")
-                        }
+                            SettingsRow(title: "DNS", icon: "globe")
+                        }.listRowInsets(SettingsRow.insets)
                     }
 
                 }
                 if category == .security {
                     Section("Security") {
                         NavigationLink { destination(for: .firewall) } label: {
-                            Label("Firewall", systemImage: "shield.lefthalf.filled")
-                        }
+                            SettingsRow(title: "Firewall", icon: "shield.lefthalf.filled")
+                        }.listRowInsets(SettingsRow.insets)
 
                         NavigationLink { destination(for: .telemetryBlocker) } label: {
-                            Label("Telemetry Blocker", systemImage: "eye.slash")
-                        }
+                            SettingsRow(title: "Telemetry blocking", icon: "eye.slash")
+                        }.listRowInsets(SettingsRow.insets)
 
                         NavigationLink { destination(for: .vpnPassthrough) } label: {
-                            Label("VPN Passthrough", systemImage: "lock.shield")
-                        }
+                            SettingsRow(title: "VPN passthrough", icon: "lock.shield")
+                        }.listRowInsets(SettingsRow.insets)
                     }
 
-                    Section("Quality") {
+                    Section("Traffic") {
                         NavigationLink { destination(for: .qos) } label: {
-                            Label("QoS", systemImage: "speedometer")
-                        }
+                            SettingsRow(title: "Traffic priority (QoS)", icon: "speedometer")
+                        }.listRowInsets(SettingsRow.insets)
                     }
 
                 }
                 if category == .system {
                     Section("System") {
-                        NavigationLink { destination(for: .deviceInfo) } label: { Label("Device Info", systemImage: "info.circle") }
-                        NavigationLink { destination(for: .usbMode) } label: { Label("USB Mode", systemImage: "cable.connector") }
+                        NavigationLink { destination(for: .deviceInfo) } label: { SettingsRow(title: "Device information", icon: "info.circle") }.listRowInsets(SettingsRow.insets)
+                        NavigationLink { destination(for: .usbMode) } label: { SettingsRow(title: "USB mode", icon: "cable.connector") }.listRowInsets(SettingsRow.insets)
                         NavigationLink { destination(for: .deviceControls) } label: {
-                            Label("Device Controls", systemImage: "power")
-                        }
+                            SettingsRow(title: "Restart & power", icon: "power")
+                        }.listRowInsets(SettingsRow.insets)
                     }
                 }
             }
+            .listStyle(.insetGrouped)
             .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 
@@ -153,9 +155,7 @@ struct RouterSettingsListView: View {
     private func destination(for route: Route) -> some View {
         switch route {
         case .mobileNetwork:
-            PushedModelHost(MobileNetworkViewModel(client: client, authManager: authManager)) {
-                MobileNetworkView(viewModel: $0)
-            }
+            MobileNetworkView(viewModel: app.device.mobile)
         case .networkMode:
             PushedModelHost(NetworkModeViewModel(client: client, authManager: authManager)) {
                 NetworkModeView(viewModel: $0)
@@ -173,9 +173,7 @@ struct RouterSettingsListView: View {
                 SignalDetectView(viewModel: $0)
             }
         case .sim:
-            PushedModelHost(SIMViewModel(client: client, authManager: authManager)) {
-                SIMView(viewModel: $0)
-            }
+            SIMView(viewModel: app.device.sim)
         case .routerESim:
             PushedModelHost(RouterESimViewModel(client: client, authManager: authManager)) {
                 RouterESimView(viewModel: $0)
@@ -185,9 +183,7 @@ struct RouterSettingsListView: View {
                 STKMenuView(viewModel: $0)
             }
         case .wifi:
-            PushedModelHost(WiFiSettingsViewModel(client: client, authManager: authManager)) {
-                WiFiSettingsView(viewModel: $0)
-            }
+            WiFiInternetView(client: client, authManager: authManager)
         case .guestWiFi:
             PushedModelHost(GuestWiFiSettingsViewModel(client: client, authManager: authManager)) {
                 GuestWiFiSettingsView(viewModel: $0)
@@ -227,46 +223,11 @@ struct RouterSettingsListView: View {
         case .deviceInfo:
             PushedModelHost(DeviceInfoViewModel(client:client,authManager:authManager)) {DeviceInfoView(viewModel:$0)}
         case .usbMode:
-            PushedModelHost(USBConnectionViewModel(client:client,authManager:authManager)) {USBModeView(viewModel:$0)}
+            USBModeView(viewModel: app.device.usb)
         case .deviceControls:
             PushedModelHost(DeviceControlViewModel(client: client, authManager: authManager)) {
                 DeviceControlView(viewModel: $0)
             }
         }
-    }
-}
-
-// MARK: - Pushed model host
-
-/// Holds a pushed screen's view model in `@State` so the model is built once, when the
-/// route is actually pushed, and survives re-evaluation of the navigation destination.
-///
-/// Construction has to happen inside the box: `State.init(wrappedValue:)` is not itself an
-/// autoclosure, so building the model in `init` would build and discard one on every
-/// re-evaluation of the `.navigationDestination` closure.
-private struct PushedModelHost<Model, Content: View>: View {
-    @State private var box: LazyModelBox<Model>
-    private let content: (Model) -> Content
-
-    init(_ model: @autoclosure @escaping () -> Model, @ViewBuilder content: @escaping (Model) -> Content) {
-        _box = State(wrappedValue: LazyModelBox(model))
-        self.content = content
-    }
-
-    var body: some View {
-        content(box.model)
-    }
-}
-
-/// Defers building a pushed screen's view model until the first time it is read, which only
-/// happens for the box `@State` actually keeps.
-@MainActor
-private final class LazyModelBox<Model> {
-    lazy var model: Model = build()
-
-    private let build: () -> Model
-
-    init(_ build: @escaping () -> Model) {
-        self.build = build
     }
 }

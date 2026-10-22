@@ -12,11 +12,12 @@ struct AgentHTTPResponse: Sendable {
     let status: Int
     let data: Data
 }
+typealias AgentPeerRequest = @MainActor (Data, UUID, TimeInterval, AgentRelayAccess) async throws -> AgentHTTPResponse?
 
 /// One effect identifier spans local and server delivery. Only the device may claim it.
 @Observable @MainActor
 final class AgentTransport {
-    enum Route { case connecting, local, relay, unavailable }
+    enum Route { case connecting, local, p2p, relay, unavailable }
     private(set) var route: Route = .connecting
     @ObservationIgnored private let load: @Sendable (URLRequest, Int) async throws -> AgentHTTPResponse
     @ObservationIgnored private var probe: (key: String, task: Task<LocalIdentity?, Error>)?
@@ -48,6 +49,7 @@ final class AgentTransport {
     }
 
     func send(method: String, path: String, body: Data?, baseURL: String, access: AgentRelayAccess,
+              peer: AgentPeerRequest? = nil,
               token: @MainActor () -> String?, reauthenticate: @MainActor () async -> Bool) async throws -> AgentHTTPResponse {
         guard (body?.count ?? 0) <= 65536 else { throw AgentError.serverError("Request exceeds the size limit") }
         let deadline = ContinuousClock.now.advanced(by: .seconds(20))
@@ -59,7 +61,8 @@ final class AgentTransport {
         try Task.checkCancellation()
         active += 1
         defer { active -= 1 }
-        let id = UUID().uuidString.lowercased()
+        let effectID = UUID()
+        let id = effectID.uuidString.lowercased()
         let encoded = (body ?? Data()).base64EncodedString()
         let read = method == "GET" || (method == "POST" && path == "/api/sms/list")
         func payload(time: TimeInterval) throws -> Data {
@@ -90,6 +93,20 @@ final class AgentTransport {
                 // The response may have been lost after execution. Relay the same effect ID;
                 // a durable device claim then reports completed/unknown without executing twice.
                 cached = nil
+            }
+        }
+        try Task.checkCancellation()
+        if let peer {
+            let elapsed = 20 - ContinuousClock.now.duration(to: deadline).seconds
+            do {
+                if let response = try await peer(payload(time: access.serverTime + elapsed), effectID,
+                                                 ContinuousClock.now.duration(to: deadline).seconds, access) {
+                    route = .p2p
+                    return response
+                }
+            } catch {
+                guard Self.isConnectionFailure(error) else { throw error }
+                // The router journal owns the effect across P2P and relay as well.
             }
         }
         try Task.checkCancellation()

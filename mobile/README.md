@@ -8,7 +8,7 @@ Native companion apps for the ZTE U60 Pro 5G mobile router. Connect to the `zte-
 |---|---|---|
 | Signal Monitoring | Full | Live NR 5G / LTE / WCDMA metrics with color-coded thresholds |
 | RSRP History Chart | Full | Scrollable chart tracking signal strength over time |
-| Battery & Thermal | Full | Battery %, temperature, CPU thermal, charge policy |
+| Battery & Thermal | Full | Battery %, estimated remaining mAh/runtime, live battery and USB input power, reverse-USB negotiated limit, temperature, CPU thermal, charge policy |
 | Traffic Stats | Full | Real-time DL/UL speed (Mbps), total bytes transferred |
 | Connected Devices | Full | MAC, hostname, IPv4/IPv6 via host hints + DHCP enrichment |
 | Device Info | Full | SIM (ICCID, IMSI, MSISDN), IMEI, WAN/LAN IPs |

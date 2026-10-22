@@ -58,6 +58,7 @@ struct STCView: View {
             }
         }
         .navigationTitle("Smart Tower Connect")
+        .keyboardDismissal()
         .refreshable { await viewModel.refresh() }
         .overlay {
             if viewModel.isLoading {

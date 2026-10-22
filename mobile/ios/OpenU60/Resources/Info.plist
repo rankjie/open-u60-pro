@@ -4,15 +4,18 @@
 <dict>
     <key>NSMicrophoneUsageDescription</key>
     <string>OpenU60 uses your microphone for calls through your U60 Pro.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>OpenU60 transcribes your saved call recordings when you request a transcript.</string>
     <key>UIBackgroundModes</key>
     <array>
         <string>audio</string>
         <string>voip</string>
+        <string>remote-notification</string>
     </array>
     <key>OpenU60PushEnvironment</key>
     <string>sandbox</string>
     <key>NSCameraUsageDescription</key>
-    <string>OpenU60 uses the camera to scan eSIM QR codes.</string>
+    <string>OpenU60 uses the camera to connect to your U60 and scan eSIM QR codes.</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>

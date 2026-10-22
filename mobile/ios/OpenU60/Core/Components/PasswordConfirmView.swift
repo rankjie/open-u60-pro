@@ -52,6 +52,7 @@ struct PasswordConfirmView: View {
                 }
             }
             .navigationTitle(title)
+            .keyboardDismissal()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

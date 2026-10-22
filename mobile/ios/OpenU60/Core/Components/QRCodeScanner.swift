@@ -3,14 +3,36 @@ import AVFoundation
 import VisionKit
 import Vision
 
-struct RouterESimScanner: UIViewControllerRepresentable {
+struct QRCodeScanner: UIViewControllerRepresentable {
+    enum Kind {
+        case esim, deviceConnection
+        var instruction: String {
+            switch self {
+            case .esim: return "Place the operator’s eSIM QR code inside the frame"
+            case .deviceConnection: return "Point the camera at Wi-Fi → Connect app on your U60"
+            }
+        }
+        var invalidMessage: String {
+            switch self {
+            case .esim: return RouterESimActivationCode.invalidMessage
+            case .deviceConnection: return DeviceConnectionQRCode.invalidMessage
+            }
+        }
+        func code(in value: String) -> String? {
+            switch self {
+            case .esim: return RouterESimActivationCode.parse(value)?.value
+            case .deviceConnection: return (try? DeviceConnectionQRCode(value)) == nil ? nil : value
+            }
+        }
+    }
+    let kind: Kind
     let onCode: (String) -> Void
 
-    func makeUIViewController(context: Context) -> ESimScannerController {
-        ESimScannerController(onCode: onCode)
+    func makeUIViewController(context: Context) -> QRCodeScannerController {
+        QRCodeScannerController(kind: kind, onCode: onCode)
     }
-    func updateUIViewController(_ controller: ESimScannerController, context: Context) {}
-    static func dismantleUIViewController(_ controller: ESimScannerController, coordinator: ()) { controller.stop() }
+    func updateUIViewController(_ controller: QRCodeScannerController, context: Context) {}
+    static func dismantleUIViewController(_ controller: QRCodeScannerController, coordinator: ()) { controller.stop() }
 
     static func codes(in data: Data) async throws -> [String] {
         try await Task.detached(priority: .userInitiated) {
@@ -22,11 +44,12 @@ struct RouterESimScanner: UIViewControllerRepresentable {
     }
 }
 
-final class ESimScannerController: UIViewController, DataScannerViewControllerDelegate, AVCaptureMetadataOutputObjectsDelegate {
+final class QRCodeScannerController: UIViewController, DataScannerViewControllerDelegate, AVCaptureMetadataOutputObjectsDelegate {
+    private let kind: QRCodeScanner.Kind
     private let onCode: (String) -> Void
     private var scanner: DataScannerViewController?
     private let session = AVCaptureSession()
-    private let captureQueue = DispatchQueue(label: "com.openu60.esim-camera")
+    private let captureQueue = DispatchQueue(label: "com.openu60.qr-camera")
     private var preview: AVCaptureVideoPreviewLayer?
     private var finished = false
     private var stopped = false
@@ -34,13 +57,15 @@ final class ESimScannerController: UIViewController, DataScannerViewControllerDe
     private let frameView = UIView()
     private let torchButton = UIButton(type: .system)
 
-    init(onCode: @escaping (String) -> Void) { self.onCode = onCode; super.init(nibName: nil, bundle: nil) }
+    init(kind: QRCodeScanner.Kind, onCode: @escaping (String) -> Void) {
+        self.kind = kind; self.onCode = onCode; super.init(nibName: nil, bundle: nil)
+    }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
-        instruction.text = "Place the operator’s eSIM QR code inside the frame"
+        instruction.text = kind.instruction
         instruction.numberOfLines = 0
         instruction.textAlignment = .center
         instruction.textColor = .white
@@ -73,7 +98,7 @@ final class ESimScannerController: UIViewController, DataScannerViewControllerDe
             guard let self, !self.stopped else { return }
             if allowed { self.configure() }
             else {
-                self.instruction.text = "Camera access is off. Allow it in Settings, or close this scanner to choose a photo or enter a code."
+                self.instruction.text = "Camera access is off. Allow it in Settings, or close this scanner to enter the code manually."
                 self.frameView.isHidden = true
                 self.torchButton.isHidden = true
             }
@@ -103,7 +128,7 @@ final class ESimScannerController: UIViewController, DataScannerViewControllerDe
 
     private func configureFallback() {
         guard let device = AVCaptureDevice.default(for: .video), let input = try? AVCaptureDeviceInput(device: device), session.canAddInput(input) else {
-            instruction.text = "Camera unavailable. Close the scanner to choose a photo or enter a code."
+            instruction.text = "Camera unavailable. Close the scanner to enter the code manually."
             return
         }
         session.addInput(input)
@@ -142,11 +167,11 @@ final class ESimScannerController: UIViewController, DataScannerViewControllerDe
     }
     private func found(_ value: String) {
         guard !finished else { return }
-        guard let code = RouterESimActivationCode.parse(value) else { instruction.text = RouterESimActivationCode.invalidMessage; return }
+        guard let code = kind.code(in: value) else { instruction.text = kind.invalidMessage; return }
         finished = true
         stop()
         UINotificationFeedbackGenerator().notificationOccurred(.success)
-        onCode(code.value)
+        onCode(code)
     }
     func dataScanner(_ dataScanner: DataScannerViewController, didAdd addedItems: [RecognizedItem], allItems: [RecognizedItem]) {
         for item in addedItems { if case .barcode(let barcode) = item, let value = barcode.payloadStringValue { found(value) } }

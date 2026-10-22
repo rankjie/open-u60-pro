@@ -146,6 +146,7 @@ struct ATTerminalView: View {
             }
         }
         .navigationTitle("AT Terminal")
+        .keyboardDismissal()
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await viewModel.checkPort()

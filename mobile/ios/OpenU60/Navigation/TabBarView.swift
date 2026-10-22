@@ -1,30 +1,25 @@
 import SwiftUI
 
 struct TabBarView: View {
-    let client: AgentClient
-    let authManager: AuthManager
+    let model: AppModel
+    private var client: AgentClient { model.client }
+    private var authManager: AuthManager { model.auth }
     @AppStorage("poll_interval") private var pollInterval: Double = 2.0
     @Environment(\.scenePhase) private var scenePhase
     @Environment(SMSNotificationManager.self) private var notifications
+    @Environment(RemoteCallingManager.self) private var calling
 
     private enum Tab: Hashable { case dashboard, calls, sms, settings }
     @State private var selectedTab: Tab = .dashboard
+    @State private var callPath: [CallDestination] = []
 
-    @State private var dashboardVM: DashboardViewModel
-    @State private var smsVM: SMSViewModel
-    @State private var usbVM: USBConnectionViewModel
+    private var dashboardVM: DashboardViewModel { model.device.dashboard }
+    private var smsVM: SMSViewModel { model.device.messages }
+    private var usbVM: USBConnectionViewModel { model.device.usb }
 
     private struct DashboardPollKey: Equatable {
         let interval: Double
         let active: Bool
-    }
-
-    init(client: AgentClient, authManager: AuthManager) {
-        self.client = client
-        self.authManager = authManager
-        _dashboardVM = State(initialValue: DashboardViewModel(client: client, authManager: authManager))
-        _smsVM = State(initialValue: SMSViewModel(client: client, authManager: authManager))
-        _usbVM = State(initialValue: USBConnectionViewModel(client: client, authManager: authManager))
     }
 
     var body: some View {
@@ -36,15 +31,20 @@ struct TabBarView: View {
                 }
                 .tag(Tab.dashboard)
 
-            NavigationStack {
+            NavigationStack(path: $callPath) {
                 RemoteCallingView(localClient: client, title: "Calls")
+                    .navigationDestination(for: CallDestination.self) { destination in
+                        switch destination {
+                        case .history: CallHistoryView()
+                        }
+                    }
             }
                 .tabItem { Label("Calls", systemImage: "phone.fill") }
                 .tag(Tab.calls)
 
             SMSListView(viewModel: smsVM, client: client, authManager: authManager)
                 .tabItem {
-                    Label("SMS", systemImage: "message")
+                    Label("Messages", systemImage: "message")
                 }
                 .tag(Tab.sms)
 
@@ -63,6 +63,11 @@ struct TabBarView: View {
         }
         .onChange(of: notifications.openRevision, initial: true) { _, revision in
             if revision > 0 { selectedTab = .sms }
+        }
+        .onChange(of: calling.callPresentationRequest, initial: true) { _, request in
+            guard let request, request.callID == calling.call?.callId else { return }
+            callPath.removeAll()
+            selectedTab = .calls
         }
         .onChange(of: isForeground, initial: true) { _, foreground in
             if foreground {

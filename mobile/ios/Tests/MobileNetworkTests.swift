@@ -4,6 +4,15 @@ import Foundation
 @main
 struct MobileNetworkTests {
     static func main() {
+        var connection = MobileNetworkConfig.empty
+        for state in ["connected", "ipv4_connected", "ipv6_connected", "ipv4_ipv6_connected"] {
+            connection.connectStatus = state
+            precondition(connection.isConnected, "An established cellular connection must be shown as connected")
+        }
+        for state in ["", "disconnected", "disconnecting", "not_connected"] {
+            connection.connectStatus = state
+            precondition(!connection.isConnected, "Disconnected must not match the connected substring")
+        }
         // A roaming eSIM profile with roaming off: the router reports mobile data off.
         var blocked = MobileNetworkConfig.empty
         blocked.roamEnable = 0
@@ -20,6 +29,6 @@ struct MobileNetworkTests {
         roaming.dataEnabled = 1
         precondition(roaming.connectionBody(connectMode: 1, roaming: false)["enable"] as? Int == 1)
         precondition(roaming.connectionBody(connectMode: 1, roaming: false)["roam_enable"] as? Int == 0)
-        print("MobileNetworkTests: roaming and mobile data settings passed")
+        print("MobileNetworkTests: cellular connection states, roaming and mobile data settings passed")
     }
 }

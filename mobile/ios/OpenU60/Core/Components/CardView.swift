@@ -12,6 +12,47 @@ struct CardView<Content: View>: View {
     var body: some View {
         content
             .padding(padding)
-            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
     }
+}
+
+struct SettingsRow: View {
+    static let insets = EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16)
+    let title: String
+    let icon: String
+    var color: Color = .blue
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.white)
+                .frame(width: 29, height: 29)
+                .background(color, in: RoundedRectangle(cornerRadius: 7))
+                .accessibilityHidden(true)
+            Text(title)
+                .foregroundStyle(.primary)
+        }
+    }
+}
+
+/// Build a destination's model only when pushed, and retain it across navigation updates.
+struct PushedModelHost<Model, Content: View>: View {
+    @State private var box: LazyModelBox<Model>
+    private let content: (Model) -> Content
+
+    init(_ model: @autoclosure @escaping () -> Model, @ViewBuilder content: @escaping (Model) -> Content) {
+        _box = State(wrappedValue: LazyModelBox(model))
+        self.content = content
+    }
+
+    var body: some View { content(box.model) }
+}
+
+@MainActor
+private final class LazyModelBox<Model> {
+    lazy var model: Model = build()
+    private let build: () -> Model
+
+    init(_ build: @escaping () -> Model) { self.build = build }
 }

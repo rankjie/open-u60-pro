@@ -129,17 +129,20 @@ impl Media {
         }));
         let (inbound_sender, inbound) = mpsc::channel(8);
         let receiver_failure = failure.clone();
-        peer.on_track(Box::new(move |track, _, _| {
+        peer.on_track(Box::new(move |track, receiver, _| {
             let tx = inbound_sender.clone();
             let failure = receiver_failure.clone();
             Box::pin(async move {
-                let codec = track.codec();
-                if !codec
-                    .capability
-                    .mime_type
-                    .eq_ignore_ascii_case("audio/PCMU")
-                    || codec.capability.clock_rate != 8000
-                {
+                // webrtc 0.17 leaves TrackRemote.codec empty for initial PT 0.
+                // Resolve the wire payload through the negotiated receiver map.
+                let parameters = receiver.get_parameters().await;
+                let payload_type = track.payload_type();
+                let supported = parameters.codecs.iter().any(|codec| {
+                    codec.payload_type == payload_type
+                        && codec.capability.mime_type.eq_ignore_ascii_case("audio/PCMU")
+                        && codec.capability.clock_rate == 8000
+                });
+                if !supported {
                     let _ = failure.send((generation, "unsupported_remote_codec")).await;
                     return;
                 }
@@ -149,6 +152,10 @@ impl Media {
                         Ok((packet, _)) => packet,
                         Err(_) => break,
                     };
+                    if packet.header.payload_type != payload_type {
+                        let _ = failure.send((generation, "unsupported_remote_codec")).await;
+                        break;
+                    }
                     if let Some(previous) = sequence {
                         let distance = packet.header.sequence_number.wrapping_sub(previous);
                         if distance == 0 || distance > 32767 {
@@ -156,7 +163,13 @@ impl Media {
                         }
                     }
                     sequence = Some(packet.header.sequence_number);
-                    if packet.payload.is_empty() || packet.payload.len() > 1600 {
+                    // WebRTC sends padding/keepalive probes on the audio SSRC.
+                    // The RTP reader strips padding; an empty payload has no PCM.
+                    if packet.payload.is_empty() {
+                        continue;
+                    }
+                    if packet.payload.len() > 1600 {
+                        eprintln!("[calling-media] oversized PCMU payload: {} bytes",packet.payload.len());
                         let _ = failure.send((generation, "invalid_rtp_audio")).await;
                         break;
                     }
@@ -243,11 +256,15 @@ impl Media {
     pub fn audio_ready(&self) -> bool {
         *self.audio_ready.borrow()
     }
-    pub fn start_audio(&mut self) -> Result<(), &'static str> {
+    pub fn start_audio(&mut self, recordings: &Arc<super::recordings::Recordings>) -> Result<(), &'static str> {
         if self.audio.is_some() {
             return Ok(());
         }
         let mut bridge = AudioBridge::start()?;
+        let recorder=match recordings.start(self.call_id) {
+            Ok(sink)=>Some(sink),
+            Err(error)=>{eprintln!("[recordings] recording unavailable: {error}");None}
+        };
         let mut inbound = self.inbound.take().ok_or("audio_already_started")?;
         while inbound.try_recv().is_ok() {}
         let track = self.audio_track();
@@ -268,6 +285,7 @@ impl Media {
                         count=bridge.socket.recv(&mut packet)=>{
                             let count=count.map_err(|_| "audio_socket_receive")?; let (kind,pcm)=audio::parse(&packet[..count])?;
                             if kind!=2 || pcm.is_empty() || pcm.len()%2!=0 {return Err("invalid_capture_audio");}
+                            if let Some(recorder)=&recorder {recorder.push(0,pcm);}
                             last_capture=Instant::now(); downlink.extend_from_slice(pcm);
                             while downlink.len()>=320 {
                                 let data=downlink.drain(..320).collect::<Vec<_>>().as_chunks::<2>().0.iter().map(|s|codec::encode(i16::from_le_bytes([s[0],s[1]]))).collect::<Vec<_>>();
@@ -277,6 +295,7 @@ impl Media {
                         }
                         pcm=inbound.recv()=>{
                             let pcm=pcm.ok_or("remote_audio_closed")?;last_received=Instant::now();uplink.extend_from_slice(&pcm);
+                            if let Some(recorder)=&recorder {recorder.push(1,&pcm);}
                             while uplink.len()>=320 {
                                 let frame=audio::frame(3,&uplink.drain(..320).collect::<Vec<_>>())?;
                                 bridge.socket.send(&frame).await.map_err(|_| "audio_socket_send")?;
@@ -329,6 +348,78 @@ impl Drop for Media {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn production_receiver_decodes_pcmu_payload_zero_after_padding() {
+        use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
+        use webrtc::track::track_local::TrackLocalWriter;
+        use webrtc::rtp::{packet::Packet, header::Header};
+        let (signals, _signals) = mpsc::channel(64);
+        let (failure, mut errors) = mpsc::channel(8);
+        let mut media = Media::new(Uuid::new_v4(), vec![], signals, failure)
+            .await
+            .unwrap();
+        let remote = peer(vec![]).await.unwrap();
+        let microphone = Arc::new(TrackLocalStaticRTP::new(
+            capability(),
+            "microphone".into(),
+            "test".into(),
+        ));
+        remote
+            .add_track(microphone.clone() as Arc<dyn TrackLocal + Send + Sync>)
+            .await
+            .unwrap();
+        let mut gathered = media.peer.gathering_complete_promise().await;
+        media
+            .peer
+            .set_local_description(media.peer.create_offer(None).await.unwrap())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), gathered.recv())
+            .await
+            .unwrap();
+        remote
+            .set_remote_description(media.peer.local_description().await.unwrap())
+            .await
+            .unwrap();
+        let mut gathered = remote.gathering_complete_promise().await;
+        remote
+            .set_local_description(remote.create_answer(None).await.unwrap())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), gathered.recv())
+            .await
+            .unwrap();
+        media
+            .peer
+            .set_remote_description(remote.local_description().await.unwrap())
+            .await
+            .unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut tick = tokio::time::interval(Duration::from_millis(20));
+            let mut sequence = 0u16;
+            loop {
+                tokio::select! {
+                    packet = media.inbound.as_mut().unwrap().recv() => break packet.expect("production PCM receiver closed"),
+                    failure = errors.recv() => panic!("production media rejected negotiated PCMU: {failure:?}"),
+                    _ = tick.tick() => if remote.connection_state() == RTCPeerConnectionState::Connected {
+                        microphone.write_rtp(&Packet {
+                            header: Header { version:2, padding:sequence==0, payload_type:0, sequence_number:sequence, timestamp:u32::from(sequence)*160, ..Default::default() },
+                            payload: if sequence==0 {vec![]} else {vec![codec::encode(1000);160]}.into(),
+                        }).await.unwrap();
+                        sequence=sequence.wrapping_add(1);
+                    }
+                }
+            }
+        }).await.unwrap();
+        assert_eq!(received.len(), 320);
+        assert!(received
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .all(|sample| i16::from_le_bytes(*sample) == codec::decode(codec::encode(1000))));
+        media.close().await;
+        remote.close().await.unwrap();
+    }
     #[tokio::test]
     async fn real_webrtc_negotiation_delivers_g711_audio() {
         exercise(vec![], false).await;

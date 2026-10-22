@@ -4,11 +4,10 @@ struct ToolsListView: View {
     let client: AgentClient
     let authManager: AuthManager
 
-    enum Category { case automation, diagnostics, advanced }
+    enum Category { case diagnostics, advanced }
     let category: Category
     private var title: String {
         switch category {
-        case .automation: "Automation"
         case .diagnostics: "Network diagnostics"
         case .advanced: "Advanced"
         }
@@ -17,17 +16,12 @@ struct ToolsListView: View {
     // MARK: - Routes
 
     private enum Route: Hashable {
-        case scheduler
-        case smsForwarding
         case speedTest
         case lanSpeedTest
         case enableADB
         case atTerminal
         case modemCalls
         case config
-        case ttlSettings
-        case enableSSH
-        case deviceExplorer
     }
 
     // MARK: - Body
@@ -35,64 +29,39 @@ struct ToolsListView: View {
     var body: some View {
         Group {
             List {
-                if category == .automation {
-                    Section("Automation") {
-                        NavigationLink { destination(for: .scheduler) } label: {
-                            Label("Automations", systemImage: "clock.arrow.2.circlepath")
-                        }
-                        NavigationLink { destination(for: .smsForwarding) } label: {
-                            Label("SMS Forwarding", systemImage: "envelope.arrow.triangle.branch")
-                        }
-                    }
-
-                }
                 if category == .diagnostics {
                     Section("Network tests") {
                         NavigationLink { destination(for: .speedTest) } label: {
-                            Label("Speed Test", systemImage: "gauge.with.needle")
-                        }
+                            SettingsRow(title: "Internet speed test", icon: "gauge.with.needle")
+                        }.listRowInsets(SettingsRow.insets)
 
                         NavigationLink { destination(for: .lanSpeedTest) } label: {
-                            Label("LAN Speed Test", systemImage: "wifi")
-                        }
-
+                            SettingsRow(title: "Local Wi-Fi speed test", icon: "wifi")
+                        }.listRowInsets(SettingsRow.insets)
                     }
-
                 }
                 if category == .advanced {
                     Section("Device access") {
                         NavigationLink { destination(for: .enableADB) } label: {
-                            Label("Enable ADB", systemImage: "cable.connector.horizontal")
-                        }
+                            SettingsRow(title: "USB debugging", icon: "cable.connector.horizontal", color: .gray)
+                        }.listRowInsets(SettingsRow.insets)
                         NavigationLink { destination(for: .atTerminal) } label: {
-                            Label("AT Terminal", systemImage: "terminal.fill")
-                        }
+                            SettingsRow(title: "AT terminal", icon: "terminal.fill", color: .gray)
+                        }.listRowInsets(SettingsRow.insets)
                         NavigationLink { destination(for: .modemCalls) } label: {
-                            Label("Modem call controls", systemImage: "phone")
-                        }
+                            SettingsRow(title: "Modem diagnostics", icon: "phone.connection.fill", color: .gray)
+                        }.listRowInsets(SettingsRow.insets)
                     }
                     Section("Configuration") {
                         NavigationLink { destination(for: .config) } label: {
-                            Label("Config Decrypt/Encrypt", systemImage: "doc.badge.gearshape")
-                        }
-                    }
-
-                    Section("Shell Access Required") {
-                        NavigationLink { destination(for: .ttlSettings) } label: {
-                            Label("TTL Settings", systemImage: "number")
-                        }
-
-                        NavigationLink { destination(for: .enableSSH) } label: {
-                            Label("Enable SSH", systemImage: "terminal")
-                        }
-
-                        NavigationLink { destination(for: .deviceExplorer) } label: {
-                            Label("Device Explorer", systemImage: "folder")
-                        }
+                            SettingsRow(title: "Configuration files", icon: "doc.badge.gearshape", color: .gray)
+                        }.listRowInsets(SettingsRow.insets)
                     }
                 }
             }
+            .listStyle(.insetGrouped)
             .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 
@@ -101,14 +70,6 @@ struct ToolsListView: View {
     @ViewBuilder
     private func destination(for route: Route) -> some View {
         switch route {
-        case .scheduler:
-            PushedModelHost(SchedulerViewModel(client: client, authManager: authManager)) {
-                SchedulerView(viewModel: $0)
-            }
-        case .smsForwarding:
-            PushedModelHost(SMSForwardViewModel(client: client, authManager: authManager)) {
-                SMSForwardConfigView(viewModel: $0)
-            }
         case .speedTest:
             PushedModelHost(SpeedTestViewModel(client: client, authManager: authManager)) {
                 SpeedTestView(viewModel: $0)
@@ -129,51 +90,6 @@ struct ToolsListView: View {
             PushedModelHost(CallViewModel(client: client, authManager: authManager)) {
                 CallView(viewModel: $0).navigationTitle("Modem controls")
             }
-        case .ttlSettings:
-            PlaceholderView(
-                title: "TTL Settings", icon: "number",
-                description: "Set TTL override via iptables. Requires shell access.")
-        case .enableSSH:
-            PlaceholderView(
-                title: "Enable SSH", icon: "terminal",
-                description: "Install and start dropbear SSH server. Requires ADB USB connection.")
-        case .deviceExplorer:
-            PlaceholderView(title: "Device Explorer", icon: "folder", description: "Browse filesystem and collect device info. Requires ADB USB connection.")
         }
-    }
-}
-
-// MARK: - Pushed model host
-
-/// Holds a pushed screen's view model in `@State` so the model is built once, when the
-/// route is actually pushed, and survives re-evaluation of the navigation destination.
-///
-/// Construction has to happen inside the box: `State.init(wrappedValue:)` is not itself an
-/// autoclosure, so building the model in `init` would build and discard one on every
-/// re-evaluation of the `.navigationDestination` closure.
-private struct PushedModelHost<Model, Content: View>: View {
-    @State private var box: LazyModelBox<Model>
-    private let content: (Model) -> Content
-
-    init(_ model: @autoclosure @escaping () -> Model, @ViewBuilder content: @escaping (Model) -> Content) {
-        _box = State(wrappedValue: LazyModelBox(model))
-        self.content = content
-    }
-
-    var body: some View {
-        content(box.model)
-    }
-}
-
-/// Defers building a pushed screen's view model until the first time it is read, which only
-/// happens for the box `@State` actually keeps.
-@MainActor
-private final class LazyModelBox<Model> {
-    lazy var model: Model = build()
-
-    private let build: () -> Model
-
-    init(_ build: @escaping () -> Model) {
-        self.build = build
     }
 }

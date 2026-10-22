@@ -19,14 +19,18 @@ mod management;
 mod modem_ext;
 mod network_ext;
 mod oos_policy;
+mod power;
+mod powerbank_reserve;
 mod qrtr_uim;
 mod router;
 mod remote_calling;
 mod scheduler;
 mod server;
 mod sim;
+mod cellular_line;
 mod sim_identity;
 mod sms;
+mod sms_history;
 mod sms_forward;
 mod sms_notifications;
 mod speedtest;
@@ -37,6 +41,8 @@ mod telephony;
 mod ubus;
 mod usb;
 mod wifi;
+mod wifi_uplink;
+mod wifi_time;
 
 use std::sync::Arc;
 
@@ -51,6 +57,10 @@ const DEFAULT_THREADS: usize = 4;
 fn main() {
     // Diagnostics: `zte-agent esim-native chip info` runs one native eSIM command and exits.
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("wifi-status") {
+        if let Err(error) = wifi_uplink::ui_status_cli() { eprintln!("{error}"); std::process::exit(1); }
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("esim-native") {
         std::process::exit(esim_native::cli(&args[2..]));
     }
@@ -71,7 +81,7 @@ fn main() {
     // Event bus: single `ubus listen` process dispatches to subscribers
     let event_bus = Arc::new(EventBus::new());
     let sms_rx = event_bus.subscribe("zwrt_wms_status_event");
-    let sms_notification_rx = event_bus.subscribe("zwrt_wms_status_event");
+    let sms_notification_rx = event_bus.subscribe_many(&["zwrt_wms_status_event", power::RESUMED, sim_identity::EVENT]);
     let charger_rx = event_bus.subscribe("BSP_CHARGER_EVENT");
     let service_rx = event_bus.subscribe("zwrt_servicestatus");
     let wan_status_rx = event_bus.subscribe("router_event_wan_connect_status");
@@ -91,18 +101,25 @@ fn main() {
         .collect();
     let oos_service_rx = event_bus.subscribe("zwrt_servicestatus");
     let connwd_wan_rx = event_bus.subscribe("router_event_wan_connect_status");
-    // The firmware restarts Wi-Fi on every wake from sleep, which re-runs the
-    // zte_post_wifi.sh script that can spin forever; check 150 s after each.
-    let power_rx = event_bus.subscribe("zwrt_device_power_state_event");
+    // Both the firmware event and a detected suspend wake the same Wi-Fi owner.
+    let power_rx = event_bus.subscribe(power::RESUMED);
+    let recovery_rx = event_bus.subscribe("zwrt_device_power_state_event");
+    let reserve_rx = event_bus.subscribe_many(&["BSP_POWERBANK_EVENT", "BSP_CHARGER_EVENT",
+        power::RESUMED, powerbank_reserve::CHANGED]);
+    let wake_recovery = Arc::new(power::Recovery::new());
     let identity_events = sim_identity::FIRMWARE_EVENTS
         .iter()
         .map(|&name| (name, event_bus.subscribe(name)))
         .collect();
     event_bus.start();
+    wake_recovery.start(recovery_rx, Arc::clone(&event_bus));
+    state.powerbank_reserve.start(Arc::clone(&event_bus), reserve_rx, Arc::clone(&state.cache));
+    let wake_wifi = state.wifi_uplink.clone();
     system::spawn_named("wifi-power-watch", move || {
         for event in power_rx.iter() {
-            if event["action"].as_str() == Some("mode_power_on") {
+            if event["resumed"] == true {
                 system::arm_post_wifi_watchdog(std::time::Duration::from_secs(150));
+                if let Err(error) = wake_wifi.resume() { eprintln!("[wifi-uplink] {error}"); }
             }
         }
     });
@@ -111,9 +128,11 @@ fn main() {
     state.sim_identity.start(Arc::clone(&event_bus), Arc::clone(&state.cache), identity_events);
 
     state.live_activity.start(Arc::clone(&state), apns_events);
-    state.remote_calling.start(Arc::clone(&state));
-    state.sms_notifications.start(sms_notification_rx);
+    state.remote_calling.start(Arc::clone(&state), Arc::clone(&wake_recovery));
+    state.sms_notifications.start(sms_notification_rx, wake_recovery, Arc::clone(&state));
     state.doh.auto_start();
+    state.wifi_uplink.attach_connection(state.remote_calling.clone());
+    state.wifi_uplink.start();
     state.scheduler.start(Arc::clone(&state));
     state
         .charge_limit

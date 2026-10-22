@@ -4,6 +4,7 @@ struct SIMInfo: Equatable {
     var iccid: String = ""
     var imsi: String = ""
     var msisdn: String = ""
+    var phoneNumberIsManual: Bool = false
     var spn: String = ""
     var mcc: String = ""
     var mnc: String = ""
@@ -17,6 +18,39 @@ struct SIMInfo: Equatable {
     var modemMainState: String = ""
 
     static let empty = SIMInfo()
+
+    var canEditPhoneNumber: Bool {
+        let state = simStatus.lowercased()
+        return !iccid.isEmpty && state.contains("ready") && !state.contains("not")
+    }
+}
+
+enum SIMPhoneNumber {
+    static func normalized(_ input: String) -> String? {
+        var number = ""
+        for character in input {
+            switch character {
+            case "0"..."9": number.append(character)
+            case "+" where number.isEmpty: number.append(character)
+            case " ", "-", "(", ")": break
+            default: return nil
+            }
+        }
+        let digits = number.hasPrefix("+") ? number.dropFirst() : number[...]
+        return number.isEmpty || (3...15).contains(digits.count) ? number : nil
+    }
+}
+
+enum SIMPhoneNumberError: LocalizedError {
+    case invalidNumber
+    case simChanged
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidNumber: return "Enter a phone number with 3 to 15 digits, optionally starting with +."
+        case .simChanged: return "SIM changed or is not ready. Refresh and try again."
+        }
+    }
 }
 
 struct SIMLockInfo: Equatable {
@@ -31,6 +65,7 @@ enum SIMParser {
         info.iccid = data["sim_iccid"] as? String ?? ""
         info.imsi = data["sim_imsi"] as? String ?? ""
         info.msisdn = data["msisdn"] as? String ?? ""
+        info.phoneNumberIsManual = data["msisdn_source"] as? String == "manual"
         info.mcc = data["mdm_mcc"] as? String ?? ""
         info.mnc = data["mdm_mnc"] as? String ?? ""
         info.simStatus = data["sim_states"] as? String ?? ""

@@ -28,6 +28,7 @@ struct USBModeView: View {
             }
 
             Section {
+                NavigationLink("Power reserve") { USBPowerReserveSettings(viewModel: viewModel) }
                 if viewModel.powerStateUnknown {
                     Button("Turn off phone charging") { Task { await viewModel.disablePowerbank() } }
                         .disabled(viewModel.isLoading)

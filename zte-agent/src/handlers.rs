@@ -12,6 +12,10 @@ use crate::system::{self, CpuTracker, ProcessTracker, SpeedTracker};
 use crate::ubus;
 
 pub struct AppState {
+    pub powerbank_reserve: Arc<crate::powerbank_reserve::PowerbankReserve>,
+    pub sim_phone_numbers: crate::sim::SimPhoneNumbers,
+    pub sms_history: Arc<crate::sms_history::SMSHistory>,
+    pub wifi_uplink: Arc<crate::wifi_uplink::WifiUplink>,
     pub management: crate::management::Management,
     pub sms_notifications: Arc<crate::sms_notifications::SMSNotifications>,
     pub remote_calling: Arc<crate::remote_calling::RemoteCalling>,
@@ -45,6 +49,10 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
+            powerbank_reserve: Arc::new(crate::powerbank_reserve::PowerbankReserve::new()),
+            sim_phone_numbers: crate::sim::SimPhoneNumbers::new(),
+            sms_history: Arc::new(crate::sms_history::SMSHistory::new()),
+            wifi_uplink: Arc::new(crate::wifi_uplink::WifiUplink::new()),
             management: crate::management::Management::new(),
             sms_notifications: Arc::new(crate::sms_notifications::SMSNotifications::new()),
             remote_calling: Arc::new(crate::remote_calling::RemoteCalling::new()),
@@ -105,10 +113,10 @@ pub fn device(_state: &AppState) -> (u16, Value) {
 /// GET /api/battery
 pub fn battery(_state: &AppState) -> (u16, Value) {
     match system::read_battery() {
-        Some(b) => (200, json!({"ok": true, "data": b})),
-        None => (
+        Ok(b) => (200, json!({"ok": true, "data": b})),
+        Err(error) => (
             503,
-            json!({"ok": false, "error": "battery info not available"}),
+            json!({"ok": false, "error": format!("battery info not available: {error}")}),
         ),
     }
 }

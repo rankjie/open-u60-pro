@@ -39,6 +39,7 @@ struct RouterESimView: View {
         }
         .background(Color(.systemGroupedBackground))
         .navigationTitle("eSIM Profiles")
+        .keyboardDismissal()
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await viewModel.refresh() }
         .toolbar {
@@ -389,6 +390,7 @@ private struct ESimRenameSheet: View {
                 }
             }
             .navigationTitle("Rename profile").navigationBarTitleDisplayMode(.inline)
+            .keyboardDismissal()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) { Button("Save", action: submit).disabled(!valid || blocked || trimmed == profile.nickname) }

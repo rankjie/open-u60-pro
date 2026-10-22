@@ -23,3 +23,5 @@ tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"]
 futures-util = "0.3"
 webrtc = "=0.17.1"
 uuid = { version = "1", features = ["v4", "serde"] }
+hpke = { version = "=0.13.0", default-features = false, features = ["alloc", "p256"] }
+hmac = "0.12"

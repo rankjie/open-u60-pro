@@ -25,10 +25,11 @@ struct RouterESimAddView: View {
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Add eSIM").navigationBarTitleDisplayMode(.inline)
+            .keyboardDismissal()
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button(viewModel.download.isBusy ? "Close" : "Done") { clearSecrets(); dismiss() } } }
             .sheet(isPresented: $scanner) {
                 NavigationStack {
-                    RouterESimScanner { value in accept(value); scanner = false }
+                    QRCodeScanner(kind: .esim) { value in accept(value); scanner = false }
                         .ignoresSafeArea(edges: .bottom).navigationTitle("Scan eSIM QR code").navigationBarTitleDisplayMode(.inline)
                         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Close") { scanner = false } } }
                 }
@@ -44,7 +45,7 @@ struct RouterESimAddView: View {
                 defer { readingPhoto = false; photo = nil }
                 do {
                     guard let data = try await selection.loadTransferable(type: Data.self) else { throw CocoaError(.fileReadCorruptFile) }
-                    let values = try await RouterESimScanner.codes(in: data)
+                    let values = try await QRCodeScanner.codes(in: data)
                     guard !Task.isCancelled else { return }
                     let valid = Array(Set(values.filter { RouterESimActivationCode.parse($0) != nil }))
                     if valid.count == 1 { accept(valid[0]); UINotificationFeedbackGenerator().notificationOccurred(.success) }

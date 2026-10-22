@@ -6,5 +6,6 @@ trap 'rm -rf "$openu60_work"' EXIT HUP INT TERM
 swiftc -swift-version 5 \
     "$openu60_root/mobile/ios/OpenU60/Core/Networking/AgentError.swift" \
     "$openu60_root/mobile/ios/OpenU60/Core/Networking/AgentTransport.swift" \
+    "$openu60_root/mobile/ios/OpenU60/Core/Networking/PeerFrames.swift" \
     "$openu60_root/mobile/ios/Tests/AgentTransportTests.swift" -o "$openu60_work/tests"
 "$openu60_work/tests"

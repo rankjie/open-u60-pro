@@ -1,0 +1,10 @@
+{
+  "ciphertext" : "2I8Li+O1knvbh2R0EXKGHrau7vMw2tmh1cPGS2VUmOKRyGLWuRxUxajVZLrzgnCv\/xKnPwNSrC\/UspVs9GSkxasJbmkm2nXTPFbxBNB45w==",
+  "enc" : "BG3CFlnVV49huf3RIzLiqR6Khnmndfd5INibVPnUZrxFgRON7PAapgUNX5XetlOmdEZRC0j1fTGi0QpaS2OEKEw=",
+  "phoneToken" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "requestId" : "00000000-0000-4000-8000-000000000002",
+  "routerId" : "00000000-0000-4000-8000-000000000001",
+  "serverTime" : 1800000000,
+  "syntheticPassword" : "synthetic-device-password",
+  "syntheticPrivateKey" : "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+}

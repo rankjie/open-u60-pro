@@ -207,29 +207,208 @@ pub struct BatteryInfo {
     pub voltage_uv: i64,
     pub current_ua: i64,
     pub temperature: i64,
+    pub charge_full_uah: Option<i64>,
+    pub current_avg_ua: Option<i64>,
+    pub usb: UsbPowerInfo,
+    pub telemetry_errors: Vec<String>,
 }
 
-pub fn read_battery() -> Option<BatteryInfo> {
-    let base = "/sys/class/power_supply/battery";
-    let read_str = |name: &str| -> String {
-        fs::read_to_string(format!("{base}/{name}"))
-            .unwrap_or_default()
-            .trim()
-            .to_string()
-    };
-    let read_i64 = |name: &str| -> i64 { read_str(name).parse().unwrap_or(0) };
+#[derive(Default, Serialize)]
+pub struct UsbPowerInfo {
+    pub role: Option<String>,
+    pub online: Option<bool>,
+    pub input_voltage_uv: Option<i64>,
+    pub input_current_ua: Option<i64>,
+    pub output_voltage_mv: Option<i64>,
+    pub output_current_limit_ma: Option<i64>,
+}
 
-    let status = read_str("status");
+pub fn read_battery() -> Result<BatteryInfo, String> {
+    read_battery_at(
+        std::path::Path::new("/sys/class/power_supply"),
+        std::path::Path::new("/sys/class/typec/port0/power_role"),
+    )
+}
+
+fn read_battery_at(base: &std::path::Path, role_path: &std::path::Path) -> Result<BatteryInfo, String> {
+    let required = |name: &str| -> Result<String, String> {
+        fs::read_to_string(base.join("battery").join(name))
+            .map(|v| v.trim().to_owned())
+            .map_err(|e| format!("battery/{name}: {e}"))
+    };
+    let number = |name: &str| -> Result<i64, String> {
+        required(name)?.parse().map_err(|_| format!("battery/{name}: invalid number"))
+    };
+    let status = required("status")?;
     if status.is_empty() {
-        return None;
+        return Err("battery/status: empty status".into());
     }
-    Some(BatteryInfo {
+    let mut errors = Vec::new();
+    let charge_full_uah = optional_power_number(base, "battery/charge_full", &mut errors);
+    // This firmware exports a hardware-smoothed current in mA through its vendor ABI.
+    let current_avg_ua = optional_power_number(base, "battery_zte/current_avg_mbb", &mut errors)
+        .and_then(|v| match v.checked_mul(1000) {
+            Some(value) => Some(value),
+            None => { errors.push("battery_zte/current_avg_mbb: out of range".into()); None }
+        });
+    let mut usb = UsbPowerInfo::default();
+    match fs::read_to_string(role_path) {
+        Ok(text) => match power_role(&text) {
+            Some(role) => usb.role = Some(role.into()),
+            None => errors.push("typec/power_role: invalid role".into()),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(e) => errors.push(format!("typec/power_role: {e}")),
+    }
+    usb.online = optional_power_number(base, "usb/online", &mut errors).and_then(|v| match v {
+        0 => Some(false), 1 => Some(true),
+        _ => { errors.push("usb/online: invalid state".into()); None }
+    });
+    if usb.role.as_deref() == Some("sink") && usb.online == Some(true) {
+        usb.input_voltage_uv = optional_power_number(base, "usb/voltage_now", &mut errors);
+        usb.input_current_ua = optional_power_number(base, "usb/current_now", &mut errors);
+    }
+    if usb.role.as_deref() == Some("source") {
+        match fs::read_to_string(base.join("powerbank_zte/debug")) {
+            Ok(text) => match output_contract(&text) {
+                Ok(Some((mv, ma))) => {
+                    usb.output_voltage_mv = Some(mv);
+                    usb.output_current_limit_ma = Some(ma);
+                }
+                Ok(None) => {},
+                Err(e) => errors.push(e.into()),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Err(e) => errors.push(format!("powerbank_zte/debug: {e}")),
+        }
+    }
+    Ok(BatteryInfo {
         status,
-        capacity: read_i64("capacity"),
-        voltage_uv: read_i64("voltage_now"),
-        current_ua: read_i64("current_now"),
-        temperature: read_i64("temp"),
+        capacity: number("capacity")?,
+        voltage_uv: number("voltage_now")?,
+        current_ua: number("current_now")?,
+        temperature: number("temp")?,
+        charge_full_uah,
+        current_avg_ua,
+        usb,
+        telemetry_errors: errors,
     })
+}
+
+fn optional_power_number(base: &std::path::Path, name: &str, errors: &mut Vec<String>) -> Option<i64> {
+    match fs::read_to_string(base.join(name)) {
+        Ok(text) => match text.trim().parse() {
+            Ok(value) => Some(value),
+            Err(_) => { errors.push(format!("{name}: invalid number")); None }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => { errors.push(format!("{name}: {e}")); None }
+    }
+}
+
+fn power_role(text: &str) -> Option<&str> {
+    let role = text.split_whitespace().find_map(|s| s.strip_prefix('[')?.strip_suffix(']'))
+        .unwrap_or(text.trim());
+    matches!(role, "source" | "sink").then_some(role)
+}
+
+fn output_contract(text: &str) -> Result<Option<(i64, i64)>, &'static str> {
+    let invalid = "powerbank_zte/debug: invalid output contract";
+    let line = text.lines().find_map(|line| line.strip_prefix("request power: ")).ok_or(invalid)?;
+    let mut parts = line.split_whitespace();
+    let mv: i64 = parts.next().and_then(|v| v.strip_suffix("mv"))
+        .and_then(|v| v.parse().ok()).ok_or(invalid)?;
+    let ma: i64 = parts.next().and_then(|v| v.strip_suffix("ma"))
+        .and_then(|v| v.parse().ok()).ok_or(invalid)?;
+    if parts.next().is_some() || mv < 0 || ma < 0 { return Err(invalid); }
+    // Zero voltage is the controller's unnegotiated state, not a measured zero-watt load.
+    Ok((mv > 0 && ma > 0).then_some((mv, ma)))
+}
+
+#[cfg(test)]
+mod battery_tests {
+    use super::*;
+
+    struct Fixture(std::path::PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let fixture = Self(std::env::temp_dir().join(format!("openu60-power-{}", uuid::Uuid::new_v4())));
+            for (path, value) in [("battery/status", "Discharging"), ("battery/capacity", "50"),
+                ("battery/current_now", "-1000000"), ("battery/voltage_now", "4000000"), ("battery/temp", "320")] {
+                fixture.set(path, value);
+            }
+            fixture
+        }
+        fn set(&self, name: &str, value: &str) {
+            let path = self.0.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, value).unwrap();
+        }
+        fn read(&self) -> Result<BatteryInfo, String> { read_battery_at(&self.0, &self.0.join("role")) }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) { fs::remove_dir_all(&self.0).unwrap(); }
+    }
+
+    #[test]
+    fn battery_snapshot_reports_fuel_gauge_and_measured_usb_input() {
+        let fixture = Fixture::new();
+        for (path, value) in [("role", "source [sink]\n"), ("battery/charge_full", "10214000"),
+            ("battery_zte/current_avg_mbb", "-850"), ("usb/online", "1"),
+            ("usb/voltage_now", "5000000"), ("usb/current_now", "356000"),
+            ("powerbank_zte/debug", "request power: 9000mv 2000ma\n")] { fixture.set(path, value); }
+        let battery = fixture.read().unwrap();
+        assert_eq!(battery.charge_full_uah, Some(10214000));
+        assert_eq!(battery.current_avg_ua, Some(-850000));
+        assert_eq!(battery.usb.role.as_deref(), Some("sink"));
+        assert_eq!(battery.usb.input_voltage_uv, Some(5000000));
+        assert_eq!(battery.usb.input_current_ua, Some(356000));
+        assert_eq!(battery.usb.output_current_limit_ma, None);
+        assert!(battery.telemetry_errors.is_empty());
+    }
+
+    #[test]
+    fn reverse_power_exposes_contract_and_never_stale_input_current_as_output() {
+        let fixture = Fixture::new();
+        for (path, value) in [("role", "[source] sink"), ("usb/online", "1"),
+            ("usb/voltage_now", "5000000"), ("usb/current_now", "356000"),
+            ("powerbank_zte/debug", "request power: 9000mv 2000ma\ndetach policy: 1\n")] { fixture.set(path, value); }
+        let battery = fixture.read().unwrap();
+        assert_eq!(battery.usb.output_voltage_mv, Some(9000));
+        assert_eq!(battery.usb.output_current_limit_ma, Some(2000));
+        assert_eq!(battery.usb.input_voltage_uv, None);
+        assert_eq!(battery.usb.input_current_ua, None);
+        assert!(battery.telemetry_errors.is_empty());
+    }
+
+    #[test]
+    fn optional_unavailable_sensors_remain_unknown_and_corrupt_readings_are_reported() {
+        let fixture = Fixture::new();
+        let battery = fixture.read().unwrap();
+        assert_eq!(battery.charge_full_uah, None);
+        assert_eq!(battery.current_avg_ua, None);
+        assert!(battery.telemetry_errors.is_empty());
+        fixture.set("battery/charge_full", "bad");
+        fixture.set("battery_zte/current_avg_mbb", "9223372036854775807");
+        let battery = fixture.read().unwrap();
+        assert_eq!(battery.charge_full_uah, None);
+        assert_eq!(battery.current_avg_ua, None);
+        assert_eq!(battery.telemetry_errors.len(), 2);
+        fixture.set("battery/current_now", "bad");
+        assert!(fixture.read().err().unwrap().contains("battery/current_now: invalid number"));
+    }
+
+    #[test]
+    fn usb_contract_distinguishes_no_negotiation_from_malformed_telemetry() {
+        assert_eq!(output_contract("request power: 0mv 500ma\n").unwrap(), None);
+        assert_eq!(output_contract("request power: 5000mv 3000ma\n").unwrap(), Some((5000, 3000)));
+        for text in ["", "request power: -5mv 500ma", "request power: 5000mv unknown", "request power: 5mv 2ma extra"] {
+            assert!(output_contract(text).is_err());
+        }
+        assert_eq!(power_role("[source] sink"), Some("source"));
+        assert_eq!(power_role("sink\n"), Some("sink"));
+        assert_eq!(power_role("unknown"), None);
+    }
 }
 
 #[derive(Serialize)]

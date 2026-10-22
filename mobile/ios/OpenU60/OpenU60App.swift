@@ -3,41 +3,24 @@ import SwiftUI
 @main
 struct OpenU60App: App {
     @UIApplicationDelegateAdaptor(OpenU60Delegate.self) private var appDelegate
-    @State private var smsNotifications = SMSNotificationManager.shared
-    @State private var remoteCalling: RemoteCallingManager
+    @State private var model = AppModel()
+    private var smsNotifications: SMSNotificationManager { model.notifications }
+    private var remoteCalling: RemoteCallingManager { model.calling }
+    private var recordings: CallRecordingLibrary { model.device.recordings }
+    private var authManager: AuthManager { model.auth }
+    private var signalActivity: SignalActivityManager { model.signalActivity }
+    private var client: AgentClient { model.client }
     @State private var showRemoteCalling = false
 #if DEBUG && OPENU60_NATIVE_CALLKIT_PROBE
     @State private var showCallingProbe = Foundation.ProcessInfo.processInfo.arguments.contains("--native-callkit-probe")
 #endif
-    @State private var signalActivity: SignalActivityManager
     @Environment(\.scenePhase) private var scenePhase
-    @State private var authManager: AuthManager
     @State private var isAttemptingAutoLogin = true
     @AppStorage("gateway_ip") private var gatewayIP: String = "192.168.0.1"
     @AppStorage("dark_mode_override") private var darkModeOverride: Int = 0
 
-    private let client: AgentClient
 
     init() {
-        let savedIP = UserDefaults.standard.string(forKey: "gateway_ip") ?? "192.168.0.1"
-        let agentClient = AgentClient(baseURL: "http://\(savedIP):9090")
-        let calling = RemoteCallingManager()
-        SMSNotificationManager.shared.access = { [weak calling] in calling?.managementAccess }
-        calling.onSMSReceived = { eventID, routerID, messageID in
-            SMSNotificationManager.shared.receive(eventID:eventID,routerID:routerID,messageID:messageID)
-        }
-        let auth = AuthManager(client: agentClient)
-        agentClient.relayAccess = { [weak calling] in calling?.managementAccess }
-        calling.localCommandDelivery = { [weak agentClient] command, routerID in
-            guard let agentClient else { throw CallingError.disconnected }
-            return try await agentClient.deliverLocalCall(command, routerID: routerID)
-        }
-        auth.hasRemoteAccess = { [weak calling] in calling?.isPaired == true }
-        _remoteCalling = State(initialValue: calling)
-        self.client = agentClient
-        _signalActivity = State(initialValue: SignalActivityManager(client: agentClient))
-        _authManager = State(initialValue: auth)
-
         let navAppearance = UINavigationBarAppearance()
         navAppearance.configureWithTransparentBackground()
         UINavigationBar.appearance().standardAppearance = navAppearance
@@ -50,22 +33,43 @@ struct OpenU60App: App {
         UITabBar.appearance().scrollEdgeAppearance = tabAppearance
     }
 
+    private struct SessionKey: Equatable {
+        let router: UUID?
+        let address: String
+        let active: Bool
+        let authenticated: Bool
+    }
+
     var body: some Scene {
         WindowGroup {
             rootView
+                .scrollDismissesKeyboard(.interactively)
 #if DEBUG && OPENU60_NATIVE_CALLKIT_PROBE
                 .sheet(isPresented: $showCallingProbe) { NativeCallKitProbeView(manager: remoteCalling) }
 #endif
+                .environment(model)
                 .environment(signalActivity)
                 .environment(remoteCalling)
+                .environment(recordings)
                 .environment(smsNotifications)
-                .task(id: remoteCalling.isPaired) { await smsNotifications.refresh(requestPermission:true) }
+                .onChange(of: remoteCalling.managementAccess?.routerID, initial: true) { _, _ in model.selectDevice() }
+                .task(id: SessionKey(router: remoteCalling.managementAccess?.routerID,
+                                     address: client.baseURL, active: scenePhase == .active,
+                                     authenticated: authManager.isAuthenticated)) {
+                    if scenePhase == .active { await model.run() }
+                }
+                .task(id: remoteCalling.pairingRevision) {
+                    await smsNotifications.refresh(requestPermission:true)
+                }
                 .task(id: authManager.isAuthenticated) {
                     if authManager.isAuthenticated { await signalActivity.resume() }
                     else if signalActivity.activity != nil { await signalActivity.stop() }
                 }
                 .onChange(of: scenePhase) { _, phase in
-                    if phase == .active { remoteCalling.foreground() }
+                    if phase == .active {
+                        remoteCalling.foreground()
+                        remoteCalling.requestCallPresentation()
+                    }
                     if phase == .active { Task { await smsNotifications.refresh() } }
                     if phase == .active && authManager.isAuthenticated {
                         Task { await signalActivity.resume() }
@@ -85,7 +89,7 @@ struct OpenU60App: App {
     @ViewBuilder
     private var rootView: some View {
         if authManager.isAuthenticated {
-            TabBarView(client: client, authManager: authManager)
+            TabBarView(model: model).id(model.device.id)
         } else if isAttemptingAutoLogin {
             VStack(spacing: 16) {
                 Image(systemName: "wifi.router.fill")
@@ -106,11 +110,11 @@ struct OpenU60App: App {
         } else {
             LoginView(authManager: authManager)
                 .safeAreaInset(edge: .bottom) {
-                    Button("Remote calling") { showRemoteCalling = true }.padding()
+                    Button("Connect with device string") { showRemoteCalling = true }.padding()
                 }
                 .sheet(isPresented: $showRemoteCalling) {
                     NavigationStack {
-                        RemoteCallingView(localClient: nil).environment(remoteCalling)
+                        DeviceConnectView().environment(remoteCalling)
                             .toolbar {
                                 ToolbarItem(placement: .cancellationAction) {
                                     Button("Close") { showRemoteCalling = false }

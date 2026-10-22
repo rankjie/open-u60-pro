@@ -112,6 +112,7 @@ struct DNSSettingsView: View {
             }
         }
         .navigationTitle("DNS Settings")
+        .keyboardDismissal()
         .refreshable { await viewModel.refresh() }
         .overlay {
             if viewModel.isLoading {

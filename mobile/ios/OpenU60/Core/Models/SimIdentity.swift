@@ -10,6 +10,22 @@ import Foundation
 struct SimIdentityTracker {
     private var last: (instance: UInt64, epoch: UInt64, phase: String)?
 
+    /// An older in-flight SIM read must not restore the card that a newer stamp invalidated.
+    func isCurrent(_ data: [String: Any]) -> Bool {
+        guard let last,
+              let instance = (data["agent_instance"] as? NSNumber)?.uint64Value,
+              let epoch = (data["sim_epoch"] as? NSNumber)?.uint64Value,
+              let phase = data["sim_phase"] as? String else { return true }
+        return instance == last.instance && epoch == last.epoch && phase == last.phase
+    }
+
+    func isSameSIM(_ data: [String: Any]?) -> Bool {
+        guard let last, let data,
+              let instance = (data["agent_instance"] as? NSNumber)?.uint64Value,
+              let epoch = (data["sim_epoch"] as? NSNumber)?.uint64Value else { return true }
+        return instance == last.instance && epoch == last.epoch
+    }
+
     /// Records one response and returns true when it shows a new identity or phase. The first
     /// sighting only seeds; an epoch below the last one from the same agent run is a reply that
     /// arrived late and is ignored. `agent_instance` is compared for equality only: it is the

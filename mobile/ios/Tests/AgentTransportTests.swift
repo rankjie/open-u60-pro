@@ -114,6 +114,59 @@ private actor RouterFixture {
             } catch AgentError.remoteUnauthorized { precondition(mode == .unauthorized) }
               catch AgentError.decodingError { precondition(mode == .malformed) }
         }
-        print("Agent transport: verified LAN preference, clock domains, relay fallback, stable write IDs, explicit failures, revocation and concurrency passed")
+        for outcome in ["local", "p2p", "unavailable", "lost", "failure", "cancelled"] {
+            let fixture = RouterFixture(router:router, mode:outcome == "local" ? .local : .offline)
+            let transport = AgentTransport(load:{ request, _ in try await fixture.load(request) })
+            var peerPayloads: [Data] = []
+            let peer: AgentPeerRequest = { data, id, timeout, supplied in
+                precondition(supplied.routerID == router && timeout <= 20)
+                let value = try JSONSerialization.jsonObject(with:data) as! [String:Any]
+                precondition(UUID(uuidString:value["requestId"] as! String) == id)
+                peerPayloads.append(data)
+                switch outcome {
+                case "local": preconditionFailure("LAN must precede P2P")
+                case "unavailable": return nil
+                case "lost": throw URLError(.timedOut)
+                case "cancelled": throw CancellationError()
+                default: return AgentHTTPResponse(status:outcome == "failure" ? 503 : 200, data:Data("{}".utf8))
+                }
+            }
+            do {
+                let response = try await transport.send(method:"POST", path:"/api/sms/send", body:message,
+                    baseURL:"http://192.168.0.1:9090", access:access, peer:peer, token:{"synthetic-admin"}, reauthenticate:{false})
+                let requests = await fixture.requests
+                let relayed = requests.filter { $0.url!.path == "/openu60/v1/agent" }
+                switch outcome {
+                case "local": precondition(transport.route == .local && peerPayloads.isEmpty && relayed.isEmpty)
+                case "p2p", "failure": precondition(transport.route == .p2p && relayed.isEmpty && response.status == (outcome == "failure" ? 503 : 200))
+                case "unavailable", "lost":
+                    precondition(transport.route == .relay && relayed.count == 1)
+                    let left = try JSONSerialization.jsonObject(with:peerPayloads[0]) as! [String:Any]
+                    let right = try JSONSerialization.jsonObject(with:relayed[0].httpBody!) as! [String:Any]
+                    for key in ["requestId", "method", "path", "body"] { precondition(left[key] as? String == right[key] as? String) }
+                default: preconditionFailure("Cancelled operation continued")
+                }
+            } catch is CancellationError {
+                precondition(outcome == "cancelled")
+                let requests = await fixture.requests
+                precondition(!requests.contains { $0.url!.path == "/openu60/v1/agent" })
+            }
+        }
+        var assembler = PeerFrames()
+        for size in [1, 12288, 12289, 98304, PeerFrames.limit] {
+            let id = UUID(), data = Data(repeating:UInt8(size % 251), count:size)
+            let parts = try PeerFrames.encode(data, id:id)
+            var result: (UUID, Data)?
+            for part in parts { result = try assembler.receive(part) }
+            precondition(result?.0 == id && result?.1 == data)
+        }
+        let parts = try PeerFrames.encode(Data(repeating:42, count:30000), id:UUID())
+        do { _ = try assembler.receive(parts[1]); preconditionFailure("Out-of-order frame accepted") }
+        catch AgentError.decodingError {}
+        let incomplete = try assembler.receive(parts[0])
+        precondition(incomplete == nil)
+        do { _ = try assembler.receive(parts[0]); preconditionFailure("Duplicate fragment accepted") }
+        catch AgentError.decodingError {}
+        print("Agent transport: LAN/P2P/relay preference, stable write IDs, explicit failures, cancellation, framing limits, clocks, revocation and concurrency passed")
     }
 }

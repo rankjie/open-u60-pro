@@ -11,9 +11,10 @@ struct DashboardView: View {
     @State private var networkModeVM: NetworkModeViewModel?
     @State private var detail: DashboardDetail?
     @State private var showCPUDetails = false
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var showAllDevices = true
     @State private var showWiFiShare = false
+    @Environment(AppModel.self) private var app
+    private var internetModel: WiFiInternetViewModel { app.device.internet }
 
     init(viewModel: DashboardViewModel, isAuthenticated: Bool, client: AgentClient, authManager: AuthManager, usbViewModel: USBConnectionViewModel) {
         self.viewModel = viewModel
@@ -34,32 +35,32 @@ struct DashboardView: View {
                         SIMAlertBanner(config: config)
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
-                    Button { detail = .connection } label: {
-                        ConnectionOverview(viewModel: viewModel)
+                    Button { detail = .internet } label: {
+                        InternetOverview(model: internetModel)
                     }
                     .buttonStyle(.plain)
                     Button { detail = .traffic } label: {
                         CellularCardScope(viewModel: viewModel, compact: true)
                     }
                     .buttonStyle(.plain)
-                    SignalActivityControl()
-                    let healthLayout = dynamicTypeSize.isAccessibilitySize
-                        ? AnyLayout(VStackLayout(spacing: 12))
-                        : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
-                    healthLayout {
-                        Button { detail = .battery } label: {
-                            BatteryCardScope(viewModel: viewModel)
+                    CardView(padding: 0) {
+                        VStack(spacing: 0) {
+                            Button { detail = .wifi } label: {
+                                WiFiOverview(viewModel: viewModel)
+                            }
+                            .buttonStyle(.plain)
+                            Divider().padding(.leading, 52)
+                            Button { detail = .health } label: {
+                                HealthOverview(viewModel: viewModel)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
-                        Button { detail = .health } label: {
-                            HealthOverview(viewModel: viewModel)
-                        }
-                        .buttonStyle(.plain)
                     }
-                    Button { detail = .wifi } label: {
-                        WiFiOverview(viewModel: viewModel)
+                    Button { detail = .battery } label: {
+                        BatteryOverviewScope(viewModel: viewModel, usbViewModel: usbViewModel)
                     }
                     .buttonStyle(.plain)
+                    DashboardUpdateStatus(viewModel: viewModel)
                 }
                 .padding()
                 .animation(.easeInOut, value: banners)
@@ -78,15 +79,37 @@ struct DashboardView: View {
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
             }
-            .navigationTitle("Home")
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .refreshable { await viewModel.refresh() }
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    LastUpdatedScope(viewModel: viewModel)
+            .onChange(of: client.connectionRoute) { _, route in
+                guard route == .local || route == .p2p || route == .relay else { return }
+                Task {
+                    async let dashboard: Void = viewModel.refresh()
+                    async let usb = usbViewModel.refresh()
+                    _ = await (dashboard, usb)
                 }
-                ToolbarItem(placement: .topBarLeading) {
-                    connectionIndicator
+            }
+            .toolbar {
+                if #available(iOS 26.0, *) {
+                    ToolbarItem(placement: .topBarLeading) { connectionIndicator }
+                        .sharedBackgroundVisibility(.hidden)
+                    ToolbarItem(placement: .topBarTrailing) {
+                        CellularStatusButton(viewModel: viewModel) { detail = .connection }
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                    ToolbarItem(placement: .topBarTrailing) {
+                        BatteryStatusButton(viewModel: viewModel) { detail = .battery }
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                } else {
+                    ToolbarItem(placement: .topBarLeading) { connectionIndicator }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        CellularStatusButton(viewModel: viewModel) { detail = .connection }
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        BatteryStatusButton(viewModel: viewModel) { detail = .battery }
+                    }
                 }
             }
         }
@@ -95,6 +118,16 @@ struct DashboardView: View {
     @ViewBuilder
     private func dashboardDetail(_ selected: DashboardDetail) -> some View {
         switch selected {
+        case .routerConnection:
+            NavigationStack {
+                RouterConnectionDetail(client: client, internetModel: internetModel,
+                    connectionLabel: connectionLabel, connectionDescription: connectionDescription)
+            }
+        case .internet:
+            NavigationStack {
+                WiFiInternetView(client: client, authManager: authManager)
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { detail = nil } } }
+            }
         case .battery:
             BatteryDetailScope(viewModel: viewModel)
         case .health:
@@ -129,12 +162,12 @@ struct DashboardView: View {
                 ScrollView {
                     VStack(spacing: 12) {
                         if selected == .traffic {
-                            CellularCardScope(viewModel: viewModel, compact: true)
+                            CellularCardScope(viewModel: viewModel)
                             Text("These speeds show current cellular traffic across all connected devices. A speed test reports throughput over its test period; the live numbers change throughout that period.")
                                 .font(.subheadline).foregroundStyle(.secondary)
                         } else {
-                            WiFiCardScope(viewModel: viewModel, showWiFiShare: $showWiFiShare)
-                            Button(showWiFiShare ? "Hide Wi-Fi sharing" : "Share Wi-Fi") { showWiFiShare.toggle() }
+                            WiFiCardScope(viewModel: viewModel, internetModel: internetModel,
+                                          showWiFiShare: $showWiFiShare)
                             if showWiFiShare {
                                 WiFiShareCardScope(viewModel: viewModel, client: client,
                                     authManager: authManager, isExpanded: $showWiFiShare)
@@ -147,6 +180,7 @@ struct DashboardView: View {
                 .navigationTitle(selected.rawValue)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { detail = nil } } }
+                .task { if selected == .wifi { await viewModel.refresh() } }
             }
         }
     }
@@ -158,7 +192,7 @@ struct DashboardView: View {
                 id: "puk",
                 icon: "exclamationmark.lock.fill",
                 title: "SIM PUK Required",
-                message: "Too many wrong PIN attempts. Go to Router > SIM Card to enter your PUK.",
+                message: "Too many wrong PIN attempts. Open Settings → Cellular & SIM → SIM card to enter your PUK.",
                 color: .red
             ))
         }
@@ -167,7 +201,7 @@ struct DashboardView: View {
                 id: "pin",
                 icon: "lock.fill",
                 title: "SIM PIN Required",
-                message: "Your SIM card is locked. Go to Router > SIM Card to enter your PIN.",
+                message: "Your SIM card is locked. Open Settings → Cellular & SIM → SIM card to enter your PIN.",
                 color: .orange
             ))
         }
@@ -185,7 +219,7 @@ struct DashboardView: View {
                 id: "data",
                 icon: "antenna.radiowaves.left.and.right.slash",
                 title: "Mobile Data Off",
-                message: "Cellular radio is on but data is disabled. Go to Router > Mobile Network to enable it.",
+                message: "Cellular radio is on but data is disabled. Open Settings → Cellular & SIM → Mobile data to enable it.",
                 color: .orange
             ))
         }
@@ -193,28 +227,54 @@ struct DashboardView: View {
     }
 
     private var connectionIndicator: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(connectionColor)
-                .frame(width: 10, height: 10)
-            Text(connectionLabel)
-                .font(.caption)
-                .fontWeight(.medium)
-                .foregroundStyle(connectionColor)
+        Button { detail = .routerConnection } label: {
+            HStack(spacing: 6) {
+                if isAuthenticated && client.connectionRoute == .connecting {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: connectionIcon)
+                }
+                Text(connectionLabel)
+            }
+            .font(.caption.weight(.medium))
+            .foregroundStyle(connectionColor)
+            .fixedSize()
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
         }
-        .fixedSize()
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(
-            Capsule()
-                .fill(connectionColor.opacity(0.12))
-        )
+        .buttonStyle(.plain)
+        .accessibilityLabel("Router connection")
+        .accessibilityValue(connectionDescription)
+        .accessibilityHint("Opens connection details")
+        .accessibilityIdentifier("dashboard-router-connection")
+    }
+
+    private var connectionIcon: String {
+        guard isAuthenticated else { return "wifi.exclamationmark" }
+        switch client.connectionRoute {
+        case .local: return "wifi"
+        case .p2p: return "point.3.connected.trianglepath.dotted"
+        case .relay: return "globe"
+        case .connecting: return "arrow.triangle.2.circlepath"
+        case .unavailable: return "wifi.exclamationmark"
+        }
+    }
+
+    private var connectionDescription: String {
+        guard isAuthenticated else { return "U60 is offline" }
+        switch client.connectionRoute {
+        case .local: return "Connected directly to U60 on the local network"
+        case .p2p: return "Connected directly to U60 over an encrypted P2P connection"
+        case .relay: return "Connected to U60 remotely through your server"
+        case .connecting: return "Connecting to U60"
+        case .unavailable: return "U60 is offline"
+        }
     }
 
     private var connectionColor: Color {
         guard isAuthenticated else { return .red }
         switch client.connectionRoute {
-        case .local, .relay: return .green
+        case .local, .p2p, .relay: return .secondary
         case .connecting: return .orange
         case .unavailable: return .red
         }
@@ -222,8 +282,9 @@ struct DashboardView: View {
     private var connectionLabel: String {
         guard isAuthenticated else { return "Offline" }
         switch client.connectionRoute {
-        case .local: return "Connected"
-        case .relay: return "Via server"
+        case .local: return "Local"
+        case .p2p: return "P2P"
+        case .relay: return "Relay"
         case .connecting: return "Connecting"
         case .unavailable: return "Offline"
         }
@@ -256,14 +317,6 @@ private struct CellularCardScope: View {
     }
 }
 
-private struct BatteryCardScope: View {
-    let viewModel: DashboardViewModel
-
-    var body: some View {
-        BatteryCardView(battery: viewModel.battery, compact: true)
-    }
-}
-
 private struct CPUCardScope: View {
     let viewModel: DashboardViewModel
 
@@ -274,10 +327,12 @@ private struct CPUCardScope: View {
 
 private struct WiFiCardScope: View {
     let viewModel: DashboardViewModel
+    let internetModel: WiFiInternetViewModel
     @Binding var showWiFiShare: Bool
 
     var body: some View {
-        WiFiCardView(wifiStatus: viewModel.wifiStatus, showWiFiShare: $showWiFiShare)
+        WiFiCardView(wifiStatus: viewModel.wifiStatus, internetStatus: internetModel.status,
+                     internetStatusError: internetModel.refreshError, showWiFiShare: $showWiFiShare)
     }
 }
 
@@ -306,11 +361,22 @@ private struct DevicesCardScope: View {
     }
 }
 
-private struct LastUpdatedScope: View {
+private struct DashboardUpdateStatus: View {
     let viewModel: DashboardViewModel
 
     var body: some View {
-        LastUpdatedView(date: viewModel.lastUpdated)
+        VStack(spacing: 6) {
+            if let error = viewModel.error {
+                Text(error).font(.caption).foregroundStyle(.red)
+            }
+            HStack(spacing: 4) {
+                if viewModel.isLoading { ProgressView().controlSize(.mini) }
+                Text("Updated").font(.caption2).foregroundStyle(.secondary)
+                LastUpdatedView(date: viewModel.lastUpdated)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 4)
     }
 }
 
@@ -318,7 +384,17 @@ private struct BatteryDetailScope: View {
     let viewModel: DashboardViewModel
 
     var body: some View {
-        BatteryDetailSheet(battery: viewModel.battery)
+        BatteryDetailSheet(battery: viewModel.battery, updatedAt: viewModel.batteryUpdatedAt)
+    }
+}
+
+private struct BatteryOverviewScope: View {
+    let viewModel: DashboardViewModel
+    let usbViewModel: USBConnectionViewModel
+
+    var body: some View {
+        BatteryOverviewCard(battery: viewModel.battery, updatedAt: viewModel.batteryUpdatedAt,
+                            powerbankActive: usbViewModel.usbStatus.powerbankActive)
     }
 }
 
@@ -348,6 +424,7 @@ private struct ConnectionSignalDetail: View {
 
     var body: some View {
         SignalMonitorView(viewModel: viewModel) {
+            SignalActivityControl()
             ConnectionAddresses(viewModel: dashboard)
             if let networkModeViewModel {
                 NavigationLink("Network mode") { NetworkModeView(viewModel: networkModeViewModel) }
@@ -414,6 +491,8 @@ private struct TemperatureCardScope: View {
 }
 
 private enum DashboardDetail: String, Identifiable {
+    case routerConnection = "Connection details"
+    case internet = "Internet"
     case connection = "Connection & signal"
     case traffic = "Live traffic"
     case battery = "Battery"
@@ -434,86 +513,247 @@ private struct OverviewHeading: View {
     }
 }
 
-private struct ConnectionOverview: View {
-    let viewModel: DashboardViewModel
+private struct InternetOverview: View {
+    let model: WiFiInternetViewModel
     var body: some View {
-        let info = viewModel.operatorInfo
-        let nr = viewModel.nrSignal
-        let lte = viewModel.lteSignal
         CardView {
             VStack(alignment: .leading, spacing: 10) {
-                OverviewHeading(title: "Connection & signal", icon: "antenna.radiowaves.left.and.right")
-                HStack(alignment: .firstTextBaseline) {
-                    Text(info.provider.isEmpty ? "No operator" : info.provider).font(.title3.bold())
-                    Spacer()
-                    Text(info.networkType.isEmpty ? "—" : info.displayNetworkType(nrConnected: nr.isConnected, lteSignal: lte))
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(.blue)
+                HStack(spacing: 8) {
+                    Label("Internet", systemImage: "globe").font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 4)
+                    if let status = model.status {
+                        Text(status.config.mode == .repeater ? "Wi-Fi Repeater" : "SIM Hotspot")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
                 }
-                HStack(spacing: 6) {
-                    Text(nr.isConnected ? "NR RSRP" : "LTE RSRP").font(.caption).foregroundStyle(.secondary)
-                    if let rsrp = nr.isConnected ? nr.rsrp : lte.rsrp {
-                        AnimatedNumber(value: Int(rsrp), font: .caption.weight(.semibold), suffix: " dBm")
-                    } else { Text("—").font(.caption) }
-                    Spacer()
-                    if info.roaming { Text("Roaming").font(.caption).foregroundStyle(.orange) }
-                    Text("Radio details").font(.caption).foregroundStyle(.secondary)
+                if let status = model.status {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(status.config.mode == .repeater ? status.config.ssid : status.sourceLabel)
+                            .font(.title3.bold())
+                        Spacer()
+                        Text(model.refreshError == nil ? status.label : "Status unavailable")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(model.refreshError != nil || status.phase == "failed" ? .red : (status.connectivity == "online" ? .green : .secondary))
+                    }
+                    if status.config.mode == .repeater {
+                        Text("\(status.config.band.label) upstream → \(status.config.band.hotspotLabel) hotspot")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                } else if model.refreshError == nil {
+                    ProgressView("Checking internet source…")
+                }
+                if let error = model.refreshError {
+                    Text(error).font(.caption).foregroundStyle(.red)
                 }
             }
         }
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("internet-overview")
+    }
+}
+
+private struct RouterConnectionDetail: View {
+    let client: AgentClient
+    let internetModel: WiFiInternetViewModel
+    let connectionLabel: String
+    let connectionDescription: String
+    @Environment(RemoteCallingManager.self) private var remoteCalling
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        Form {
+            Section("App to U60") {
+                LabeledContent("Connection", value: connectionLabel)
+                Text(connectionDescription).font(.subheadline).foregroundStyle(.secondary)
+                LabeledContent("Local address") {
+                    Text(client.baseURL).textSelection(.enabled)
+                }
+            }
+            Section("Remote access") {
+                NavigationLink("Connect with device string") { DeviceConnectView() }
+                LabeledContent("Pairing", value: remoteCalling.pairingRejected ? "Pair again" :
+                    remoteCalling.isPaired ? "Paired" : "Not paired")
+                if remoteCalling.isPaired {
+                    if let router = remoteCalling.managementAccess?.routerID {
+                        LabeledContent("Device ID", value:"U60-\(router.uuidString.lowercased())")
+                    }
+                    LabeledContent("Server connection", value: remoteCalling.pairingRejected ? "Pairing rejected" :
+                        remoteCalling.isConnected ? "Connected" : "Reconnecting…")
+                    LabeledContent("U60 at server", value: remoteCalling.isConnected ?
+                        (remoteCalling.routerOnline ? "Online" : "Offline") : "Unknown")
+                    LabeledContent("P2P", value: remoteCalling.managementPeerStatus)
+                }
+                NavigationLink { CallingServersView() } label: {
+                    LabeledContent("Server", value: remoteCalling.serverAddress)
+                }
+            }
+            Section("U60 internet") {
+                if let status = internetModel.status {
+                    LabeledContent("Source", value: status.sourceLabel)
+                    if status.config.mode == .repeater {
+                        LabeledContent("Upstream", value: status.upstreamLabel)
+                    }
+                    LabeledContent("Status", value: internetModel.refreshError == nil ? status.label : "Status unavailable")
+                } else if internetModel.refreshError == nil {
+                    ProgressView("Checking internet source…")
+                }
+                if let error = internetModel.refreshError {
+                    Text(error).font(.footnote).foregroundStyle(.red)
+                }
+            }
+            Section {
+                Text("The app prefers the local network, then an encrypted P2P connection. If direct connectivity is unavailable, it automatically uses your server relay.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Connection details")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+    }
+}
+
+private struct CellularStatusButton: View {
+    let viewModel: DashboardViewModel
+    let action: () -> Void
+
+    var body: some View {
+        let info = viewModel.operatorInfo
+        let nr = viewModel.nrSignal
+        let lte = viewModel.lteSignal
+        let rsrp = nr.isConnected ? nr.rsrp : lte.rsrp
+        let network = info.networkType.isEmpty ? "—" : info.displayNetworkType(nrConnected: nr.isConnected, lteSignal: lte)
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if viewModel.isAirplaneMode {
+                    Image(systemName: "airplane")
+                } else {
+                    HStack(alignment: .bottom, spacing: 2) {
+                        ForEach(0..<4) { bar in
+                            RoundedRectangle(cornerRadius: 1)
+                                .fill(bar < Color.signalBars(rsrp) ? Color.primary : Color(.quaternaryLabel))
+                                .frame(width: 3, height: CGFloat(5 + bar * 3))
+                        }
+                    }
+                    Text(network).font(.caption.weight(.semibold)).lineLimit(1)
+                }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Cellular signal")
+        .accessibilityValue(viewModel.isAirplaneMode ? "Airplane mode" :
+            "\(info.provider.isEmpty ? "No operator" : info.provider), \(network), \(rsrp.map { "\(Int($0)) dBm" } ?? "No signal data")\(info.roaming ? ", roaming" : "")")
         .accessibilityHint("Opens connection and signal details")
+        .accessibilityIdentifier("dashboard-cellular-status")
+    }
+}
+
+private struct BatteryStatusButton: View {
+    let viewModel: DashboardViewModel
+    let action: () -> Void
+
+    var body: some View {
+        let battery = viewModel.battery
+        Button(action: action) {
+            HStack(spacing: 6) {
+                BatteryStatusIcon(capacity: battery.capacityPercent)
+                Text(battery.powerText)
+                    .font(.caption.monospacedDigit())
+                    .lineLimit(1)
+                    .foregroundStyle(battery.powerWatts.map { $0 > 0 ? Color.green : Color.secondary } ?? .secondary)
+                    .transaction { $0.animation = nil }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Router battery")
+        .accessibilityValue("\(battery.capacityPercent == nil ? "Unavailable" : battery.capacityText)\(battery.charging.isEmpty ? "" : ", \(battery.charging)"), \(battery.powerText)")
+        .accessibilityHint("Opens battery details")
+        .accessibilityIdentifier("dashboard-battery-status")
+    }
+
+}
+
+private struct BatteryStatusIcon: View {
+    let capacity: Int?
+
+    private var fillWidth: CGFloat { CGFloat(capacity ?? 0) / 100 * 30 }
+    private var percentage: some View {
+        Text(capacity.map(String.init) ?? "—")
+            .font(.system(size: 10, weight: .bold, design: .rounded).monospacedDigit())
+            .frame(width: 34, height: 18)
+    }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 4)
+                .strokeBorder(.primary, lineWidth: 1.5)
+                .frame(width: 34, height: 18)
+            RoundedRectangle(cornerRadius: 2)
+                .fill(.primary)
+                .frame(width: fillWidth, height: 14)
+                .offset(x: 2)
+            percentage.foregroundStyle(.primary)
+            percentage.foregroundStyle(Color(.systemBackground))
+                .mask(alignment: .leading) {
+                    Rectangle().frame(width: fillWidth, height: 14).offset(x: 2)
+                }
+            RoundedRectangle(cornerRadius: 1)
+                .fill(.primary)
+                .frame(width: 2.5, height: 7)
+                .offset(x: 35.5)
+        }
+        .frame(width: 38, height: 18)
+        .accessibilityHidden(true)
+        .transaction { $0.animation = nil }
     }
 }
 
 private struct HealthOverview: View {
     let viewModel: DashboardViewModel
+
     var body: some View {
-        CardView {
-            VStack(alignment: .leading, spacing: 10) {
-                OverviewHeading(title: "CPU & heat", icon: "cpu")
-                if viewModel.cpuUpdatedAt != nil {
-                    CPUUsageValue(value: viewModel.systemInfo.cpuUsagePercent)
-                } else { Text("—").font(.title3.bold()) }
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    VStack(spacing: 6) {
-                        temperature("CPU", value: viewModel.thermal.cpuTemp, date: viewModel.thermalUpdatedAt, now: context.date)
-                        temperature("Battery", value: viewModel.battery.temperature, date: viewModel.batteryUpdatedAt, now: context.date)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityHint("Opens CPU information and all temperature sensors")
-    }
-    private func temperature(_ label: String, value: Double?, date: Date?, now: Date) -> some View {
-        HStack {
-            Text(label).foregroundStyle(.secondary)
+        HStack(spacing: 12) {
+            Image(systemName: "cpu").foregroundStyle(.secondary).frame(width: 24)
+            Text("System").font(.subheadline.weight(.medium))
             Spacer(minLength: 4)
-            TemperatureValueText(value: date.map { now.timeIntervalSince($0) < 10 } == true ? value : nil)
-        }.font(.caption)
+            if viewModel.cpuUpdatedAt != nil {
+                Text("\(viewModel.systemInfo.cpuUsagePercent, specifier: "%.0f")% CPU")
+                    .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+            } else { Text("Unavailable").font(.subheadline).foregroundStyle(.secondary) }
+            Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
+        }
+        .padding(16)
+        .frame(minHeight: 56)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens CPU, memory, processes and temperatures")
     }
 }
 
 private struct WiFiOverview: View {
     let viewModel: DashboardViewModel
+
     var body: some View {
-        CardView {
-            VStack(alignment: .leading, spacing: 10) {
-                OverviewHeading(title: "Wi-Fi & devices", icon: "wifi")
-                HStack(alignment: .firstTextBaseline) {
-                    Text(viewModel.wifiStatus.wifiOn ? "Wi-Fi on" : "Wi-Fi off")
-                        .font(.subheadline).foregroundStyle(viewModel.wifiStatus.wifiOn ? .green : .secondary)
-                    Spacer()
-                    AnimatedNumber(value: viewModel.connectedDevices.count, font: .title3.bold())
-                    Text("devices").font(.caption).foregroundStyle(.secondary)
-                }
-                Text("Networks, sharing & connected devices")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+        HStack(spacing: 12) {
+            Image(systemName: "wifi").foregroundStyle(.blue).frame(width: 24)
+            Text("Hotspot & devices").font(.subheadline.weight(.medium))
+            Spacer(minLength: 4)
+            Text(viewModel.wifiStatus.wifiOn ? "\(viewModel.connectedDevices.count) connected" : "Wi-Fi off")
+                .font(.subheadline).foregroundStyle(.secondary)
+            Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
         }
+        .padding(16)
+        .frame(minHeight: 56)
+        .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
-        .accessibilityHint("Opens Wi-Fi networks and device list")
+        .accessibilityHint("Opens hotspot sharing and connected devices")
     }
 }
 

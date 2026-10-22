@@ -18,10 +18,17 @@ xcrun --sdk iphonesimulator swiftc -swift-version 5 -parse-as-library -sdk "$ope
     -target "$openu60_arch-apple-ios17.0-simulator" -F "$openu60_framework" \
     -Xlinker -rpath -Xlinker "$openu60_framework" -framework WebRTC \
     "$openu60_root/mobile/ios/OpenU60/Core/RemoteCalling/CallingCredentials.swift" \
+    "$openu60_root/mobile/ios/OpenU60/Core/RemoteCalling/CallingDevice.swift" \
+    "$openu60_root/mobile/ios/OpenU60/Core/RemoteCalling/DeviceConnection.swift" \
     "$openu60_root/mobile/ios/OpenU60/Core/Networking/AgentTransport.swift" \
+    "$openu60_root/mobile/ios/OpenU60/Core/Networking/PeerFrames.swift" \
+    "$openu60_root/mobile/ios/OpenU60/Core/Networking/ManagementPeer.swift" \
     "$openu60_root/mobile/ios/OpenU60/Core/Networking/AgentError.swift" \
     "$openu60_root/mobile/ios/OpenU60/Core/RemoteCalling/CallingMedia.swift" \
     "$openu60_root/mobile/ios/OpenU60/Core/RemoteCalling/RemoteCallingManager.swift" \
     "$openu60_root/mobile/ios/Tests/CallingTestDoubles.swift" \
+    "$openu60_root/mobile/ios/Tests/CallingServerProfileTests.swift" \
+    "$openu60_root/mobile/ios/Tests/ManagementPeerTests.swift" \
+    "$openu60_root/mobile/ios/Tests/DeviceConnectionTests.swift" \
     "$openu60_root/mobile/ios/Tests/RemoteCallingTests.swift" -o "$openu60_work/tests"
 xcrun simctl spawn "$1" "$openu60_work/tests"

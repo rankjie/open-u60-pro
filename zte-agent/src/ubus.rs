@@ -4,7 +4,16 @@ use serde_json::Value;
 
 /// Call `ubus call <object> <method> [<params>]` and parse JSON output.
 pub fn call(object: &str, method: &str, params: Option<&str>) -> Result<Value, String> {
+    call_with_timeout(object, method, params, None)
+}
+
+pub fn call_bounded(object: &str, method: &str, params: Option<&str>, seconds: u8) -> Result<Value, String> {
+    call_with_timeout(object, method, params, Some(seconds))
+}
+
+fn call_with_timeout(object: &str, method: &str, params: Option<&str>, seconds: Option<u8>) -> Result<Value, String> {
     let mut cmd = Command::new("ubus");
+    if let Some(seconds) = seconds { cmd.args(["-t", &seconds.to_string()]); }
     cmd.args(["call", object, method]);
     if let Some(p) = params {
         cmd.arg(p);

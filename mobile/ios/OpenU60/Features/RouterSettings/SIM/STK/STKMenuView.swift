@@ -23,6 +23,7 @@ struct STKMenuView: View {
             stkSection
         }
         .navigationTitle("SIM Services")
+        .keyboardDismissal()
         .overlay {
             if viewModel.isLoading {
                 ProgressView()

@@ -1,4 +1,6 @@
 //! Bounded native WebRTC fixtures. No modem or real pairing credential store is opened.
+#[path = "../src/cellular_line.rs"]
+mod cellular_line;
 #[allow(dead_code)]
 #[path = "../src/remote_calling/audio.rs"]
 mod audio;
@@ -6,8 +8,14 @@ mod audio;
 #[path = "../src/remote_calling/codec.rs"]
 mod codec;
 #[allow(dead_code)]
+#[path = "../src/remote_calling/journal.rs"]
+mod journal;
+#[allow(dead_code)]
 #[path = "../src/remote_calling/media.rs"]
 mod media;
+#[allow(dead_code)]
+#[path = "../src/remote_calling/recordings.rs"]
+mod recordings;
 #[path = "common/server_gateway.rs"]
 mod server_gateway;
 #[allow(dead_code)]

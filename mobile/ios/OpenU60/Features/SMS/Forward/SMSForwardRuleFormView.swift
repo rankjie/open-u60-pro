@@ -125,6 +125,7 @@ struct SMSForwardRuleFormView: View {
                 }
             }
             .navigationTitle(editingRule != nil ? "Edit Rule" : "New Rule")
+            .keyboardDismissal()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

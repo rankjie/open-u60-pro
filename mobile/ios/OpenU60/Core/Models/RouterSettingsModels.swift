@@ -204,7 +204,7 @@ struct MobileNetworkConfig: Equatable {
     var isAutoConnect: Bool { connectMode == 1 }
     var isRoamingEnabled: Bool { roamEnable == 1 }
     var isDataEnabled: Bool { dataEnabled == 1 }
-    var isConnected: Bool { connectStatus.contains("connected") }
+    var isConnected: Bool { ["connected", "ipv4_connected", "ipv6_connected", "ipv4_ipv6_connected"].contains(connectStatus) }
     var isAutoNetSelect: Bool { netSelectMode == "auto_select" }
 
     static let empty = MobileNetworkConfig(

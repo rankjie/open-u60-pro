@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - Tag Enum
 
-enum SMSTag: Int, Sendable {
+enum SMSTag: Int, Codable, Sendable {
     case read = 0
     case unread = 1
     case sent = 2
@@ -12,25 +12,9 @@ enum SMSTag: Int, Sendable {
     var isIncoming: Bool { self == .read || self == .unread }
 }
 
-// MARK: - Storage Filter
-
-enum SMSStorageFilter: String, CaseIterable, Sendable {
-    case all = "All"
-    case `internal` = "Internal"
-    case sim = "SIM"
-
-    var memStoreValue: Int {
-        switch self {
-        case .all: return 2
-        case .internal: return 1
-        case .sim: return 0
-        }
-    }
-}
-
 // MARK: - SMS Message
 
-struct SMSMessage: Identifiable, Sendable {
+struct SMSMessage: Identifiable, Codable, Equatable, Sendable {
     let id: Int
     let number: String
     let content: String
@@ -38,11 +22,13 @@ struct SMSMessage: Identifiable, Sendable {
     let tag: SMSTag
     let groupId: String
     let memStore: String
+    var line: CellularLine? = nil
+    var lineLabel: String { line?.label ?? "Line unknown" }
 }
 
 // MARK: - SMS Conversation
 
-struct SMSConversation: Identifiable, Sendable {
+struct SMSConversation: Identifiable, Equatable, Sendable {
     var id: String { normalizedNumber }
     let normalizedNumber: String
     let number: String
@@ -54,7 +40,7 @@ struct SMSConversation: Identifiable, Sendable {
 
 // MARK: - SMS Capacity
 
-struct SMSCapacity: Sendable {
+struct SMSCapacity: Codable, Equatable, Sendable {
     let nvTotal: Int
     let nvUsed: Int
     let simTotal: Int
@@ -94,34 +80,28 @@ enum SMSParser {
 
     /// Decode UCS-2 hex string (UTF-16BE, 4 hex chars per code unit) to readable text.
     ///
-    /// Accumulates UTF-16 code units rather than scalars so surrogate pairs survive: decoding
-    /// each quad to a `Unicode.Scalar` individually fails for the D800–DFFF range and silently
-    /// erases every emoji and non-BMP character. Quads that are not valid hex are skipped, which
-    /// leaves plain GSM-7 bodies decoding to "" so `parseMessages` falls back to the raw text.
-    static func decodeUCS2Hex(_ hex: String) -> String {
-        var units: [UInt16] = []
-        units.reserveCapacity(hex.utf8.count / 4)
+    /// Accept only a complete, well-formed UTF-16BE value. Firmware variants can
+    /// also return plain GSM text; decoding individual valid quads corrupts it.
+    static func decodeUCS2Hex(_ hex: String) -> String? {
+        guard hex.utf8.count.isMultiple(of: 4) else { return nil }
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(hex.utf8.count / 2)
 
         var unit: UInt16 = 0
         var digitsInQuad = 0
-        var quadIsHex = true
-
         for byte in hex.utf8 {
-            if let digit = hexDigit(byte) {
-                unit = (unit << 4) | digit
-            } else {
-                quadIsHex = false
-            }
+            guard let digit = hexDigit(byte) else { return nil }
+            unit = (unit << 4) | digit
             digitsInQuad += 1
             if digitsInQuad == 4 {
-                if quadIsHex { units.append(unit) }
+                bytes.append(UInt8(unit >> 8))
+                bytes.append(UInt8(truncatingIfNeeded: unit))
                 unit = 0
                 digitsInQuad = 0
-                quadIsHex = true
             }
         }
 
-        return String(decoding: units, as: UTF16.self)
+        return String(bytes: bytes, encoding: .utf16BigEndian)
     }
 
     private static func hexDigit(_ byte: UInt8) -> UInt16? {
@@ -168,6 +148,24 @@ enum SMSParser {
         }
 
         return utcCalendar.date(from: components) ?? Date()
+    }
+
+    static func validatedDate(_ text: String) throws -> Date {
+        let fields = text.split(separator: ",", omittingEmptySubsequences: false)
+        guard fields.count == 7, let year = Int(fields[0]), (0...99).contains(year),
+              let month = Int(fields[1]), (1...12).contains(month),
+              let day = Int(fields[2]), (1...31).contains(day),
+              let hour = Int(fields[3]), (0...23).contains(hour),
+              let minute = Int(fields[4]), (0...59).contains(minute),
+              let second = Int(fields[5]), (0...59).contains(second),
+              let zone = Int(fields[6]), (-48...56).contains(zone) else { throw SMSDeliveryError.invalid }
+        let date = parseSMSDate(text)
+        var calendar = utcCalendar
+        calendar.timeZone = TimeZone(secondsFromGMT: zone * 900)!
+        let actual = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        guard actual.year == year + 2000, actual.month == month, actual.day == day,
+              actual.hour == hour, actual.minute == minute, actual.second == second else { throw SMSDeliveryError.invalid }
+        return date
     }
 
     /// Format current time in ZTE SMS send format (semicolons, tz in hours).
@@ -225,7 +223,7 @@ enum SMSParser {
         }
 
         return grouped.map { key, msgs in
-            let sorted = msgs.sorted { $0.date < $1.date }
+            let sorted = msgs.sorted { $0.date == $1.date ? $0.id < $1.id : $0.date < $1.date }
             let latest = sorted.last!
             let unread = msgs.reduce(into: 0) { count, msg in
                 if msg.tag == .unread { count += 1 }
@@ -247,31 +245,29 @@ enum SMSParser {
     /// Parse raw SMS data from the agent into SMSMessage array.
     /// Response format: { "messages": [ { "id":Int, "number":String, "content":String(UCS2hex),
     ///   "date":"YY,MM,DD,HH,MM,SS,TZ", "tag":"0".."4", "draft_group_id":String, "mem_store":String } ] }
-    static func parseMessages(_ data: [String: Any]) -> [SMSMessage] {
-        guard let list = data["messages"] as? [[String: Any]] else { return [] }
+    static func parseMessages(_ data: [String: Any]) throws -> [SMSMessage] {
+        guard let list = data["messages"] as? [[String: Any]] else { throw SMSDeliveryError.invalid }
 
-        return list.compactMap { item -> SMSMessage? in
+        return try list.map { item -> SMSMessage in
             guard let id = item["id"] as? Int,
                   let number = item["number"] as? String,
                   let body = item["content"] as? String,
                   let dateStr = item["date"] as? String,
                   let tagStr = item["tag"] as? String,
                   let tagInt = Int(tagStr),
-                  let tag = SMSTag(rawValue: tagInt) else { return nil }
+                  let tag = SMSTag(rawValue: tagInt) else { throw SMSDeliveryError.invalid }
 
-            // Content is always UCS-2 hex encoded; decode it.
-            // If decoding produces empty string, fall back to raw (might be GSM7 plain text).
-            let decoded = decodeUCS2Hex(body)
-            let content = decoded.isEmpty ? body : decoded
+            let content = decodeUCS2Hex(body) ?? body
 
             return SMSMessage(
                 id: id,
                 number: number,
                 content: content,
-                date: parseSMSDate(dateStr),
+                date: try validatedDate(dateStr),
                 tag: tag,
                 groupId: item["draft_group_id"] as? String ?? "",
-                memStore: item["mem_store"] as? String ?? "nv"
+                memStore: item["mem_store"] as? String ?? "nv",
+                line: try CellularLine.decode(item["line"])
             )
         }
     }

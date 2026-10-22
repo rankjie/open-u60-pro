@@ -6,6 +6,73 @@ import WebRTC
     @MainActor static func main() async throws {
         var failures: [String] = []
         func expect(_ condition: Bool, _ message: String) { if !condition { failures.append(message) } }
+        try checkServerProfiles(expect: expect)
+        try await checkServerSelection(expect: expect)
+        try await checkManagementPeers(expect: expect)
+        try await checkDeviceConnections(expect: expect)
+        expect(CallingDeviceInfo.displayName(assigned: "iPhone", model: "iPhone17,1") == "iPhone 16 Pro", "generic device names must identify the observed 16 Pro hardware")
+        expect(CallingDeviceInfo.displayName(assigned: "iPhone", model: "iPhone18,1") == "iPhone 17 Pro", "the 17 Pro must remain distinct from the 16 Pro")
+        expect(CallingDeviceInfo.displayName(assigned: "Office phone", model: "iPhone17,1") == "Office phone", "an available assigned name must be preserved")
+        expect(CallingDeviceInfo.displayName(assigned: "iPhone", model: "future-model") == "iPhone (future-model)", "unmapped hardware must retain its actual model identifier")
+        do {
+            let f = Fixture(); let id = UUID()
+            try await f.connect(calls: [f.snapshot(id)])
+            let connected = f.manager.call?.connectedDate
+            expect(connected == Date(timeIntervalSince1970: 1_800_000_000), "the timer must use the carrier's connected time")
+            var reconnect = f.snapshot(id, sequence: 2); reconnect["updatedAt"] = 1_800_000_020; reconnect["mediaReady"] = false
+            f.socket.emit(reconnect); try await wait { f.manager.call?.sequence == 2 }
+            expect(f.manager.call?.connectedDate == connected, "an audio reconnect must not reset call duration")
+            f.manager.disconnect()
+        }
+        do {
+            let f = Fixture(); let id = UUID()
+            try await f.connect(calls: [f.snapshot(id, state: "ringing")])
+            expect(f.manager.callPresentationRequest == nil, "a background ring must wait for the user to open or answer it")
+            f.holdPermission = true
+            let action = TestAnswerAction(call: id)
+            f.manager.provider(f.provider, perform: action)
+            expect(f.manager.callPresentationRequest?.callID == id,
+                   "CallKit answer must request the current call screen before asynchronous permission or modem work")
+            let request = f.manager.callPresentationRequest
+            try await wait { f.permission != nil }
+            f.socket.emit(f.snapshot(id, state: "ringing", sequence: 2))
+            try await wait { f.manager.call?.sequence == 2 }
+            expect(f.manager.callPresentationRequest == request, "a repeated ringing snapshot must not replace the answer navigation request")
+            f.permission?.resume(returning: true); f.permission = nil
+            try await wait { action.fulfilled }
+            expect((f.socket.messages.first { $0["action"] as? String == "answer" })?["device"] as? [String:String]
+                   == ["name":"iPhone 16 Pro","model":"iPhone17,1"], "the actual answering phone must accompany its admitted answer")
+            f.manager.requestCallPresentation()
+            expect(f.manager.callPresentationRequest?.callID == id && f.manager.callPresentationRequest != request,
+                   "opening an ongoing call again must navigate even when the call ID has not changed")
+            let end = TestEndAction(call: id)
+            f.manager.provider(f.provider, perform: end)
+            expect(f.manager.callPresentationRequest == nil, "an ended call must not leave navigation pending for a later app launch")
+            f.manager.provider(f.provider, perform: TestAnswerAction(call: id))
+            f.manager.requestCallPresentation()
+            expect(f.manager.callPresentationRequest == nil, "a stale answer or foreground without a call must not reopen the call screen")
+            try await wait { f.socket.messages.contains { $0["action"] as? String == "hangup" } }
+            f.manager.disconnect()
+        }
+        for state in ["answering", "active"] {
+            let f = Fixture(); let id = UUID()
+            try await f.connect(calls: [f.snapshot(id, state: state)])
+            expect(f.manager.callPresentationRequest?.callID == id,
+                   "restoring an answered call must retain navigation until the normal app is ready")
+            f.manager.disconnect()
+        }
+        do {
+            let f = Fixture(); let id = UUID()
+            try await f.connect(calls: [f.snapshot(id, state: "answering")])
+            expect(f.media.isEmpty, "answering starts before the media offer arrives")
+            f.manager.provider(f.provider, perform: CXSetMutedCallAction(call: id, muted: true))
+            expect(f.manager.muted, "mute must be selectable before media exists")
+            try f.manager.toggleSpeaker()
+            expect(f.manager.speaker, "speaker must be selectable before CallKit activates audio")
+            f.offer(id); try await wait { f.media.count == 1 }
+            expect(f.media[0].muted, "the first microphone track must inherit the preselected mute")
+            f.manager.disconnect()
+        }
         for localAccepted in [true, false] {
             let f = Fixture(); let id = UUID(); try await f.start(id)
             var admissions: [(UUID, String)] = []
@@ -56,8 +123,12 @@ import WebRTC
             try await f.connect(calls: [f.snapshot(id, state: "ringing")])
             f.socket.emit(f.snapshot(id, state: "ringing", sequence: 2))
             try await wait { f.manager.call?.sequence == 2 }
+            expect(!f.socket.messages.contains { $0["type"] as? String == "media_request" },
+                   "ringing phones must not negotiate audio before one wins the answer")
+            f.socket.emit(f.snapshot(id, state: "answering", sequence: 2))
+            try await wait { f.socket.messages.contains { $0["type"] as? String == "media_request" } }
             expect(f.socket.messages.filter { $0["type"] as? String == "media_request" }.count == 1,
-                   "a reconnect snapshot must request one peer, even before its offer arrives")
+                   "the admitted answer must request exactly one peer")
             f.manager.disconnect()
         }
         do {
@@ -120,6 +191,31 @@ import WebRTC
             f.permission?.resume(returning:true);f.permission=nil
             expect(await attempt.value,"an incoming call during microphone permission must prevent a new dial")
             expect(f.manager.call?.callId==incoming && !f.socket.messages.contains {$0["action"] as? String=="dial"},"the real incoming call must retain ownership")
+            f.manager.disconnect()
+        }
+        for reason in ["answered_elsewhere", "declined_on_device"] {
+            let f = Fixture(); let id = UUID()
+            try await f.connect(calls: [f.snapshot(id, state: "ringing")])
+            var ended = f.snapshot(id, state: "ended", sequence: 2); ended["reason"] = reason
+            f.socket.emit(ended)
+            try await wait { f.provider.endedReasons[id] != nil }
+            expect(f.manager.call == nil && f.media.isEmpty, "another phone's answer must close ringing without opening audio")
+            expect(f.provider.endedReasons[id] == (reason == "answered_elsewhere" ? .answeredElsewhere : .declinedElsewhere),
+                   "CallKit must receive the correct multi-device end reason")
+            f.socket.emit(f.snapshot(id, state: "ringing", sequence: 1))
+            try await Task.sleep(for: .milliseconds(10))
+            expect(f.manager.call == nil, "a delayed ring cannot resurrect a call handled on another phone")
+            f.manager.disconnect()
+        }
+        do {
+            let f = Fixture()
+            f.socket.response = HTTPURLResponse(url: URL(string: "https://synthetic.invalid/v1/socket")!, statusCode: 401, httpVersion: nil, headerFields: nil)
+            f.manager.connect()
+            try await wait { f.socket.receiving != nil }
+            f.socket.receiving?.resume(throwing: URLError(.badServerResponse)); f.socket.receiving = nil
+            try await wait { f.manager.pairingRejected }
+            expect(f.manager.errorMessage?.contains("Pair it") == true, "a rejected pairing must explain how to reconnect")
+            expect(!f.manager.isConnected, "a rejected pairing cannot appear connected")
             f.manager.disconnect()
         }
         for message in failures { print("FAIL:",message) }

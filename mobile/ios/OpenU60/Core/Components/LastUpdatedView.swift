@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 struct LastUpdatedView: View {
     let date: Date?
@@ -32,6 +33,7 @@ struct LastUpdatedView: View {
             .contentTransition(.numericText())
             .animation(.default, value: elapsed)
             .accessibilityLabel(accessibilityText)
+            .onAppear { updateElapsed() }
             .onReceive(ticker) { _ in
                 updateElapsed()
             }

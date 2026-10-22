@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { generateKeyPairSync, randomUUID, verify } from "node:crypto";
+import { createECDH, generateKeyPairSync, randomUUID, verify } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,8 @@ import { APNs, smsPushRequests, type PushProvider, type PushOutcome } from "../s
 import { Fault, secret, snapshot, type Endpoint } from "../src/protocol";
 import { Store } from "../src/store";
 import { CallingService } from "../src/service";
+import { callAdmission } from "../src/call-admission";
+import { hash } from "../src/protocol";
 
 const resources: Array<() => void> = [];
 afterEach(() => { for (const close of resources.splice(0).reverse()) close(); });
@@ -25,6 +27,52 @@ function fixture(push?: PushProvider) {
   return { store, service, router, phone, routerToken, phoneToken,
     url: `http://127.0.0.1:${service.server.port}`, advance: (seconds: number) => { clock += seconds; } };
 }
+
+describe("call device attribution and connected time", () => {
+  test("dial captures the authenticated phone and preserves the first connected time", () => {
+    const f = fixture(), callId = randomUUID();
+    const device = { name: "iPhone 16 Pro", model: "iPhone17,1", id: randomUUID() };
+    const body = { requestId: randomUUID(), callId, action: "dial", number: "+12345", device };
+    const operation = f.store.command(f.phone, body);
+    expect(JSON.parse(operation.payload).phone).toEqual({ id: f.phone.id, name: device.name, model: device.model });
+    const admitted = JSON.parse(operation.payload);
+    expect(callAdmission(f.router.token_hash, f.phone.id, { ...admitted, phone: { ...admitted.phone, name: "Changed" } }))
+      .not.toEqual(callAdmission(f.router.token_hash, f.phone.id, admitted));
+    expect(snapshot(f.store.call(callId)).phone).toEqual({ id: f.phone.id, name: device.name, model: device.model });
+    expect(snapshot(f.store.call(callId)).answeredAt).toBeNull();
+    f.advance(5);
+    f.store.event(f.router, { callId, eventId: randomUUID(), state: "active", sequence: 1, observedAt: f.store.now(), mediaReady: false });
+    const connected = f.store.now(); f.advance(20);
+    f.store.event(f.router, { callId, eventId: randomUUID(), state: "active", sequence: 2, observedAt: f.store.now(), mediaReady: true });
+    expect(snapshot(f.store.call(callId)).answeredAt).toBe(connected);
+    expect(f.store.command(f.phone, body).payload).toBe(operation.payload);
+    expect(() => f.store.command(f.phone, { ...body, device: { ...device, name: "Another phone" } })).toThrow("operation_conflict");
+  });
+  test("the winning answer owns attribution, while legacy and missed calls remain unknown", () => {
+    const f = fixture(), callId = randomUUID();
+    const other = f.store.pair({ code: f.store.pairing(f.router).code, requestId: randomUUID(), phoneToken: secret() });
+    f.store.event(f.router, { callId, eventId: randomUUID(), state: "ringing", sequence: 1, observedAt: f.store.now(), mediaReady: false, number: "+12345" });
+    expect(snapshot(f.store.call(callId)).phone).toBeNull();
+    const device = { name: "iPhone 17 Pro", model: "iPhone18,1" };
+    f.store.command(other, { requestId: randomUUID(), callId, action: "answer", device });
+    expect(snapshot(f.store.call(callId)).phone).toEqual({ id: other.id, ...device });
+    expect(() => f.store.command(f.phone, { requestId: randomUUID(), callId, action: "answer", device: { name: "Loser", model: "iPhone17,1" } })).toThrow();
+    expect(snapshot(f.store.call(callId)).phone).toEqual({ id: other.id, ...device });
+    f.store.end(callId, "remote_hangup");
+    const legacy = randomUUID();
+    f.store.command(f.phone, { requestId: randomUUID(), callId: legacy, action: "dial", number: "12345" });
+    expect(snapshot(f.store.call(legacy)).phone).toBeNull();
+  });
+  test("device metadata rejects blank names, control characters and invalid model identifiers", () => {
+    for (const device of [{ name: " ", model: "iPhone17,1" }, { name: "iPhone\u0000other", model: "iPhone17,1" },
+      { name: "iPhone\u007f", model: "iPhone17,1" }, { name: "iPhone", model: "bad\nmodel" },
+      { name: "iPhone", model: "x".repeat(65) }, { name: "x".repeat(81), model: "iPhone17,1" }]) {
+      const f = fixture();
+      expect(() => f.store.command(f.phone, { requestId: randomUUID(), callId: randomUUID(), action: "dial", number: "12345", device })).toThrow();
+      expect(f.store.currentCall(f.router.id)).toBeUndefined();
+    }
+  });
+});
 
 class Peer {
   readonly socket: WebSocket;
@@ -53,6 +101,124 @@ class Peer {
     });
   }
 }
+
+describe("device string and encrypted password enrollment", () => {
+  async function setup() {
+    const f = fixture(), router = new Peer(f.url, f.routerToken), phone = new Peer(f.url, f.phoneToken);
+    await router.next("hello"); await phone.next("hello");
+    const identity = createECDH("prime256v1"); identity.generateKeys();
+    const publicKey = identity.getPublicKey().toString("base64");
+    router.send({ type:"peer_register", connectionKey:publicKey });
+    await phone.next("presence", v => v.peerManagement === true);
+    const body = { routerId:f.router.id, requestId:randomUUID(), phoneToken:secret(),
+      enc:identity.getPublicKey().toString("base64"), ciphertext:Buffer.alloc(64, 41).toString("base64") };
+    const connect = (value:unknown = body) => fetch(f.url + "/v1/connect", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify(value) });
+    return { ...f, routerSocket:router, publicKey, body, connect };
+  }
+  test("only device approval admits a phone; retry preserves its authorization and other phones", async () => {
+    const f = await setup();
+    expect(await (await fetch(f.url + `/v1/connect/${f.router.id}`)).json()).toMatchObject({ routerId:f.router.id, publicKey:f.publicKey });
+    const pending = f.connect();
+    expect(await f.routerSocket.next("connect_request")).toEqual({ type:"connect_request", ...f.body });
+    expect(f.store.phones(f.router.id)).toHaveLength(1);
+    const ledger = f.store.one<Record<string,unknown>>("SELECT * FROM connection_attempts WHERE id=?", f.body.requestId)!;
+    expect(Object.keys(ledger).sort()).toEqual(["error", "expires_at", "id", "router_id", "status", "token_hash"]);
+    f.routerSocket.send({ type:"connect_result", requestId:f.body.requestId, phoneToken:f.body.phoneToken, ok:true });
+    const response = await pending; expect(response.status).toBe(200);
+    const identity = await response.json();
+    expect(identity).toMatchObject({ routerId:f.router.id, role:"phone" });
+    expect(f.store.phones(f.router.id)).toHaveLength(2);
+    expect(await (await f.connect()).json()).toEqual(identity);
+    expect(f.store.phones(f.router.id)).toHaveLength(2);
+    f.service.stop();
+    const restarted = new CallingService({ store:f.store, port:0, maintenance:false }); resources.push(() => restarted.stop());
+    const retried = await fetch(`http://127.0.0.1:${restarted.server.port}/v1/connect`, {
+      method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify(f.body) });
+    expect(await retried.json()).toEqual(identity);
+  });
+  test("incorrect passwords and envelopes remain explicit failures without granting access", async () => {
+    const f = await setup(), pending = f.connect(); await f.routerSocket.next("connect_request");
+    f.routerSocket.send({ type:"connect_result", requestId:f.body.requestId, ok:false, error:"incorrect_router_password" });
+    expect((await pending).status).toBe(401);
+    expect(await (await f.connect()).json()).toEqual({error:"incorrect_router_password"});
+    expect(f.store.phones(f.router.id)).toHaveLength(1);
+    expect((await f.connect({...f.body, requestId:randomUUID(), enc:"invalid"})).status).toBe(400);
+    expect((await f.connect({...f.body, phoneToken:secret()})).status).toBe(409);
+  });
+  test("another enrolled router cannot approve the connection and disconnect bounds the HTTP wait", async () => {
+    const f = await setup();
+    const token = secret(); f.store.enroll({invitation:f.store.invite(), requestId:randomUUID(), deviceToken:token});
+    const foreign = new Peer(f.url,token); await foreign.next("hello");
+    const pending = f.connect(); await f.routerSocket.next("connect_request");
+    foreign.send({type:"connect_result", requestId:f.body.requestId, phoneToken:f.body.phoneToken, ok:true});
+    expect((await foreign.next("error")).error).toBe("connection_not_found");
+    f.routerSocket.socket.close();
+    expect((await pending).status).toBe(503);
+    expect(f.store.phones(f.router.id)).toHaveLength(1);
+  });
+  test("an unknown device is explicit and a concurrent call fails approval without leaving the phone waiting", async () => {
+    const f = await setup();
+    const missing = await fetch(f.url + `/v1/connect/${randomUUID()}`);
+    expect(missing.status).toBe(404); expect(await missing.json()).toEqual({error:"router_not_found"});
+    const pending = f.connect(); await f.routerSocket.next("connect_request");
+    f.store.command(f.phone, {requestId:randomUUID(), callId:randomUUID(), action:"dial", number:"12345"});
+    f.routerSocket.send({type:"connect_result", requestId:f.body.requestId, phoneToken:f.body.phoneToken, ok:true});
+    const response = await pending;
+    expect(response.status).toBe(409); expect(await response.json()).toEqual({error:"call_in_progress"});
+    expect(f.store.phones(f.router.id)).toHaveLength(1);
+  });
+});
+
+describe("management peer rendezvous", () => {
+  async function connected() {
+    const f = fixture(), router = new Peer(f.url, f.routerToken), phone = new Peer(f.url, f.phoneToken);
+    await router.next("hello"); await phone.next("hello");
+    router.send({ type: "peer_register" });
+    expect((await phone.next("presence", v => v.peerManagement === true)).routerOnline).toBe(true);
+    return { ...f, routerSocket: router, phoneSocket: phone };
+  }
+  test("authenticated peers exchange direct-only candidates independently of calls", async () => {
+    const f = await connected(), id = randomUUID();
+    f.phoneSocket.send({ type: "peer_open", sessionId: id });
+    const left = await f.phoneSocket.next("peer_session"), right = await f.routerSocket.next("peer_session");
+    expect(left).toEqual(right);
+    expect(left).toMatchObject({ sessionId: id, routerId: f.router.id, phoneId: f.phone.id,
+      iceServers: [{ urls: ["stun:turn.example.invalid:3478"], username: "", credential: "" }] });
+    f.routerSocket.send({ type: "peer_signal", sessionId: id, description: { type: "offer", sdp: "v=0\r\n" } });
+    expect((await f.phoneSocket.next("peer_signal")).description.type).toBe("offer");
+    f.phoneSocket.send({ type: "peer_signal", sessionId: id, description: { type: "answer", sdp: "v=0\r\n" } });
+    expect((await f.routerSocket.next("peer_signal")).description.type).toBe("answer");
+    f.phoneSocket.send({ type: "peer_signal", sessionId: id, description: { type: "offer", sdp: "v=0\r\n" } });
+    expect((await f.phoneSocket.next("error")).error).toBe("invalid_sdp_direction");
+  });
+  test("two paired phones have independent sessions and cannot signal each other's peer", async () => {
+    const f = await connected(), token = secret();
+    f.store.pair({ code: f.store.pairing(f.router).code, requestId: randomUUID(), phoneToken: token });
+    const second = new Peer(f.url, token); await second.next("hello");
+    const a = randomUUID(), b = randomUUID();
+    f.phoneSocket.send({ type: "peer_open", sessionId: a });
+    await f.phoneSocket.next("peer_session"); await f.routerSocket.next("peer_session");
+    second.send({ type: "peer_open", sessionId: b });
+    await second.next("peer_session"); await f.routerSocket.next("peer_session");
+    second.send({ type: "peer_close", sessionId: a });
+    expect((await second.next("error")).error).toBe("peer_session_not_found");
+    f.phoneSocket.send({ type: "peer_close", sessionId: a });
+    expect((await f.routerSocket.next("peer_closed")).sessionId).toBe(a);
+    f.routerSocket.send({ type: "peer_signal", sessionId: b, description: { type: "offer", sdp: "v=0\r\n" } });
+    expect((await second.next("peer_signal")).sessionId).toBe(b);
+  });
+  test.each(["expiry", "revocation", "disconnect"])("%s closes the admitted direct session", async reason => {
+    const f = await connected(), id = randomUUID();
+    f.phoneSocket.send({ type: "peer_open", sessionId: id });
+    await f.phoneSocket.next("peer_session"); await f.routerSocket.next("peer_session");
+    if (reason === "expiry") { f.advance(301); await f.service.tick(); }
+    if (reason === "revocation") { f.store.run("UPDATE endpoints SET revoked=1 WHERE id=?", f.phone.id); await f.service.tick(); }
+    if (reason === "disconnect") f.phoneSocket.socket.close();
+    const closed = await f.routerSocket.next("peer_closed");
+    expect(closed.sessionId).toBe(id);
+    expect(closed.reason).toBe(reason === "expiry" ? "expired" : reason === "revocation" ? "pairing_revoked" : "peer_offline");
+  });
+});
 
 describe("authenticated agent relay", () => {
   function relayRequest(f: ReturnType<typeof fixture>, overrides: Record<string, unknown> = {}) {
@@ -121,6 +287,13 @@ describe("authenticated agent relay", () => {
 });
 
 describe("local call command admission", () => {
+  test("direct command admission has a stable cross-language authentication vector", () => {
+    const command = {type:"command", requestId:"00000000-0000-4000-8000-000000000002", callId:"00000000-0000-4000-8000-000000000003",
+      action:"dial", number:"+12345", expiresAt:1800000020};
+    expect(callAdmission(hash("r".repeat(43)), "00000000-0000-4000-8000-000000000001", command)).toEqual({
+      phoneId:"00000000-0000-4000-8000-000000000001", mac:"xjR1rpmlcyFjmmTUQyYGOPu_5XgMkvh9WnwhGGuv-co"});
+    expect(() => callAdmission("invalid", "00000000-0000-4000-8000-000000000001", command)).toThrow("Invalid router credential verifier");
+  });
   test("LAN admission and relay retry retain one canonical operation and expiry", async () => {
     const f = fixture(), router = new Peer(f.url, f.routerToken), phone = new Peer(f.url, f.phoneToken);
     await router.next("hello"); await phone.next("hello");
@@ -132,12 +305,14 @@ describe("local call command admission", () => {
     const admitted = await submit("local"), local = await admitted.json() as any;
     expect(admitted.status).toBe(200); expect(local.status).toBe("pending");
     expect(local.command).toEqual({ type: "command", ...body, expiresAt: f.store.now() + 20 });
+    expect(local.proof).toEqual(callAdmission(f.router.token_hash, f.phone.id, local.command));
     router.send({ type: "ping" }); await router.next("pong");
     expect(router.queued("command")).toBe(false);
     await phone.next("accepted");
     f.advance(3);
     const relayed = await (await submit("relay")).json() as any;
     expect(relayed.command).toEqual(local.command);
+    expect(relayed.proof).toEqual(local.proof);
     expect(await router.next("command")).toEqual(local.command);
     router.send({ type: "result", requestId: body.requestId, callId: body.callId, ok: true });
     expect((await phone.next("result")).ok).toBe(true);
@@ -217,7 +392,7 @@ describe("pairing and durable authorization", () => {
     expect(() => store.enroll({ invitation, requestId: randomUUID(), deviceToken: secret() })).toThrow("invalid_invitation");
     expect(() => store.enroll({ invitation, requestId, deviceToken: secret() })).toThrow("enrollment_conflict");
   });
-  test("expired pairing codes fail and re-pairing revokes the previous phone", () => {
+  test("expired pairing codes fail and another phone coexists with the first", () => {
     const { store, router, phone, phoneToken, advance } = fixture();
     const expired = store.pairing(router).code;
     advance(300);
@@ -226,7 +401,7 @@ describe("pairing and durable authorization", () => {
     const replacement = store.pair({ code, requestId, phoneToken: token });
     expect(replacement.id).not.toBe(phone.id);
     expect(store.pair({ code, requestId, phoneToken: token }).id).toBe(replacement.id);
-    expect(() => store.authenticate(`Bearer ${phoneToken}`)).toThrow("unauthorized");
+    expect(store.authenticate(`Bearer ${phoneToken}`).id).toBe(phone.id);
   });
   test("cross-router operations cannot inspect or mutate a call", () => {
     const { store, router, phone } = fixture();
@@ -338,8 +513,12 @@ describe("incoming-call delivery and recovery", () => {
     const callId = randomUUID();
     router.send({ type: "event", eventId: randomUUID(), callId, sequence: 1, observedAt: f.store.now(), state: "ringing", mediaReady: false });
     expect((await phone.next("call")).callId).toBe(callId);
+    phone.send({ type: "command", requestId: randomUUID(), callId, action: "answer" });
+    const answer = await router.next("command");
+    router.send({ type: "result", requestId: answer.requestId, callId, ok: true });
     router.send({ type: "event", eventId: randomUUID(), callId, sequence: 2, observedAt: f.store.now(), state: "active", mediaReady: true });
-    await phone.next("call"); f.advance(3601);
+    await phone.next("call", call => call.state === "active");
+    await router.next("ice_servers"); f.advance(3601);
     phone.send({ type: "media_request", callId });
     expect((await router.next("ice_servers")).iceServers[0].username.split(":")[0]).toBe(String(f.store.now() + 3600));
     expect((await router.next("media_request")).callId).toBe(callId);
@@ -391,5 +570,189 @@ describe("incoming-call delivery and recovery", () => {
     expect(apns.authorization(1800000010)).toBe(jwt);
     expect(apns.authorization(1799999990)).not.toBe(jwt);
     apns.close();
+  });
+});
+
+describe("multiple paired phones", () => {
+  function addPhone(f: ReturnType<typeof fixture>) {
+    const token = secret();
+    const endpoint = f.store.pair({ code: f.store.pairing(f.router).code, requestId: randomUUID(), phoneToken: token });
+    return { endpoint, token };
+  }
+  function ring(f: ReturnType<typeof fixture>, callId = randomUUID()) {
+    return f.store.event(f.router, { callId, eventId: randomUUID(), sequence: 1,
+      state: "ringing", number: "12345", observedAt: f.store.now(), mediaReady: false });
+  }
+  test("adding a phone preserves existing sockets, push tokens and relay access", async () => {
+    const f = fixture(), router = new Peer(f.url, f.routerToken), first = new Peer(f.url, f.phoneToken);
+    await router.next("hello"); await first.next("hello");
+    f.store.pushToken(f.phone, { token: "ab".repeat(32), environment: "sandbox" });
+    const result = await fetch(f.url + "/v1/pair", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: f.store.pairing(f.router).code, requestId: randomUUID(), phoneToken: secret() }) });
+    expect(result.status).toBe(200);
+    first.send({ type: "ping" }); await first.next("pong");
+    expect(f.store.one<any>("SELECT push_disabled,push_token FROM phones WHERE endpoint_id=?", f.phone.id))
+      .toEqual({ push_disabled: 0, push_token: "ab".repeat(32) });
+    const requestId = randomUUID();
+    const read = fetch(f.url + "/v1/agent", { method: "POST", headers: { authorization: `Bearer ${f.phoneToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ requestId, method: "GET", path: "/api/battery", body: "", expiresAt: f.store.now() + 20 }) });
+    await router.next("agent_request");
+    router.send({ type: "agent_result", requestId, status: 200, body: Buffer.from('{"ok":true,"data":{"capacity":87}}').toString("base64") });
+    expect((await read).status).toBe(200);
+  });
+  test.each([0, 1])("all phones ring; contender %i claims audio once and ends the other phone", async winner => {
+    const f = fixture(), other = addPhone(f), router = new Peer(f.url, f.routerToken);
+    const phones = [new Peer(f.url, f.phoneToken), new Peer(f.url, other.token)];
+    await router.next("hello"); await Promise.all(phones.map(phone => phone.next("hello")));
+    const callId = randomUUID();
+    router.send({ type: "event", callId, eventId: randomUUID(), sequence: 1, state: "ringing", number: "12345", observedAt: f.store.now(), mediaReady: false });
+    await Promise.all(phones.map(async phone => expect((await phone.next("call")).state).toBe("ringing")));
+    phones[1 - winner].send({ type: "media_request", callId });
+    expect((await phones[1 - winner].next("error")).error).toBe("call_not_claimed");
+    const answerIds = [randomUUID(), randomUUID()];
+    phones[winner].send({ type: "command", requestId: answerIds[winner], callId, action: "answer" });
+    await phones[winner].next("accepted");
+    phones[1 - winner].send({ type: "command", requestId: answerIds[1 - winner], callId, action: "answer" });
+    expect((await phones[1 - winner].next("error")).error).toBe("answered_elsewhere");
+    const ended = await phones[1 - winner].next("call", call => call.state === "ended");
+    expect(ended.reason).toBe("answered_elsewhere");
+    const admitted = await router.next("command");
+    expect(admitted.requestId).toBe(answerIds[winner]);
+    expect(f.store.all("SELECT id FROM operations WHERE call_id=? AND action='answer'", callId)).toHaveLength(1);
+    phones[winner].send({ type: "media_request", callId });
+    await router.next("media_request");
+    router.send({ type: "signal", callId, description: { type: "offer", sdp: "v=0\r\n" } });
+    await phones[winner].next("signal");
+    expect(phones[1 - winner].queued("signal")).toBe(false);
+    phones[1 - winner].send({ type: "command", requestId: randomUUID(), callId, action: "hangup" });
+    expect((await phones[1 - winner].next("error")).error).toBe("answered_elsewhere");
+    const reconnected = new Peer(f.url, winner === 0 ? other.token : f.phoneToken);
+    expect((await reconnected.next("hello")).calls[0]).toMatchObject({ state: "ended", reason: "answered_elsewhere" });
+    router.send({ type: "result", requestId: admitted.requestId, callId, ok: true });
+    expect((await phones[winner].next("result")).ok).toBe(true);
+  });
+  test("simultaneous HTTP answers persist one winner and one modem operation", async () => {
+    const f = fixture(), other = addPhone(f), router = new Peer(f.url, f.routerToken); await router.next("hello");
+    const call = ring(f);
+    const results = await Promise.all([f.phoneToken, other.token].map(token => fetch(f.url + "/v1/call-operation", {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ requestId: randomUUID(), callId: call.id, action: "answer", delivery: "relay" }),
+    })));
+    expect(results.map(response => response.status).sort()).toEqual([200, 409]);
+    expect(f.store.all("SELECT id FROM operations WHERE call_id=?", call.id)).toHaveLength(1);
+    expect(f.store.call(call.id).state).toBe("answering");
+  });
+  test("declining on one phone keeps the others ringing, and the last decline reaches the modem", () => {
+    const f = fixture(), other = addPhone(f), call = ring(f);
+    const first = f.store.command(f.phone, { requestId: randomUUID(), callId: call.id, action: "hangup" });
+    expect(first.status).toBe("done");
+    expect(f.store.phoneCall(f.store.call(call.id), other.endpoint)?.state).toBe("ringing");
+    expect(f.store.phoneCall(f.store.call(call.id), f.phone)?.reason).toBe("declined_on_device");
+    const last = f.store.command(other.endpoint, { requestId: randomUUID(), callId: call.id, action: "hangup" });
+    expect(last.status).toBe("pending");
+    f.store.result(f.router, { requestId: last.id, callId: call.id, ok: true });
+    expect(f.store.call(call.id).state).toBe("ended");
+  });
+  test("incoming push delivery and retries belong to each phone independently", async () => {
+    const attempts = new Map<string, number>();
+    const f = fixture({ close() {}, async sendSMS() { throw new Error("Unexpected SMS"); }, async send(token) {
+      const n = (attempts.get(token) ?? 0) + 1; attempts.set(token, n);
+      return token.startsWith("ab") && n === 1 ? { kind: "retry", code: "apns_transport" } : { kind: "accepted", code: "accepted" };
+    } });
+    const other = addPhone(f), tokens = ["ab".repeat(32), "cd".repeat(32)];
+    f.store.pushToken(f.phone, { token: tokens[0], environment: "sandbox" });
+    f.store.pushToken(other.endpoint, { token: tokens[1], environment: "sandbox" });
+    ring(f); await f.service.tick(); expect([...attempts.values()]).toEqual([1, 1]);
+    f.advance(2); await f.service.tick();
+    expect(attempts.get(tokens[0])).toBe(2); expect(attempts.get(tokens[1])).toBe(1);
+  });
+  test("full SMS fans out once per phone, with independent retries and no historical delivery to later pairings", async () => {
+    const sent = new Map<string, string[]>();
+    const f = fixture({ close() {}, async send() { throw new Error("Unexpected call"); }, async sendSMS(token, _, event) {
+      const texts = sent.get(token) ?? []; texts.push(event.text); sent.set(token, texts);
+      return token.startsWith("ab") && texts.length === 1 ? { kind: "retry", code: "apns_transport" } : { kind: "accepted", code: "accepted" };
+    } });
+    const other = addPhone(f), tokens = ["ab".repeat(32), "cd".repeat(32)];
+    for (const [i, endpoint] of [f.phone, other.endpoint].entries()) {
+      expect((await fetch(f.url + "/v1/notification-token", { method: "PUT", headers: { authorization: `Bearer ${i === 0 ? f.phoneToken : other.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ token: tokens[i], environment: "sandbox" }) })).status).toBe(200);
+    }
+    const router = new Peer(f.url, f.routerToken), first = new Peer(f.url, f.phoneToken), second = new Peer(f.url, other.token);
+    await router.next("hello"); await first.next("hello"); await second.next("hello");
+    const event = { type: "sms_event", eventId: randomUUID(), messageId: "7", sender: "Synthetic", content: Buffer.from("Full synthetic SMS 123456").toString("base64") };
+    router.send(event); await router.next("sms_ack"); await first.next("sms_received"); await second.next("sms_received");
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(sent.get(tokens[0])).toEqual(["Full synthetic SMS 123456"]);
+    expect(sent.get(tokens[1])).toEqual(["Full synthetic SMS 123456"]);
+    addPhone(f); router.send(event); await router.next("sms_ack");
+    f.advance(2); await f.service.tick();
+    expect(sent.get(tokens[0])).toHaveLength(2); expect(sent.get(tokens[1])).toHaveLength(1);
+    expect(f.store.all("SELECT phone_id FROM sms_events WHERE event_id=?", event.eventId)).toHaveLength(2);
+    expect(f.store.all<any>("SELECT payload FROM sms_events WHERE event_id=?", event.eventId).every(row => row.payload === null)).toBe(true);
+  });
+  test("forgetting one phone leaves another paired and the router monitoring messages", async () => {
+    const f = fixture(), other = addPhone(f), router = new Peer(f.url, f.routerToken); await router.next("hello");
+    expect((await fetch(f.url + "/v1/phone", { method: "DELETE", headers: { authorization: `Bearer ${f.phoneToken}` } })).status).toBe(200);
+    await router.next("paired");
+    expect(f.store.authenticate(`Bearer ${other.token}`).id).toBe(other.endpoint.id);
+    expect(() => f.store.authenticate(`Bearer ${f.phoneToken}`)).toThrow("unauthorized");
+    addPhone(f);
+    expect(() => f.store.authenticate(`Bearer ${f.phoneToken}`)).toThrow("unauthorized");
+  });
+});
+
+describe("multi-phone persistence upgrades", () => {
+  test("legacy outbox deliveries and endpoint credentials survive composite-key migration", () => {
+    const f = fixture();
+    const operation = f.store.command(f.phone, { requestId: randomUUID(), callId: randomUUID(), action: "dial", number: "12345" });
+    f.store.db.exec(`DROP TABLE push_outbox;
+      CREATE TABLE push_outbox(call_id TEXT PRIMARY KEY REFERENCES calls(id),phone_id TEXT NOT NULL,status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL,last_error TEXT);
+      DROP TABLE sms_events;
+      CREATE TABLE sms_events(router_id TEXT NOT NULL,event_id TEXT NOT NULL,phone_id TEXT NOT NULL REFERENCES endpoints(id),
+        message_id TEXT NOT NULL,fingerprint TEXT NOT NULL,payload TEXT,received_at INTEGER NOT NULL,status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL,last_error TEXT,PRIMARY KEY(router_id,event_id));`);
+    f.store.run("INSERT INTO push_outbox VALUES(?,?,'pending',3,?,'apns_transport')", operation.call_id, f.phone.id, f.store.now());
+    const eventId = randomUUID();
+    f.store.run("INSERT INTO sms_events VALUES(?,?,?,'42','synthetic-fingerprint',?,?,'pending',2,?,'apns_transport')",
+      f.router.id, eventId, f.phone.id, '{"text":"Synthetic pending SMS"}', f.store.now(), f.store.now());
+    const endpoints = f.store.all("SELECT * FROM endpoints"), calls = f.store.all("SELECT * FROM calls");
+    const push = f.store.all("SELECT * FROM push_outbox"), sms = f.store.all("SELECT * FROM sms_events");
+    const migrated = new Store(f.store.db.filename, f.store.now);
+    try {
+      expect(migrated.all("SELECT * FROM endpoints")).toEqual(endpoints);
+      expect(migrated.all("SELECT * FROM calls")).toEqual(calls);
+      expect(migrated.all("SELECT * FROM push_outbox")).toEqual(push);
+      expect(migrated.all("SELECT * FROM sms_events")).toEqual(sms);
+      expect(migrated.all("PRAGMA foreign_key_check")).toEqual([]);
+      expect(migrated.authenticate(`Bearer ${f.phoneToken}`).id).toBe(f.phone.id);
+      const otherId = randomUUID();
+      migrated.run("INSERT INTO endpoints(id,role,router_id,token_hash) VALUES(?,'phone',?,?)", otherId, f.router.id, "synthetic-other-token-hash");
+      migrated.run("INSERT INTO push_outbox VALUES(?,?,'pending',0,?,NULL)", operation.call_id, otherId, f.store.now());
+      migrated.run("INSERT INTO sms_events VALUES(?,?,?,'42','synthetic-fingerprint',?,?,'pending',0,?,NULL)",
+        f.router.id, eventId, otherId, '{"text":"Synthetic pending SMS"}', f.store.now(), f.store.now());
+      expect(migrated.all("SELECT phone_id FROM push_outbox")).toHaveLength(2);
+      expect(migrated.all("SELECT phone_id FROM sms_events")).toHaveLength(2);
+      const reopened = new Store(migrated.db.filename, f.store.now);
+      try { expect(reopened.all("SELECT phone_id FROM sms_events")).toHaveLength(2); }
+      finally { reopened.close(); }
+    } finally { migrated.close(); }
+  });
+  test("restart preserves the answered phone and does not ring a losing or dismissed phone", () => {
+    const f = fixture();
+    const other = f.store.pair({ code: f.store.pairing(f.router).code, requestId: randomUUID(), phoneToken: secret() });
+    const call = f.store.event(f.router, { eventId: randomUUID(), callId: randomUUID(), sequence: 1,
+      observedAt: f.store.now(), state: "ringing", mediaReady: false });
+    const answer = { requestId: randomUUID(), callId: call.id, action: "answer" };
+    const accepted = f.store.command(other, answer);
+    const reopened = new Store(f.store.db.filename, f.store.now);
+    try {
+      const current = reopened.call(call.id);
+      expect(reopened.phoneCall(current, f.phone)).toMatchObject({ state: "ended", reason: "answered_elsewhere" });
+      expect(reopened.phoneCall(current, other)).toMatchObject({ state: "answering", phone_id: other.id });
+      expect(reopened.command(other, answer).id).toBe(accepted.id);
+      expect(() => reopened.command(f.phone, answer)).toThrow("call_forbidden");
+      expect(reopened.all("SELECT * FROM operations WHERE call_id=?", call.id)).toHaveLength(1);
+    } finally { reopened.close(); }
   });
 });

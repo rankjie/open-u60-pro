@@ -39,6 +39,12 @@ impl AuthState {
         self.password_hash.lock().unwrap().is_some()
     }
 
+    /// Verify a device-connection login without creating an administrative session.
+    pub fn verify_password(&self, password: &str) -> bool {
+        let hash = format!("{:X}", Sha256::digest(password.as_bytes()));
+        self.password_hash.lock().unwrap().as_deref() == Some(&hash)
+    }
+
     /// Attempt login with plaintext password. Returns bearer token on success.
     pub fn login(&self, password: &str) -> Option<String> {
         let hash = format!("{:X}", Sha256::digest(password.as_bytes()));

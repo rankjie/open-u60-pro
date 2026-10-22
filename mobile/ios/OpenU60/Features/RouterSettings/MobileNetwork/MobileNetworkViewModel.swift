@@ -96,7 +96,7 @@ final class MobileNetworkViewModel {
                 let wwanData = try await client.getJSON("/api/modem/data")
                 let wwan = MobileNetworkParser.parseWWAN(wwanData)
                 config.connectStatus = wwan.connectStatus
-                let connected = wwan.connectStatus.contains("connected")
+                let connected = config.isConnected
                 if enabled == connected {
                     showMessage(enabled ? "Mobile data enabled" : "Mobile data disabled", isError: false)
                     isLoading = false

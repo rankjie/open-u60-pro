@@ -1,10 +1,38 @@
-import type { PushProvider } from "./apns";
-import { Fault, hash, text, uuid, type Endpoint } from "./protocol";
+import type { PushProvider, SMSMetadata } from "./apns";
+import { Fault, hash, text, uuid, object, type Endpoint } from "./protocol";
 import type { Store } from "./store";
 
 interface Event {
   router_id: string; event_id: string; phone_id: string; message_id: string; fingerprint: string; payload: string | null; received_at: number;
   status: string; attempts: number;
+}
+
+export function smsContent(body: Record<string, unknown>) {
+  const sender = text(body.sender, 128), messageId = text(body.messageId, 32);
+  if (!/^\d{1,20}$/.test(messageId) || typeof body.content !== "string" || body.content.length > 87384
+    || Buffer.from(body.content, "base64").toString("base64") !== body.content) throw new Fault(400, "invalid_sms_content");
+  const bytes = Buffer.from(body.content, "base64");
+  if (bytes.length > 65536) throw new Fault(400, "sms_content_too_large");
+  let content: string;
+  try { content = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+  catch { throw new Fault(400, "invalid_sms_encoding"); }
+  let message: SMSMetadata | undefined;
+  if (body.message !== undefined && body.message !== null) {
+    const value = object(body.message);
+    if (typeof value.date !== "string" || !/^\d{2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},[+-]?\d{1,2}$/.test(value.date)
+      || ![0, 1].includes(value.tag as number) || typeof value.memStore !== "string" || value.memStore.length > 16
+      || typeof value.groupId !== "string" || value.groupId.length > 128) throw new Fault(400, "invalid_sms_metadata");
+    let line: SMSMetadata["line"] = null;
+    if (value.line !== null && value.line !== undefined) {
+      const item = object(value.line);
+      if (typeof item.iccid !== "string" || !/^[0-9fF]{18,22}$/.test(item.iccid)
+        || !["sim", "manual", "unavailable"].includes(item.source as string)
+        || (item.number !== null && (typeof item.number !== "string" || !/^\+?\d{3,15}$/.test(item.number)))) throw new Fault(400, "invalid_sms_line");
+      line = { iccid: item.iccid, number: item.number as string | null, source: item.source as string };
+    }
+    message = { date: value.date, tag: value.tag as number, memStore: value.memStore, groupId: value.groupId, line };
+  }
+  return { sender, text: content, messageId, ...(message ? { message } : {}) };
 }
 export class SMSNotifications {
   private pushing = new Set<string>();
@@ -24,28 +52,21 @@ export class SMSNotifications {
     if (phone.role !== "phone") throw new Fault(403, "phone_required");
     this.store.run("DELETE FROM notification_tokens WHERE endpoint_id=?", phone.id);
   }
-  accept(router: Endpoint, body: Record<string, unknown>): Event {
+  accept(router: Endpoint, body: Record<string, unknown>): Event[] {
     if (router.role !== "router") throw new Fault(403, "router_required");
-    const id = uuid(body.eventId), sender = text(body.sender, 128), messageId = text(body.messageId, 32);
-    if (!/^\d{1,20}$/.test(messageId) || typeof body.content !== "string" || body.content.length > 87384
-      || Buffer.from(body.content, "base64").toString("base64") !== body.content) throw new Fault(400, "invalid_sms_content");
-    const bytes = Buffer.from(body.content, "base64");
-    if (bytes.length > 65536) throw new Fault(400, "sms_content_too_large");
-    let content: string;
-    try { content = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
-    catch { throw new Fault(400, "invalid_sms_encoding"); }
-    const payload = JSON.stringify({ sender, text: content, messageId }), fingerprint = hash(payload);
+    const id = uuid(body.eventId), content = smsContent(body), messageId = content.messageId;
+    const payload = JSON.stringify(content), fingerprint = hash(payload);
     return this.store.transaction(() => {
-      const old = this.store.one<Event>("SELECT * FROM sms_events WHERE router_id=? AND event_id=?", router.id, id);
-      if (old) {
-        if (old.fingerprint !== fingerprint) throw new Fault(409, "sms_event_conflict");
+      const old = this.store.all<Event>("SELECT * FROM sms_events WHERE router_id=? AND event_id=?", router.id, id);
+      if (old.length) {
+        if (old.some(event => event.fingerprint !== fingerprint)) throw new Fault(409, "sms_event_conflict");
         return old;
       }
-      const phone = this.store.one<Endpoint>("SELECT * FROM endpoints WHERE router_id=? AND role='phone' AND revoked=0", router.id);
-      if (!phone) throw new Fault(409, "no_paired_phone");
-      this.store.run("INSERT INTO sms_events(router_id,event_id,phone_id,message_id,fingerprint,payload,received_at,status,next_attempt) VALUES(?,?,?,?,?,?,?,'pending',?)",
+      const phones = this.store.phones(router.id);
+      if (!phones.length) throw new Fault(409, "no_paired_phone");
+      for (const phone of phones) this.store.run("INSERT INTO sms_events(router_id,event_id,phone_id,message_id,fingerprint,payload,received_at,status,next_attempt) VALUES(?,?,?,?,?,?,?,'pending',?)",
         router.id, id, phone.id, messageId, fingerprint, payload, this.store.now(), this.store.now());
-      return this.store.one<Event>("SELECT * FROM sms_events WHERE router_id=? AND event_id=?", router.id, id)!;
+      return this.store.all<Event>("SELECT * FROM sms_events WHERE router_id=? AND event_id=?", router.id, id);
     });
   }
   async tick() {
@@ -62,33 +83,33 @@ export class SMSNotifications {
     } finally { this.maintaining = false; }
   }
   async deliver(event: Event) {
-    const key = `${event.router_id}:${event.event_id}`;
+    const key = `${event.router_id}:${event.event_id}:${event.phone_id}`;
     if (!this.push || this.pushing.has(key) || this.pushing.size >= 4) return;
     if (event.received_at <= this.store.now() - 86400 || event.attempts >= 12) {
-      this.store.run("UPDATE sms_events SET status='expired',payload=NULL WHERE router_id=? AND event_id=? AND status='pending'", event.router_id, event.event_id);
+      this.store.run("UPDATE sms_events SET status='expired',payload=NULL WHERE router_id=? AND event_id=? AND phone_id=? AND status='pending'", event.router_id, event.event_id, event.phone_id);
       return;
     }
     const phone = this.store.one<{ token: string; environment: "sandbox" | "production" }>(
       "SELECT notification_tokens.* FROM notification_tokens JOIN endpoints ON endpoints.id=endpoint_id WHERE endpoint_id=? AND disabled=0 AND revoked=0", event.phone_id);
     if (!phone || event.status !== "pending") return;
     if (event.payload === null) throw new Error("Pending SMS notification has no payload");
-    const claimed = this.store.run("UPDATE sms_events SET status='inflight',attempts=attempts+1 WHERE router_id=? AND event_id=? AND status='pending'",
-      event.router_id, event.event_id);
+    const claimed = this.store.run("UPDATE sms_events SET status='inflight',attempts=attempts+1 WHERE router_id=? AND event_id=? AND phone_id=? AND status='pending'",
+      event.router_id, event.event_id, event.phone_id);
     if (!claimed.changes) return;
     this.pushing.add(key);
     try {
       const outcome = await this.push.sendSMS(phone.token, phone.environment,
         { id: event.event_id, routerId: event.router_id, expiresAt: event.received_at + 86400, ...JSON.parse(event.payload) });
-      this.store.run("UPDATE sms_events SET status=?,last_error=?,next_attempt=?,payload=? WHERE router_id=? AND event_id=? AND status='inflight'",
+      this.store.run("UPDATE sms_events SET status=?,last_error=?,next_attempt=?,payload=? WHERE router_id=? AND event_id=? AND phone_id=? AND status='inflight'",
         outcome.kind === "accepted" ? "accepted" : outcome.kind === "reject" ? "rejected" : "pending",
         outcome.kind === "accepted" ? null : outcome.code,
-        this.store.now() + Math.min(3600, 2 ** (event.attempts + 1)), outcome.kind === "retry" ? event.payload : null, event.router_id, event.event_id);
+        this.store.now() + Math.min(3600, 2 ** (event.attempts + 1)), outcome.kind === "retry" ? event.payload : null, event.router_id, event.event_id, event.phone_id);
       if (outcome.kind === "reject" && ["BadDeviceToken", "Unregistered", "DeviceTokenNotForTopic"].includes(outcome.code)) {
         this.store.run("UPDATE notification_tokens SET disabled=1 WHERE endpoint_id=? AND token=?", event.phone_id, phone.token);
       }
     } catch (error) {
-      this.store.run("UPDATE sms_events SET status='pending',last_error='provider_failure',next_attempt=? WHERE router_id=? AND event_id=? AND status='inflight'",
-        this.store.now() + 30, event.router_id, event.event_id);
+      this.store.run("UPDATE sms_events SET status='pending',last_error='provider_failure',next_attempt=? WHERE router_id=? AND event_id=? AND phone_id=? AND status='inflight'",
+        this.store.now() + 30, event.router_id, event.event_id, event.phone_id);
       console.error("sms_push_provider_failed", error instanceof Error ? error.name : "unknown");
     } finally { this.pushing.delete(key); }
   }

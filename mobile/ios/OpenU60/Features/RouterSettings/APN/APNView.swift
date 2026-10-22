@@ -91,6 +91,7 @@ struct APNView: View {
             }
         }
         .navigationTitle("APN Settings")
+        .keyboardDismissal()
         .refreshable { await viewModel.refresh() }
         .overlay {
             if viewModel.isLoading {
@@ -195,6 +196,7 @@ struct APNFormSheet: View {
                 }
             }
             .navigationTitle(viewModel.isEditing ? "Edit APN" : "New APN")
+            .keyboardDismissal()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -232,6 +234,7 @@ struct APNAutoDetailSheet: View {
                 }
             }
             .navigationTitle("Auto APN")
+            .keyboardDismissal()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

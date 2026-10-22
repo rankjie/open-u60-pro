@@ -54,6 +54,7 @@ struct PortForwardFormView: View {
                 }
             }
             .navigationTitle("New Port Forward")
+            .keyboardDismissal()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

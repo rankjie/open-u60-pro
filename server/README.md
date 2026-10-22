@@ -5,6 +5,14 @@ Tunnel). SQLite owns endpoint pairing, call sessions, command idempotency, and
 the incoming-call push outbox. Media remains WebRTC between router and phone;
 Coturn relays DTLS-SRTP when a direct connection cannot be established.
 
+The same service also introduces authenticated management peers. An upgraded
+router advertises support, and paired phones exchange scoped SDP/ICE through
+the existing socket. Direct management uses a reliable WebRTC data channel;
+failed punching falls back to the existing agent relay. Coturn's UDP listener
+also supplies STUN discovery; no new listener, credential, or provisioning step
+is required. See [the management protocol](../docs/remote-calling.md#automatic-management-paths)
+for leases, revocation, bounds, and operation idempotency.
+
 ## Checks
 
 ```sh
@@ -74,12 +82,23 @@ client consume it directly. Do not include it in a shell argument, log, issue,
 or repository. The router persists its own generated device token before using
 the invitation; identical registration retries recover the same endpoint.
 
-In the iPhone app, use Settings → Remote calling while connected to the router
+In the iPhone app, open Calls and tap its connection indicator while connected to the router
 for the initial enrollment. The app then pairs itself through the router's
 short-lived pairing code. After that, mobile data or any Wi-Fi is sufficient.
-Pairing another phone revokes the old phone; re-pairing during a call is refused.
+Pairing another phone preserves the existing phones; pairing during a call is refused.
+All paired phones ring for an incoming call. The first answer owns the call; other
+phones stop ringing. Each phone receives its own complete SMS notification and
+retains independent push-token and retry state.
 
 ## Protocol and failure behavior
+
+For an enrolled router, phones can now connect using the device string shown by
+the touchscreen's **Wi-Fi → Connect app** page and the router password. Device
+discovery publishes only the router identity and its registered P-256 public key.
+The password is HPKE-encrypted to the router and verified there before the server
+creates an independent phone endpoint. The phone retains its pending credential
+before requesting approval, allowing a lost response to be recovered without
+adding another endpoint. Existing pairings and the advanced setup remain valid.
 
 - Paired phones may relay bounded JSON management requests through the router's
   authenticated socket. A device journal protects writes across LAN/relay

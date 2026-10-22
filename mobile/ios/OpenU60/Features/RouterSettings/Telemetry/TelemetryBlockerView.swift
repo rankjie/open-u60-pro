@@ -85,6 +85,7 @@ struct TelemetryBlockerView: View {
             }
         }
         .navigationTitle("Telemetry Blocker")
+        .keyboardDismissal()
         .refreshable { await viewModel.refresh() }
         .overlay {
             if viewModel.isLoading {

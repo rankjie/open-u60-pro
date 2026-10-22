@@ -212,7 +212,11 @@ pub fn wifi_status(_state: &AppState) -> (u16, Value) {
 // PUT /api/wifi/settings
 // ---------------------------------------------------------------------------
 
-pub fn wifi_set(_state: &AppState, body: &[u8]) -> (u16, Value) {
+pub fn wifi_set(state: &AppState, body: &[u8]) -> (u16, Value) {
+    state.wifi_uplink.edit_hotspot(|| wifi_set_inner(body))
+}
+
+fn wifi_set_inner(body: &[u8]) -> (u16, Value) {
     let parsed: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(_) => return (400, json!({"ok": false, "error": "invalid JSON"})),
@@ -387,7 +391,11 @@ pub fn guest_status(_state: &AppState) -> (u16, Value) {
 // PUT /api/wifi/guest
 // ---------------------------------------------------------------------------
 
-pub fn guest_set(_state: &AppState, body: &[u8]) -> (u16, Value) {
+pub fn guest_set(state: &AppState, body: &[u8]) -> (u16, Value) {
+    state.wifi_uplink.edit_hotspot(|| guest_set_inner(body))
+}
+
+fn guest_set_inner(body: &[u8]) -> (u16, Value) {
     let parsed: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(_) => return (400, json!({"ok": false, "error": "invalid JSON"})),

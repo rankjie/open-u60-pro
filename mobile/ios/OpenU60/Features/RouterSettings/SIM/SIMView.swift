@@ -72,7 +72,7 @@ struct SIMView: View {
                 statusRow
                 infoRow("ICCID", viewModel.simInfo.iccid)
                 infoRow("IMSI", viewModel.simInfo.imsi)
-                infoRow("MSISDN", viewModel.simInfo.msisdn)
+                SIMPhoneNumberRow(viewModel: viewModel)
                 infoRow("SPN", viewModel.simInfo.spn)
                 mccMncRow
                 if !viewModel.simInfo.operatorName.isEmpty {
@@ -155,6 +155,7 @@ struct SIMView: View {
             }
         }
         .navigationTitle("SIM Card")
+        .keyboardDismissal()
         .refreshable { await viewModel.refresh() }
         .overlay {
             if viewModel.isLoading {
@@ -164,7 +165,6 @@ struct SIMView: View {
             }
         }
         .task(id: viewModel.identityRevision) { await viewModel.refresh() }
-        .task { await viewModel.watchIdentity() }
         .sheet(isPresented: $viewModel.showChangePinSheet) {
             ChangePinSheet(viewModel: viewModel)
         }
@@ -262,6 +262,106 @@ struct SIMView: View {
     }
 }
 
+struct SIMPhoneNumberRow: View {
+    let viewModel: SIMViewModel
+    @State private var edit: PhoneNumberEdit?
+
+    var body: some View {
+        Button {
+            edit = PhoneNumberEdit(sim: viewModel.simInfo)
+        } label: {
+            HStack {
+                Text("Phone number").foregroundStyle(.primary)
+                Spacer()
+                Text(viewModel.simInfo.msisdn.isEmpty ? "Add number" : viewModel.simInfo.msisdn)
+                    .foregroundStyle(viewModel.simInfo.msisdn.isEmpty ? .blue : .secondary)
+                    .monospacedDigit()
+                Image(systemName: "pencil").font(.footnote)
+            }
+        }
+        .disabled(viewModel.isLoading || !viewModel.simInfo.canEditPhoneNumber)
+        .accessibilityIdentifier("sim-phone-number")
+        .sheet(item: $edit) { selection in
+            SIMPhoneNumberEditor(viewModel: viewModel, sim: selection.sim)
+        }
+    }
+
+    private struct PhoneNumberEdit: Identifiable {
+        let sim: SIMInfo
+        var id: String { sim.iccid }
+    }
+}
+
+private struct SIMPhoneNumberEditor: View {
+    let viewModel: SIMViewModel
+    let sim: SIMInfo
+    @Environment(\.dismiss) private var dismiss
+    @State private var number: String
+    @State private var saving = false
+    @State private var error: String?
+    @FocusState private var focused: Bool
+
+    init(viewModel: SIMViewModel, sim: SIMInfo) {
+        self.viewModel = viewModel; self.sim = sim
+        _number = State(initialValue: sim.msisdn)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Phone number", text: $number)
+                        .keyboardType(.phonePad)
+                        .textContentType(.telephoneNumber)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .focused($focused)
+                        .disabled(saving)
+                        .accessibilityIdentifier("sim-phone-number-input")
+                } footer: {
+                    Text("Saved on U60 for this SIM, so all your phones share it. Leave blank to use the SIM's number.")
+                }
+                if sim.phoneNumberIsManual {
+                    Section {
+                        Button("Use SIM number") { Task { await save("") } }
+                            .disabled(saving)
+                            .accessibilityIdentifier("sim-phone-number-reset")
+                    }
+                }
+                if let error { Section { Text(error).foregroundStyle(.red) } }
+            }
+            .navigationTitle("Phone number")
+            .navigationBarTitleDisplayMode(.inline)
+            .keyboardDismissal()
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }.disabled(saving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button { Task { await save(number) } } label: {
+                        if saving { ProgressView() } else { Text("Save") }
+                    }
+                    .disabled(saving || SIMPhoneNumber.normalized(number) == nil)
+                    .accessibilityIdentifier("sim-phone-number-save")
+                }
+            }
+            .interactiveDismissDisabled(saving)
+            .task { focused = true }
+        }
+    }
+
+    private func save(_ input: String) async {
+        saving = true; error = nil; focused = false
+        do {
+            try await viewModel.savePhoneNumber(input, for: sim.iccid)
+            dismiss()
+        } catch {
+            self.error = error.localizedDescription
+        }
+        saving = false
+    }
+}
+
 // MARK: - Sheets
 
 /// Renders a failed attempt inside the presented sheet; `SIMView`'s own message row is behind it.
@@ -306,6 +406,7 @@ struct ChangePinSheet: View {
                 }
             }
             .navigationTitle("Change PIN")
+            .keyboardDismissal()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -362,6 +463,7 @@ struct EnterPinSheet: View {
                 }
             }
             .navigationTitle(title)
+            .keyboardDismissal()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -405,6 +507,7 @@ struct EnterPukSheet: View {
                 }
             }
             .navigationTitle("Enter PUK")
+            .keyboardDismissal()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -444,6 +547,7 @@ struct UnlockSIMSheet: View {
                 }
             }
             .navigationTitle("SIM Unlock")
+            .keyboardDismissal()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

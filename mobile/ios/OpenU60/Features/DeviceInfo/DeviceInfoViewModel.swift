@@ -19,10 +19,6 @@ final class DeviceInfoViewModel {
     /// Moves when the router changes SIM identity or switch phase; the view re-reads on it.
     var identityRevision: Int { client.identityRevision }
 
-    /// Keeps `identityRevision` current while this screen is up: the dashboard poller that
-    /// would otherwise notice a switch is paused on the Tools tab.
-    func watchIdentity() async { await client.watchSimIdentity() }
-
     func refresh() async {
         isLoading = true
         error = nil

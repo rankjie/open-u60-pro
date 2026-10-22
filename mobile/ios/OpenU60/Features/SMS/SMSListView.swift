@@ -10,6 +10,7 @@ struct SMSListView: View {
     @State private var showCompose = false
     @State private var searchText = ""
 
+
     /// Reference point every row's relative timestamp is measured from.
     @State private var now = Date()
 
@@ -30,20 +31,6 @@ struct SMSListView: View {
     var body: some View {
         NavigationStack(path: $messagePath) {
             List {
-                Picker("Storage", selection: Binding(
-                    get: { viewModel.storageFilter },
-                    set: { newValue in
-                        viewModel.storageFilter = newValue
-                        Task { await viewModel.refresh() }
-                    }
-                )) {
-                    ForEach(SMSStorageFilter.allCases, id: \.self) { filter in
-                        Text(filter.rawValue).tag(filter)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
-
                 if let error = viewModel.error {
                     Section {
                         Text(error)
@@ -52,20 +39,7 @@ struct SMSListView: View {
                     }
                 }
 
-                if viewModel.capacity.nvTotal > 0 {
-                    Section {
-                        HStack {
-                            Text("Storage")
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Text("\(viewModel.capacity.nvUsed)/\(viewModel.capacity.nvTotal)")
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                Section("\(filteredConversations.count) Conversations") {
+                Section {
                     ForEach(filteredConversations) { conversation in
                         NavigationLink(value: conversation.id) {
                             SMSConversationRow(conversation: conversation, now: now)
@@ -77,10 +51,14 @@ struct SMSListView: View {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
+                        .listRowInsets(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 16))
+                        .alignmentGuide(.listRowSeparatorLeading) { _ in 76 }
                     }
                 }
             }
+            .listStyle(.plain)
             .navigationTitle("Messages")
+            .navigationBarTitleDisplayMode(.large)
             .navigationDestination(for: String.self) { conversationId in
                 if let conversation = viewModel.conversations.first(where: { $0.id == conversationId }) {
                     SMSConversationView(viewModel: viewModel, conversation: conversation)
@@ -88,22 +66,30 @@ struct SMSListView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    NavigationLink {
-                        SMSForwardConfigView(viewModel: SMSForwardViewModel(client: client, authManager: authManager))
+                    Menu {
+                        NavigationLink {
+                            MessageSettingsView(client: client, authManager: authManager)
+                        } label: {
+                            Label("Message settings", systemImage: "gearshape")
+                        }
+                        if viewModel.capacity.nvTotal + viewModel.capacity.simTotal > 0 {
+                            Section("Storage") {
+                                Text("\(viewModel.capacity.nvUsed + viewModel.capacity.simUsed) of \(viewModel.capacity.nvTotal + viewModel.capacity.simTotal) messages")
+                            }
+                        }
                     } label: {
-                        Image(systemName: "gearshape")
+                        Image(systemName: "ellipsis.circle")
                     }
-                    .accessibilityLabel("SMS Forwarding")
+                    .accessibilityLabel("Message options")
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    HStack(spacing: 24) {
-                        Button {
-                            showCompose = true
-                        } label: {
-                            Image(systemName: "square.and.pencil")
-                        }
-                        .accessibilityLabel("New Message")
+                    Button {
+                        showCompose = true
+                    } label: {
+                        Image(systemName: "square.and.pencil")
                     }
+                    .accessibilityLabel("New Message")
+                    .accessibilityIdentifier("sms-compose")
                 }
             }
             .searchable(text: $searchText, prompt: "Search messages")
@@ -122,12 +108,13 @@ struct SMSListView: View {
                 }
             }
             .sheet(isPresented: $showCompose) {
-                SMSComposeView(viewModel: viewModel)
+                SMSComposeView(viewModel: viewModel) { number in
+                    let id = SMSParser.normalizeNumber(number)
+                    if viewModel.conversations.contains(where: { $0.id == id }) { messagePath = [id] }
+                }
             }
             .onReceive(ticker) { now = $0 }
-            .task(id: notifications.revision) {
-                await viewModel.refresh()
-                guard !Task.isCancelled else { return }
+            .task(id: notifications.openRevision) {
                 if let id = notifications.takeOpenMessageID(), let messageID = Int(id),
                    let conversation = viewModel.conversations.first(where: { $0.messages.contains { $0.id == messageID } }) {
                     messagePath = [conversation.id]
@@ -144,45 +131,51 @@ private struct SMSConversationRow: View {
     /// Bumped by the list's ticker, so the timestamp keeps up without a timer of its own.
     let now: Date
 
-    private static let relativeFormatter: RelativeDateTimeFormatter = {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter
-    }()
-
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(conversation.unreadCount > 0 ? Color.blue : Color.clear)
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+            Image(systemName: "person.fill")
+                .font(.system(size: 26))
+                .foregroundStyle(.white)
+                .frame(width: 48, height: 48)
+                .background(Color(.systemGray3), in: Circle())
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(conversation.number)
-                        .font(.body.weight(conversation.unreadCount > 0 ? .bold : .medium))
+                        .font(.body.weight(.semibold))
                         .lineLimit(1)
                     Spacer()
-                    // Formatted against `now` rather than `style: .relative`, which would install
-                    // a per-second refresh timer on every visible row.
-                    Text(Self.relativeFormatter.localizedString(for: conversation.latestTime, relativeTo: now))
+                    Text(timestamp)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                HStack {
-                    Text(conversation.latestMessage)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                    Spacer()
-                    if conversation.unreadCount > 0 {
-                        Text("\(conversation.unreadCount)")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(.blue, in: Capsule())
-                            .accessibilityLabel("\(conversation.unreadCount) unread")
-                    }
-                }
+                Text(conversation.latestMessage)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(conversation.messages.last?.lineLabel ?? "Line unknown")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
-        .padding(.vertical, 2)
+        .frame(minHeight: 64)
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(conversation.unreadCount > 0 ? "\(conversation.unreadCount) unread messages" : "")
+    }
+
+    private var timestamp: String {
+        let calendar = Calendar.autoupdatingCurrent
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: conversation.latestTime),
+                                            to: calendar.startOfDay(for: now)).day
+        if days == 0 { return conversation.latestTime.formatted(date: .omitted, time: .shortened) }
+        if days == 1 { return "Yesterday" }
+        if let days, (2..<7).contains(days) { return conversation.latestTime.formatted(.dateTime.weekday(.wide)) }
+        return conversation.latestTime.formatted(date: .numeric, time: .omitted)
     }
 }

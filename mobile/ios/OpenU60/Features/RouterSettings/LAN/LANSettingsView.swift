@@ -49,6 +49,7 @@ struct LANSettingsView: View {
             }
         }
         .navigationTitle("LAN / DHCP")
+        .keyboardDismissal()
         .refreshable { await viewModel.refresh() }
         .overlay {
             if viewModel.isLoading {

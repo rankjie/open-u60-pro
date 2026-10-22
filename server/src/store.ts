@@ -23,9 +23,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, call_id TEXT NOT NULL REFERENCES calls(id),
         action TEXT NOT NULL, fingerprint TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL,
         ok INTEGER, error TEXT, expires_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS push_outbox(call_id TEXT PRIMARY KEY REFERENCES calls(id), phone_id TEXT NOT NULL,
+      CREATE TABLE IF NOT EXISTS push_outbox(call_id TEXT NOT NULL REFERENCES calls(id), phone_id TEXT NOT NULL,
         status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL,
-        last_error TEXT);
+        last_error TEXT, PRIMARY KEY(call_id,phone_id));
       CREATE TABLE IF NOT EXISTS router_events(router_id TEXT NOT NULL, event_id TEXT NOT NULL,
         PRIMARY KEY(router_id,event_id));
       CREATE TABLE IF NOT EXISTS agent_operations(id TEXT NOT NULL, router_id TEXT NOT NULL,
@@ -36,7 +36,57 @@ export class Store {
       CREATE TABLE IF NOT EXISTS sms_events(router_id TEXT NOT NULL, event_id TEXT NOT NULL,
         phone_id TEXT NOT NULL REFERENCES endpoints(id), message_id TEXT NOT NULL, fingerprint TEXT NOT NULL, payload TEXT, received_at INTEGER NOT NULL,
         status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL,
-        last_error TEXT, PRIMARY KEY(router_id,event_id));`);
+        last_error TEXT, PRIMARY KEY(router_id,event_id,phone_id));
+      CREATE TABLE IF NOT EXISTS call_participants(call_id TEXT NOT NULL REFERENCES calls(id),
+        phone_id TEXT NOT NULL REFERENCES endpoints(id), dismissed INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(call_id,phone_id));
+      CREATE TABLE IF NOT EXISTS operation_phones(operation_id TEXT PRIMARY KEY REFERENCES operations(id),
+        phone_id TEXT NOT NULL REFERENCES endpoints(id));`);
+    this.transaction(() => {
+      const callColumns = this.all<{ name: string }>("PRAGMA table_info(calls)");
+      for (const [name, type] of [["phone_name", "TEXT"], ["phone_model", "TEXT"], ["answered_at", "INTEGER"]]) {
+        if (!callColumns.some(column => column.name === name)) this.db.exec(`ALTER TABLE calls ADD COLUMN ${name} ${type}`);
+      }
+      // Older outboxes addressed one phone; preserve each existing delivery during migration.
+      this.expandOutboxKey("push_outbox", ["call_id", "phone_id"]);
+      this.expandOutboxKey("sms_events", ["router_id", "event_id", "phone_id"]);
+      this.run("INSERT OR IGNORE INTO call_participants(call_id,phone_id) SELECT id,phone_id FROM calls WHERE phone_id<>''");
+    });
+  }
+  private expandOutboxKey(table: "push_outbox" | "sms_events", key: string[]) {
+    const columns = this.all<{ name: string; type: string; notnull: number; dflt_value: string | null; pk: number }>(`PRAGMA table_info(${table})`);
+    const primary = columns.filter(column => column.pk).sort((a, b) => a.pk - b.pk).map(column => column.name);
+    if (primary.join(",") === key.join(",")) return;
+    const legacy = table === "push_outbox" ? "call_id" : "router_id,event_id";
+    if (primary.join(",") !== legacy) throw new Error(`Unsupported ${table} primary key`);
+    const definitions = columns.map(column => {
+      const reference = table === "push_outbox" && column.name === "call_id" ? " REFERENCES calls(id)"
+        : table === "sms_events" && column.name === "phone_id" ? " REFERENCES endpoints(id)" : "";
+      return `${column.name} ${column.type}${column.notnull ? " NOT NULL" : ""}${column.dflt_value === null ? "" : ` DEFAULT ${column.dflt_value}`}${reference}`;
+    });
+    this.db.exec(`ALTER TABLE ${table} RENAME TO ${table}_single_phone;
+      CREATE TABLE ${table}(${definitions.join(",")}, PRIMARY KEY(${key.join(",")}));
+      INSERT INTO ${table} SELECT * FROM ${table}_single_phone;
+      DROP TABLE ${table}_single_phone;`);
+  }
+  operationPhone(operation: Operation): string {
+    const owner = this.one<{ phone_id: string }>("SELECT phone_id FROM operation_phones WHERE operation_id=?", operation.id)?.phone_id;
+    if (owner) return owner;
+    // Operations created before multi-phone support belonged to the call's single phone.
+    const legacyOwner = this.call(operation.call_id).phone_id;
+    if (!legacyOwner) throw new Fault(500, "operation_owner_missing");
+    return legacyOwner;
+  }
+  phones(routerId: string): Endpoint[] {
+    return this.all<Endpoint>("SELECT * FROM endpoints WHERE router_id=? AND role='phone' AND revoked=0", routerId);
+  }
+  phoneCall(call: Call, phone: Endpoint): Call | undefined {
+    const participant = this.one<{ dismissed: number }>("SELECT dismissed FROM call_participants WHERE call_id=? AND phone_id=?", call.id, phone.id);
+    if (!participant) return;
+    if (participant.dismissed || (call.direction === "incoming" && call.state !== "ringing" && call.state !== "ended" && call.phone_id !== phone.id)) {
+      return { ...call, state: "ended", media_ready: 0, reason: participant.dismissed ? "declined_on_device" : "answered_elsewhere" };
+    }
+    return call;
   }
   one<T>(sql: string, ...params: SQLQueryBindings[]): T | undefined {
     return (this.db.query(sql).get(...params) as T | null) ?? undefined;
@@ -107,9 +157,6 @@ export class Store {
       const pairing = this.one<{ router_id: string; expires_at: number; used_by: string | null }>("SELECT * FROM pairings WHERE code_hash=?", hash(code));
       if (!pairing || pairing.used_by || pairing.expires_at <= this.now()) throw new Fault(403, "invalid_pairing_code");
       if (this.currentCall(pairing.router_id)) throw new Fault(409, "call_in_progress");
-      this.run("UPDATE phones SET push_token=NULL,push_disabled=1 WHERE endpoint_id IN (SELECT id FROM endpoints WHERE router_id=? AND role='phone')", pairing.router_id);
-      this.run("DELETE FROM notification_tokens WHERE endpoint_id IN (SELECT id FROM endpoints WHERE router_id=?)", pairing.router_id);
-      this.run("UPDATE endpoints SET revoked=1 WHERE router_id=? AND role='phone'", pairing.router_id);
       const id = randomUUID();
       this.run("INSERT INTO endpoints(id,role,router_id,token_hash,request_id) VALUES(?,'phone',?,?,?)", id, pairing.router_id, hash(phoneToken), requestId);
       this.run("INSERT INTO phones(endpoint_id) VALUES(?)", id);
@@ -123,9 +170,16 @@ export class Store {
     return call;
   }
   currentCall(routerId: string): Call | undefined { return this.one<Call>("SELECT * FROM calls WHERE router_id=? AND state<>'ended'", routerId); }
-  authorizeCall(endpoint: Endpoint, id: string): Call {
+  authorizeCall(endpoint: Endpoint, id: string, allowRinging = false): Call {
     const call = this.call(id);
-    if (call.router_id !== endpoint.router_id || (endpoint.role === "phone" && call.phone_id !== endpoint.id)) throw new Fault(403, "call_forbidden");
+    if (call.router_id !== endpoint.router_id) throw new Fault(403, "call_forbidden");
+    if (endpoint.role === "phone") {
+      const visible = this.phoneCall(call, endpoint);
+      if (!visible || (visible.state === "ended" && call.state !== "ended")) throw new Fault(409, visible?.reason ?? "call_forbidden");
+      if (call.direction === "incoming" && call.state === "ringing") {
+        if (!allowRinging) throw new Fault(409, "call_not_claimed");
+      } else if (call.phone_id !== endpoint.id) throw new Fault(403, "call_forbidden");
+    }
     return call;
   }
   pushToken(endpoint: Endpoint, body: Record<string, unknown>) {
@@ -142,14 +196,21 @@ export class Store {
     const number = action === "dial" ? phoneNumber(body.number) : undefined;
     const digits = action === "dtmf" ? text(body.digits, 32) : undefined;
     if (digits && !/^[0-9*#ABCD]+$/.test(digits)) throw new Fault(400, "invalid_dtmf");
-    const payload = JSON.stringify({ type: "command", requestId: id, callId, action, ...(number ? { number } : {}), ...(digits ? { digits } : {}) });
+    let phone: { id: string; name: string; model: string } | undefined;
+    if (body.device !== undefined) {
+      if (action !== "dial" && action !== "answer") throw new Fault(400, "invalid_call_device");
+      const device = object(body.device), name = text(device.name, 80).trim(), model = text(device.model, 64);
+      if (!name || /[\u007f-\u009f]/.test(name) || !/^[A-Za-z0-9,._-]+$/.test(model)) throw new Fault(400, "invalid_call_device");
+      phone = { id: endpoint.id, name, model };
+    }
+    const payload = JSON.stringify({ type: "command", requestId: id, callId, action, ...(number ? { number } : {}), ...(digits ? { digits } : {}), ...(phone ? { phone } : {}) });
     const fingerprint = hash(payload);
     const expiresAt = this.now() + 20;
     const delivery = JSON.stringify({ ...JSON.parse(payload), expiresAt });
     return this.transaction(() => {
       const previous = this.one<Operation>("SELECT * FROM operations WHERE id=?", id);
       if (previous) {
-        this.authorizeCall(endpoint, previous.call_id);
+        if (this.operationPhone(previous) !== endpoint.id) throw new Fault(403, "call_forbidden");
         if (previous.fingerprint !== fingerprint) throw new Fault(409, "operation_conflict");
         return previous;
       }
@@ -157,17 +218,34 @@ export class Store {
         if (this.currentCall(endpoint.router_id) || this.one("SELECT 1 FROM calls WHERE id=?", callId)) throw new Fault(409, "call_in_progress");
         this.run("INSERT INTO calls(id,router_id,phone_id,direction,state,number,created_at,updated_at) VALUES(?,?,?,'outgoing','dialing',?,?,?)",
           callId, endpoint.router_id, endpoint.id, number!, this.now(), this.now());
+        this.run("INSERT INTO call_participants(call_id,phone_id) VALUES(?,?)", callId, endpoint.id);
+        if (phone) this.run("UPDATE calls SET phone_name=?,phone_model=? WHERE id=?", phone.name, phone.model, callId);
       } else {
-        const call = this.authorizeCall(endpoint, callId);
+        const call = this.authorizeCall(endpoint, callId, true);
         if (action === "answer" && call.state !== "ringing") throw new Fault(409, "call_not_ringing");
         if (action === "dtmf" && call.state !== "active") throw new Fault(409, "call_not_active");
-        if (action === "answer") this.run("UPDATE calls SET state='answering',updated_at=? WHERE id=?", this.now(), callId);
+        if (action === "answer") {
+          this.run("UPDATE calls SET state='answering',phone_id=?,updated_at=? WHERE id=?", endpoint.id, this.now(), callId);
+          if (phone) this.run("UPDATE calls SET phone_name=?,phone_model=? WHERE id=?", phone.name, phone.model, callId);
+          this.run("UPDATE push_outbox SET status='cancelled' WHERE call_id=? AND status='pending'", callId);
+        }
+        if (action === "hangup" && call.direction === "incoming" && call.state === "ringing") {
+          this.run("UPDATE call_participants SET dismissed=1 WHERE call_id=? AND phone_id=?", callId, endpoint.id);
+          this.run("UPDATE push_outbox SET status='cancelled' WHERE call_id=? AND phone_id=? AND status='pending'", callId, endpoint.id);
+          if (this.one("SELECT 1 FROM call_participants JOIN endpoints ON endpoints.id=phone_id WHERE call_id=? AND dismissed=0 AND revoked=0", callId)) {
+            this.run("INSERT INTO operations VALUES(?,?,?,?,?,'done',1,NULL,?)", id, callId, action, fingerprint, delivery, this.now());
+            this.run("INSERT INTO operation_phones VALUES(?,?)", id, endpoint.id);
+            return this.one<Operation>("SELECT * FROM operations WHERE id=?", id)!;
+          }
+        }
         if (action === "hangup" && call.state === "ended") {
           this.run("INSERT INTO operations VALUES(?,?,?,?,?,'done',1,NULL,?)", id, callId, action, fingerprint, delivery, this.now());
+          this.run("INSERT INTO operation_phones VALUES(?,?)", id, endpoint.id);
           return this.one<Operation>("SELECT * FROM operations WHERE id=?", id)!;
         }
       }
       this.run("INSERT INTO operations VALUES(?,?,?,?,?,'pending',NULL,NULL,?)", id, callId, action, fingerprint, delivery, expiresAt);
+      this.run("INSERT INTO operation_phones VALUES(?,?)", id, endpoint.id);
       return this.one<Operation>("SELECT * FROM operations WHERE id=?", id)!;
     });
   }
@@ -208,22 +286,25 @@ export class Store {
       if (!call) {
         if (state !== "ringing") throw new Fault(409, "unknown_call");
         if (this.currentCall(endpoint.id)) throw new Fault(409, "call_in_progress");
-        const phone = this.one<Endpoint>("SELECT * FROM endpoints WHERE router_id=? AND role='phone' AND revoked=0", endpoint.id);
-        if (!phone) throw new Fault(409, "no_paired_phone");
+        const phones = this.phones(endpoint.id);
+        if (!phones.length) throw new Fault(409, "no_paired_phone");
+        // No phone owns incoming media until an answer claims the call in this transaction.
         this.run("INSERT INTO calls(id,router_id,phone_id,direction,state,number,created_at,updated_at) VALUES(?,?,?,'incoming','ringing',?,?,?)",
-          id, endpoint.id, phone.id, number, observedAt, this.now());
+          id, endpoint.id, "", number, observedAt, this.now());
+        for (const phone of phones) this.run("INSERT INTO call_participants(call_id,phone_id) VALUES(?,?)", id, phone.id);
         if (this.now() - observedAt >= 45) this.end(id, "stale_incoming_call");
-        else this.run("INSERT INTO push_outbox(call_id,phone_id,status,next_attempt) VALUES(?,?,'pending',?)", id, phone.id, this.now());
+        else for (const phone of phones) this.run("INSERT INTO push_outbox(call_id,phone_id,status,next_attempt) VALUES(?,?,'pending',?)", id, phone.id, this.now());
         call = this.call(id);
       }
       if (call.state === "ended" || Number(body.sequence) <= call.event_sequence) return call;
+      if (call.direction === "incoming" && !call.phone_id && (state === "answering" || state === "active")) throw new Fault(409, "call_not_claimed");
       if ((call.state === "active" && state !== "active" && state !== "ended") || (call.direction === "outgoing" && state === "ringing") || (call.direction === "incoming" && state === "dialing") || (call.state === "answering" && state === "ringing")) {
         throw new Fault(409, "invalid_state_transition");
       }
       const reason = state === "ended" ? text(body.reason, 80) : null;
       if (reason && !/^[a-z0-9_]+$/.test(reason)) throw new Fault(400, "invalid_error_code");
-      this.run("UPDATE calls SET state=?,updated_at=?,event_sequence=?,media_ready=?,reason=? WHERE id=?",
-        state, this.now(), body.sequence as number, body.mediaReady === true ? 1 : 0, reason, id);
+      this.run("UPDATE calls SET state=?,updated_at=?,event_sequence=?,media_ready=?,reason=?,answered_at=COALESCE(answered_at,?) WHERE id=?",
+        state, this.now(), body.sequence as number, body.mediaReady === true ? 1 : 0, reason, state === "active" ? observedAt : null, id);
       this.run("INSERT INTO router_events VALUES(?,?)", endpoint.id, eventId);
       if (state !== "ringing") this.run("UPDATE push_outbox SET status='cancelled' WHERE call_id=? AND status='pending'", id);
       return this.call(id);

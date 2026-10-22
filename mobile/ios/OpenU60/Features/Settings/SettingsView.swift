@@ -1,7 +1,6 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @Environment(RemoteCallingManager.self) private var remoteCalling
     private let client: AgentClient
     private let authManager: AuthManager
     @State private var viewModel: SettingsViewModel
@@ -14,146 +13,179 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        @Bindable var vm = viewModel
         NavigationStack {
-            Form {
+            List {
                 Section("Device") {
-                    NavigationLink {
-                        RouterSettingsListView(client: client, authManager: authManager, category: .cellular)
-                    } label: {
-                        Label("Cellular & SIM", systemImage: "simcard")
-                    }
                     NavigationLink {
                         RouterSettingsListView(client: client, authManager: authManager, category: .connectivity)
                     } label: {
-                        Label("Wi-Fi & LAN", systemImage: "wifi")
-                    }
+                        SettingsRow(title: "Wi-Fi & network", icon: "wifi")
+                    }.listRowInsets(SettingsRow.insets)
+                    NavigationLink {
+                        RouterSettingsListView(client: client, authManager: authManager, category: .cellular)
+                    } label: {
+                        SettingsRow(title: "Cellular & SIM", icon: "simcard.fill", color: .green)
+                    }.listRowInsets(SettingsRow.insets)
                     NavigationLink {
                         RouterSettingsListView(client: client, authManager: authManager, category: .security)
                     } label: {
-                        Label("Security & QoS", systemImage: "shield")
-                    }
+                        SettingsRow(title: "Security & traffic", icon: "shield.lefthalf.filled", color: .indigo)
+                    }.listRowInsets(SettingsRow.insets)
                     NavigationLink {
                         RouterSettingsListView(client: client, authManager: authManager, category: .system)
                     } label: {
-                        Label("Power & system", systemImage: "power")
-                    }
+                        SettingsRow(title: "Power & system", icon: "power", color: .gray)
+                    }.listRowInsets(SettingsRow.insets)
                 }
-                Section("Utilities") {
-                    NavigationLink("SMS notifications") { SMSNotificationSettingsView(client:client) }
+                Section("Services") {
                     NavigationLink {
-                        ToolsListView(client: client, authManager: authManager, category: .automation)
+                        MessageSettingsView(client: client, authManager: authManager)
                     } label: {
-                        Label("Automation", systemImage: "clock.arrow.2.circlepath")
-                    }
+                        SettingsRow(title: "Messages", icon: "message.fill", color: .green)
+                    }.listRowInsets(SettingsRow.insets)
+                    NavigationLink {
+                        PushedModelHost(SchedulerViewModel(client: client, authManager: authManager)) {
+                            SchedulerView(viewModel: $0)
+                        }
+                    } label: {
+                        SettingsRow(title: "Schedules", icon: "clock.fill", color: .orange)
+                    }.listRowInsets(SettingsRow.insets)
                     NavigationLink {
                         ToolsListView(client: client, authManager: authManager, category: .diagnostics)
                     } label: {
-                        Label("Network diagnostics", systemImage: "waveform.path.ecg")
-                    }
+                        SettingsRow(title: "Diagnostics", icon: "waveform.path.ecg")
+                    }.listRowInsets(SettingsRow.insets)
                     NavigationLink {
                         ToolsListView(client: client, authManager: authManager, category: .advanced)
                     } label: {
-                        Label("Advanced", systemImage: "wrench.and.screwdriver")
-                    }
+                        SettingsRow(title: "Advanced", icon: "wrench.and.screwdriver.fill", color: .gray)
+                    }.listRowInsets(SettingsRow.insets)
                 }
-                Section {
-                    NavigationLink("Remote calling") { RemoteCallingView(localClient: client) }
-                }
-                Section {
-                    HStack {
-                        TextField("Gateway IP", text: $vm.gatewayIP)
-                            .keyboardType(.decimalPad)
-                            .autocorrectionDisabled()
-                            .focused($gatewayFieldFocused)
-                            .onSubmit { viewModel.commitGatewayIP() }
-                            .onChange(of: gatewayFieldFocused) { _, isFocused in
-                                if !isFocused { viewModel.commitGatewayIP() }
-                            }
-                            // Detection walks the client's base URL across candidates; an edit
-                            // committed mid-probe would fight it for the same property.
-                            .disabled(viewModel.isDetectingGateway)
-                        Button("Detect") {
-                            gatewayFieldFocused = false
-                            Task { await viewModel.autoDetectGateway() }
-                        }
-                        .buttonStyle(.bordered)
-                        .font(.caption)
-                        .disabled(viewModel.isDetectingGateway)
-                        if viewModel.isDetectingGateway {
-                            ProgressView()
-                        }
-                    }
-                } header: {
-                    Text("Gateway")
-                } footer: {
-                    if viewModel.detectionFailed {
-                        Text("No agent answered on the common gateway addresses. The previous address is still in use.")
-                    }
-                }
-
-                Section("Authentication") {
-                    if viewModel.hasStoredPassword {
-                        HStack {
-                            Text("Password stored in Keychain")
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Button("Clear", role: .destructive) {
-                                viewModel.clearPassword()
-                            }
-                            .font(.caption)
-                        }
-                    }
-                    SecureField("New Password", text: $vm.passwordInput)
-                    Button("Save to Keychain") {
-                        withAnimation { viewModel.savePassword() }
-                    }
-                    .disabled(viewModel.passwordInput.isEmpty)
-                }
-
-                Section {
-                    VStack(alignment: .leading) {
-                        Text("Refresh interval: \(viewModel.pollInterval, specifier: "%.1f")s")
-                        Slider(value: $vm.pollInterval, in: 1...10, step: 0.5)
-                            .accessibilityLabel("Refresh interval")
-                            .accessibilityValue(String(format: "%.1f seconds", viewModel.pollInterval))
-                    }
-                } header: {
-                    Text("Polling")
-                } footer: {
-                    Text("Live upload and download use a separate 1-second refresh, matching the modem’s update rate.")
-                }
-
-                Section("Appearance") {
-                    Picker("Theme", selection: $vm.darkModeOverride) {
-                        Text("System").tag(0)
-                        Text("Light").tag(1)
-                        Text("Dark").tag(2)
-                    }
-                    .pickerStyle(.segmented)
-                }
-
-                Section("About") {
-                    LabeledContent("App", value: "OpenU60")
-                    LabeledContent("Device", value: "ZTE U60 Pro (MU5250)")
-                    LabeledContent("API", value: "zte-agent REST")
-                }
-
-                Section("Legal") {
-                    Text("This app is not affiliated with, endorsed by, or sponsored by ZTE Corporation. ZTE and U60 Pro are trademarks of ZTE Corporation.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Link("Privacy Policy", destination: URL(string: "https://open-u60-pro.vercel.app/privacy")!)
+                Section("App") {
+                    NavigationLink { connectionSettings } label: {
+                        SettingsRow(title: "Connection", icon: "point.3.connected.trianglepath.dotted")
+                    }.listRowInsets(SettingsRow.insets)
+                    NavigationLink { preferences } label: {
+                        SettingsRow(title: "Appearance & refresh", icon: "paintbrush.fill", color: .indigo)
+                    }.listRowInsets(SettingsRow.insets)
+                    NavigationLink { about } label: {
+                        SettingsRow(title: "About OpenU60", icon: "info.circle.fill", color: .gray)
+                    }.listRowInsets(SettingsRow.insets)
                 }
             }
+            .listStyle(.insetGrouped)
             .navigationTitle("Settings")
-            .overlay {
-                if viewModel.showSavedConfirmation {
-                    savedToast
+        }
+    }
+
+    private var connectionSettings: some View {
+        @Bindable var vm = viewModel
+        return Form {
+            Section {
+                HStack {
+                    TextField("Gateway IP", text: $vm.gatewayIP)
+                        .keyboardType(.decimalPad)
+                        .autocorrectionDisabled()
+                        .focused($gatewayFieldFocused)
+                        .onSubmit { viewModel.commitGatewayIP() }
+                        .onChange(of: gatewayFieldFocused) { _, isFocused in
+                            if !isFocused { viewModel.commitGatewayIP() }
+                        }
+                        // Detection walks the client's base URL across candidates; an edit
+                        // committed mid-probe would fight it for the same property.
+                        .disabled(viewModel.isDetectingGateway)
+                    Button("Detect") {
+                        gatewayFieldFocused = false
+                        Task { await viewModel.autoDetectGateway() }
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.caption)
+                    .disabled(viewModel.isDetectingGateway)
+                    if viewModel.isDetectingGateway {
+                        ProgressView()
+                    }
+                }
+            } header: {
+                Text("Gateway")
+            } footer: {
+                if viewModel.detectionFailed {
+                    Text("No agent answered on the common gateway addresses. The previous address is still in use.")
                 }
             }
-            .task { await viewModel.refreshStoredPasswordState() }
+
+            Section("Authentication") {
+                if viewModel.hasStoredPassword {
+                    HStack {
+                        Text("Password stored in Keychain")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Clear", role: .destructive) {
+                            viewModel.clearPassword()
+                        }
+                        .font(.caption)
+                    }
+                }
+                SecureField("New Password", text: $vm.passwordInput)
+                Button("Save to Keychain") {
+                    withAnimation { viewModel.savePassword() }
+                }
+                .disabled(viewModel.passwordInput.isEmpty)
+            }
         }
+        .navigationTitle("App connection")
+        .navigationBarTitleDisplayMode(.inline)
+        .keyboardDismissal()
+        .overlay(alignment: .top) {
+            if viewModel.showSavedConfirmation { savedToast }
+        }
+        .task { await viewModel.refreshStoredPasswordState() }
+    }
+
+    private var preferences: some View {
+        @Bindable var vm = viewModel
+        return Form {
+            Section {
+                VStack(alignment: .leading) {
+                    Text("Refresh interval: \(viewModel.pollInterval, specifier: "%.1f")s")
+                    Slider(value: $vm.pollInterval, in: 1...10, step: 0.5)
+                        .accessibilityLabel("Refresh interval")
+                        .accessibilityValue(String(format: "%.1f seconds", viewModel.pollInterval))
+                }
+            } header: {
+                Text("Polling")
+            } footer: {
+                Text("Live upload and download use a separate 1-second refresh, matching the modem’s update rate.")
+            }
+
+            Section("Appearance") {
+                Picker("Theme", selection: $vm.darkModeOverride) {
+                    Text("System").tag(0)
+                    Text("Light").tag(1)
+                    Text("Dark").tag(2)
+                }
+                .pickerStyle(.segmented)
+            }
+        }
+        .navigationTitle("Appearance & refresh")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var about: some View {
+        Form {
+            Section("About") {
+                LabeledContent("App", value: "OpenU60")
+                LabeledContent("Device", value: "ZTE U60 Pro (MU5250)")
+            }
+
+            Section("Legal") {
+                Text("This app is not affiliated with, endorsed by, or sponsored by ZTE Corporation. ZTE and U60 Pro are trademarks of ZTE Corporation.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Link("Privacy Policy", destination: URL(string: "https://open-u60-pro.vercel.app/privacy")!)
+            }
+        }
+        .navigationTitle("About OpenU60")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     private var savedToast: some View {
@@ -167,5 +199,30 @@ struct SettingsView: View {
                 try? await Task.sleep(for: .seconds(1.5))
                 withAnimation { viewModel.showSavedConfirmation = false }
             }
+    }
+}
+
+struct MessageSettingsView: View {
+    let client: AgentClient
+    let authManager: AuthManager
+
+    var body: some View {
+        List {
+            Section {
+                NavigationLink { SMSNotificationSettingsView(client: client) } label: {
+                    SettingsRow(title: "Notifications", icon: "bell.badge.fill", color: .red)
+                }.listRowInsets(SettingsRow.insets)
+                NavigationLink {
+                    PushedModelHost(SMSForwardViewModel(client: client, authManager: authManager)) {
+                        SMSForwardConfigView(viewModel: $0)
+                    }
+                } label: {
+                    SettingsRow(title: "Forwarding", icon: "arrowshape.turn.up.right.fill", color: .green)
+                }.listRowInsets(SettingsRow.insets)
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("Message settings")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

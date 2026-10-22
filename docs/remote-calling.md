@@ -39,9 +39,100 @@ and PCMU/G.711 at 8 kHz. iOS uses WebRTC M155, pinned to the
 155.0.0 binary package. TURN relays encrypted DTLS-SRTP without terminating the
 media encryption.
 
+## Automatic management paths
+
+The normal app prefers authenticated LAN management, then a direct WebRTC data
+channel, then the existing HTTPS/WSS agent relay. P2P management is independent
+of call media and does not request microphone access. The existing server is the
+authenticated rendezvous; Hysteria and a VPN are not involved.
+
+An enrolled agent advertises `peer_register` on its authenticated socket. A paired
+phone sends `peer_open` with a fresh session UUID. The server introduces only that
+phone and its router, sends `peer_session` with a five-minute lease and STUN
+addresses, and forwards scoped `peer_signal` SDP/ICE messages. The router offers
+an ordered, reliable `openu60-management-v1` data channel. DTLS certificate
+fingerprints travel through authenticated signaling and bind the direct peer to
+its admitted session. A session-bound `peer_hello`/`peer_ready` exchange completes
+readiness. TURN addresses are excluded from this management peer so a connection
+reported as P2P is direct; failed punching uses the established agent relay.
+
+Parallel dashboard reads share one introduction. Punching waits at most four
+seconds per attempt, direct requests wait at most four seconds, and failed peers
+back off for fifteen seconds while relay requests continue. Local probes are
+repeated after their short cache expires, allowing a return to LAN automatically.
+Network failure, lease expiry, server selection, socket replacement/disconnection,
+or revocation closes the affected peer. Each phone has an independent session;
+there is no primary phone. Sessions and uncompleted negotiations are bounded and
+are recreated after a process restart.
+
+Management requests retain the same effect UUID, method, path, and body across
+LAN, P2P, and relay. All three enter the router's existing management validator
+and durable write journal. A lost response cannot execute an uncertain write a
+second time. Server-admitted call commands also try LAN, then P2P, then relay,
+retaining the canonical operation ID and expiry. Call ownership and result
+delivery remain with the existing durable calling service.
+
+Direct call delivery includes a server admission MAC bound to the phone UUID,
+request UUID, call UUID, action, original expiry, number, and DTMF digits. The
+router verifies it against its enrollment credential before admitting the call
+command; another paired phone cannot submit a forged or modified operation on
+that channel. The canonical MAC input is the UTF-8 encoding of these eight
+NUL-separated fields: `OpenU60 call admission v1`, phone ID, request ID, call ID,
+action, decimal expiry, number or empty string, digits or empty string. UUIDs are
+lowercase. HMAC-SHA256 uses the raw SHA-256 of the router token as its key and
+returns unpadded base64url. The server already holds that verifier; it does not
+need the raw router token. Older services without direct admission proof continue
+using the existing call relay.
+
+Data-channel messages use binary frames: version byte `1`, 16 raw UUID bytes,
+big-endian 32-bit total length and offset, then up to 12,288 payload bytes. Frames
+must arrive in order for each UUID. Messages are bounded to 786,432 bytes, router
+requests to 98,304 bytes, and HTTP response bodies to 524,288 bytes. At most eight
+partial messages are retained for ten seconds. Request bodies and responses are
+the existing JSON/base64 contracts. No application payload is stored or forwarded
+by the rendezvous.
+
 ## Pairing and iPhone behavior
 
-Use Settings → Remote calling while logged into the router on its local network.
+### Connect with a device string
+
+For an already enrolled U60, open its touchscreen Wi-Fi panel and choose
+**Connect app**. The screen displays a QR code plus `U60-<router UUID>` and its
+configured server. In the normal iPhone app, choose **Connect with device string**
+then **Scan U60 QR code**. Scanning selects the embedded server, preserving all
+other profiles, and automatically connects with the saved router password. With
+no saved password, the password field opens for entry. A server profile already
+authorized for another device or holding another device's pending approval is
+left unchanged with an explicit error. Manual device-string entry and the server
+selector remain available.
+
+The QR is UTF-8 JSON with `type: "openu60-connect"`, `version: 1`, `device` and
+`server`. It contains no password or phone authorization. The scanner accepts only
+this version, a valid U60 UUID and the same HTTPS URL contract as manual server
+entry. The native QR canvas has a separate white quiet zone; unavailable metadata
+hides any previous code. The App shares its existing camera scanner with eSIM.
+
+The connection string is a stable device identifier, not an authorization token.
+The server publishes the online router's P-256 public key from its authenticated
+registration. CryptoKit HPKE encrypts the password to that key using RFC 9180
+P-256/HKDF-SHA256/AES-256-GCM. The router alone decrypts and verifies it. The
+router UUID, request UUID, and generated phone credential are authenticated
+associated data; the sealed login expires after sixty seconds. Password attempts
+are bounded on the router and at the server. The rendezvous is trusted for device
+discovery and key distribution, as it is for existing signaling.
+
+The phone persists its pending credential before contacting the device. After
+password approval, the server durably creates that phone's independent endpoint
+before replying. Retrying a lost response recovers the same endpoint. A rejected
+password allows a fresh corrected attempt. The server persists only request
+metadata and credential hashes, not the password envelope or plaintext. The
+router's dedicated connection identity is generated and retained by its normal
+agent under `/data/openu60-connect/`; installers preserve it along with the
+existing pairing files. A malformed existing identity fails explicitly.
+
+### Advanced enrollment
+
+Open Calls and tap the connection indicator while logged into the router on its local network.
 The server administrator creates a one-time invitation using the command in
 [the server guide](../server/README.md). Enter the HTTPS service address and that
 invitation in the router setup section. The router persists a generated device
@@ -66,10 +157,61 @@ profile. `OpenU60PushEnvironment` is `sandbox`, matching that profile. A product
 build must change both signing and the registered push environment together.
 Live Activity push configuration is independent of VoIP incoming-call push.
 
-One phone is paired with one router. Re-pairing revokes the previous phone and its
-push token. Forgetting pairing revokes the server credential before clearing the
-local pairing; an already revoked credential can also be forgotten. Enrollment
-and phone pairing cannot be revoked while a call is active.
+Multiple phones can remain paired with one router. Adding a phone preserves the
+existing phones, their management access, and their notification registrations.
+Every paired phone receives incoming calls and complete SMS notifications. There
+is no primary phone. The first admitted answer atomically claims the call and its
+audio; other phones receive `answered_elsewhere` and close their CallKit UI.
+Declining on one phone silences only that phone; the last decline hangs up the
+modem. Outgoing calls and active audio remain owned by the initiating/answering
+phone. Only that phone may send media, DTMF, or hangup for the active call.
+
+The SMS list retains the firmware's pagination, dates and storage metadata, but
+reads sender and body from the same local SMS database as notifications. Some
+firmware encrypts those fields in ubus replies. The agent returns the sender as
+text and the body as UTF-16BE hex, preserving the existing app contract. Missing
+or invalid stored text fails the read; opaque ubus fields are never a fallback.
+The iOS parser decodes only complete, valid UTF-16BE hex and preserves plain text.
+
+Immediate App push and SMS forwarding share the native arrival event. The
+firmware-specific stored-message event repair and its recovery procedure are
+documented in [SMS arrival events](sms-notifications.md).
+
+Forgetting pairing revokes only that phone before clearing its local pairing;
+other phones remain connected. Explicit router-wide revocation still removes all
+phones. Enrollment and phone pairing cannot be revoked while a call is active.
+Previously revoked credentials remain revoked after upgrading; an affected phone
+must pair again. A failed network connection never erases its local credentials.
+
+Incoming call participants, the winning phone, command callers, and per-phone
+push retries are durable. Reconnection after another phone answered receives an
+ended snapshot rather than a new ring. Schema upgrades preserve existing outbox
+rows and endpoint credentials; they do not reactivate revoked endpoints.
+
+## Selecting servers
+
+Home's connection details and the Calls connection sheet open the same Servers
+list. Addresses can be added before deployment. Adding an address preserves the
+current selection; selecting a row explicitly switches management and calling
+to that server. There is no automatic server failover. HTTPS addresses support
+custom ports and paths.
+
+Each address retains its own active and pending pairing in the existing Keychain
+item. The versioned format reads the previous single-server pairing without
+discarding it. Switching never copies a credential to another address. A server
+without a pairing stays unpaired, while other saved pairings keep the normal app
+available. A paired-server switch refreshes SMS and VoIP registration. Selection
+is persisted before replacing the signaling socket; failed persistence preserves
+the current connection. Calls and unfinished call commands prevent selection.
+Forgetting pairing affects only the selected address. Remove an address after
+forgetting its pairing and selecting another server.
+
+The router currently has one server enrollment. Local pairing checks that the
+router is enrolled at the selected address. Multiple independently deployed
+services require router enrollment/routing work; saving an address alone does
+not connect the U60 to it. The existing transport remains HTTPS/WSS with WebRTC
+media. A custom TLS/TCP or QUIC/UDP control listener is a separate implementation;
+it is not exposed as a working address type in this version.
 
 ## Router lifecycle and failure handling
 
@@ -223,14 +365,70 @@ encrypted uplink through the Mac; that temporary configuration has been removed.
 The router still needs its own working internet connection for independent
 remote access.
 
-After the SIM arrives, verify outgoing and incoming calls with a voice-capable SIM and carrier IMS
-registration. Check both audio directions, mute, speaker/Bluetooth routing, DTMF,
+Automatic management transport and device-string enrollment were also verified
+on the complete Beexio-signed App on L17 on 2026-10-21. With the U60 using its
+L_5G repeater uplink, the phone refreshed live dashboard data over cellular P2P.
+Blocking the U60's outbound peer UDP forced relay delivery while preserving TCP
+signaling and hotspot forwarding; live dashboard reads continued. After removing
+the temporary rules, P2P worked again. Rejoining ZZZZTE selected local management
+without changing the server profile. A separate temporary phone authorization
+was created with the device string and the App's saved router password, then
+revoked and removed through the App; the original phone authorizations remained.
+The touchscreen's Connect app metadata RPC was checked on the real router and
+the panel passed the pinned LVGL tests. Apple Vision decoded the actual native
+QR render into the production App parser; physical camera scanning remains an
+acceptance check.
+
+Auto Sleep is separate from turning off the display. The inspected firmware
+sleep daemon enables Linux `mem` autosleep, which suspends userspace. The remote
+worker uses timed kernel wakelocks for wake recovery and active calls; it still
+cannot run during actual system suspend. Firmware wake events and suspend-aware
+clock detection immediately refresh the Wi-Fi owner, reconnect signaling and
+reconcile retained SMS without replacing their durable event IDs. Timed locks
+expire if the agent stops. See [wake recovery](device-wake.md). Actual cellular
+wake, network restoration and incoming-call latency still require a SIM and
+natural-idle testing.
+Keep Auto Sleep disabled when immediate remote availability is required.
+
+On 2026-10-22, the complete Beexio-signed app on iPhone 16 Pro completed an
+outgoing Ben SIM call, and the recipient confirmed speech in both directions.
+The dial operation was acknowledged before the admission deadline; speaker was
+enabled during dialing. The stereo recording was saved on U60, automatically
+synced byte-for-byte to the phone, and played in the normal app. See
+[call recordings](call-recordings.md) for the recording checks.
+
+Remaining carrier acceptance checks include incoming calls, mute,
+receiver/Bluetooth routing, DTMF,
 lock-screen/background/terminated-app incoming calls, caller cancellation before
 answer, local and remote hangup, and recovery after losing signaling or internet.
 Background PushKit delivery with the installed app's real VoIP token is verified;
 lock-screen and terminated-app answering still need acceptance testing. The server
 health flag alone indicates configuration, not Apple delivery success.
 
-This implementation supports one call at a time. Hold, conference calls, transfer,
+The normal app shows mute, speaker and end-call controls during dialing and
+answering as well as an active call. Mute is retained before the media offer
+arrives; a preselected speaker route is applied when CallKit activates audio.
+The DTMF keypad becomes available after the modem reports an active voice call.
+
+The agent prefers `/dev/at_mdm2`, which responds independently while the factory
+USB bridges own `/dev/at_mdm0` and `/dev/at_mdm1`. A complete CLCC response can include cellular
+data sessions (`mode=1`) and fax sessions (`mode=2`); these do not count as voice
+calls. The parser still rejects incomplete or malformed snapshots before using
+them to prove voice idle.
+Failed status reads log response length, line count and terminal-result flags,
+without modem text or phone numbers.
+Call-control AT exchanges use deadline-controlled nonblocking reads after the
+driver's required blocking command write, and return at the modem's
+final result line, without collecting later unsolicited notifications or waiting
+out the entire response deadline. The global AT owner and cancellation-before-
+submission boundary remain shared with local commands. Legacy SMS/USSD exchanges
+retain their asynchronous response windows.
+
+The audio receiver drops empty RTP padding/keepalive probes after the WebRTC
+interceptors process them, and continues decoding subsequent PCMU packets.
+These probes share the audio stream and must not end a call; see
+[WebRTC RTP probing](https://webrtc.googlesource.com/src/+/HEAD/pc/g3doc/rtp.md).
+
+Each router supports one active call at a time, shared across its paired phones. Hold, conference calls, transfer,
 and call waiting control are explicitly unsupported. It does not provide offline
 calling or guarantee carrier voice support on a particular SIM/firmware.

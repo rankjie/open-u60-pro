@@ -10,6 +10,11 @@ import UserNotifications
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
         SMSNotificationManager.shared.registrationFailed(error)
     }
+    func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+                     fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+        let payload = Dictionary(uniqueKeysWithValues: userInfo.compactMap { key, value in (key as? String).map { ($0, value) } })
+        completionHandler(SMSNotificationManager.shared.receive(payload, open: false) ? .newData : .noData)
+    }
 }
 
 @Observable @MainActor
@@ -22,6 +27,7 @@ final class SMSNotificationManager: NSObject, @preconcurrency UNUserNotification
     private(set) var openRevision = 0
     private(set) var openMessageID: String?
     @ObservationIgnored var access: (@MainActor () -> AgentRelayAccess?)?
+    @ObservationIgnored var onDelivery: (@MainActor ([String: Any]) -> Void)?
     @ObservationIgnored private let http = CallingHTTPClient()
     @ObservationIgnored private var deviceToken: String?
     @ObservationIgnored private var registering: Task<Void, Never>?
@@ -73,8 +79,13 @@ final class SMSNotificationManager: NSObject, @preconcurrency UNUserNotification
         openMessageID = nil
         return id
     }
-    func receive(eventID: UUID, routerID: UUID, messageID: String?, open: Bool = false) {
+    func receive(eventID: UUID, routerID: UUID, messageID: String?, payload: [String: Any] = [:], open: Bool = false) {
         guard routerID == access?()?.routerID else { return }
+        var delivery = payload
+        delivery["eventId"] = eventID.uuidString; delivery["routerId"] = routerID.uuidString
+        if let messageID { delivery["messageId"] = messageID }
+        // Parts and retries reach the inbox owner, which deduplicates only after durable merge.
+        onDelivery?(delivery)
         if !seen.contains(eventID) {
             seen.append(eventID); if seen.count > 128 { seen.removeFirst() }
             revision += 1
@@ -82,11 +93,20 @@ final class SMSNotificationManager: NSObject, @preconcurrency UNUserNotification
         if open { openMessageID = messageID; openRevision += 1; revision += 1 }
     }
     private func receive(_ notification: UNNotification, open: Bool) -> Bool {
-        let value = notification.request.content.userInfo
+        let value = Dictionary(uniqueKeysWithValues: notification.request.content.userInfo.compactMap { key, value in (key as? String).map { ($0, value) } })
+        return receive(value, open: open)
+    }
+    @discardableResult func receive(_ value: [String: Any], open: Bool) -> Bool {
         guard value["kind"] as? String == "sms", let raw = value["eventId"] as? String, let event = UUID(uuidString:raw),
               let rawRouter = value["routerId"] as? String, let router = UUID(uuidString:rawRouter), router == access?()?.routerID else { return false }
-        receive(eventID:event,routerID:router,messageID:value["messageId"] as? String,open:open)
+        receive(eventID:event,routerID:router,messageID:value["messageId"] as? String,payload:value,open:open)
         return true
+    }
+    /// Alert delivery may happen while iOS keeps the app suspended. Replay retained payloads
+    /// on foreground before reconciliation; opening Messages never owns this recovery work.
+    func restoreDelivered() async {
+        let notifications = await UNUserNotificationCenter.current().deliveredNotifications()
+        for notification in notifications { _ = receive(notification, open: false) }
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completion: @escaping (UNNotificationPresentationOptions) -> Void) {

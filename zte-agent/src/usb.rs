@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use crate::handlers::AppState;
 use crate::ubus;
 
-pub fn usb_status(_state: &AppState) -> (u16, Value) {
+pub fn usb_status(state: &AppState) -> (u16, Value) {
     let mut data = match ubus::call("zwrt_bsp.usb", "list", Some("{}")) {
         Ok(Value::Object(data)) => data,
         _ => return (503, json!({"ok":false,"error":"usb_status_unavailable"})),
@@ -18,6 +18,7 @@ pub fn usb_status(_state: &AppState) -> (u16, Value) {
         }
     };
     data.insert("powerbank_state".into(), powerbank);
+    data.insert("power_reserve".into(), state.powerbank_reserve.status());
     (200, json!({"ok":true,"data":data}))
 }
 
@@ -33,22 +34,40 @@ pub fn usb_mode_set(_state: &AppState, body: &[u8]) -> (u16, Value) {
 }
 
 pub fn usb_powerbank_set(state: &AppState, body: &[u8]) -> (u16, Value) {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Input { state: u8 }
+    let requested = match serde_json::from_slice::<Input>(body) {
+        Ok(input) if input.state <= 1 => input.state == 1,
+        _ => return (400, json!({"ok":false,"error":"state must be 0 or 1"})),
+    };
+    let result = state.powerbank_reserve.set_enabled(requested);
+    state.cache.invalidate(crate::cache::CHARGER);
+    result
+}
+
+pub(crate) fn powerbank_enabled() -> Result<bool, String> {
+    match ubus::call_bounded("zwrt_bsp.powerbank", "get", Some(r#"{"property":"state"}"#), 2)?["state"].as_i64() {
+        Some(0) => Ok(false), Some(1) => Ok(true), _ => Err("invalid_powerbank_readback".into()),
+    }
+}
+
+pub(crate) fn apply_powerbank_state(enabled: bool) -> Result<(), String> {
     let result = set_powerbank(
-        body,
+        &serde_json::to_vec(&json!({"state":i32::from(enabled)})).map_err(|e| e.to_string())?,
         |requested| {
-            ubus::call(
+            ubus::call_bounded(
                 "zwrt_bsp.powerbank",
                 "set",
                 Some(&json!({"state":requested}).to_string()),
+                2,
             )
         },
-        || ubus::call("zwrt_bsp.powerbank", "get", Some(r#"{"property":"state"}"#)),
+        || ubus::call_bounded("zwrt_bsp.powerbank", "get", Some(r#"{"property":"state"}"#), 2),
         || std::thread::sleep(std::time::Duration::from_millis(100)),
     );
-    // The charger view changes with powerbank mode; make the next read fresh
-    // even if BSP_POWERBANK_EVENT lags.
-    state.cache.invalidate(crate::cache::CHARGER);
-    result
+    if result.0 == 200 { Ok(()) }
+    else { Err(result.1["error"].as_str().unwrap_or("powerbank_control_failed").into()) }
 }
 
 fn set_powerbank(

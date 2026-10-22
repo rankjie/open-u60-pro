@@ -91,6 +91,7 @@ struct CellLockView: View {
             }
         }
         .navigationTitle("Cell Lock")
+        .keyboardDismissal()
         .refreshable { await viewModel.refresh() }
         .overlay {
             if viewModel.isLoading {

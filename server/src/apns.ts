@@ -11,7 +11,11 @@ export function privateFile(path: string): string {
 }
 
 export interface PushCall { id: string; routerId: string; number: string; expiresAt: number }
-export interface PushSMS { id: string; routerId: string; expiresAt: number; sender: string; text: string; messageId: string }
+export interface SMSMetadata {
+  date: string; tag: number; memStore: string; groupId: string;
+  line: { iccid: string; number: string | null; source: string } | null;
+}
+export interface PushSMS { id: string; routerId: string; expiresAt: number; sender: string; text: string; messageId: string; message?: SMSMetadata }
 export type PushOutcome = { kind: "accepted" | "retry" | "reject"; code: string };
 export interface PushProvider {
   send(token: string, environment: "sandbox" | "production", call: PushCall): Promise<PushOutcome>;
@@ -92,8 +96,8 @@ export class APNs implements PushProvider {
 export function smsPushRequests(bundle: string, event: PushSMS) {
   const payload = (body: string, part: number, parts: number) => ({
     aps: { alert: { title: event.sender, subtitle: parts === 1 ? "SMS" : `SMS ${part}/${parts}`, body },
-      sound: "default", "thread-id": event.routerId }, kind: "sms", eventId: event.id,
-    routerId: event.routerId, messageId: event.messageId, part, parts,
+      sound: "default", "thread-id": event.routerId, "content-available": 1 }, kind: "sms", eventId: event.id,
+    routerId: event.routerId, messageId: event.messageId, expiresAt: event.expiresAt, message: event.message, part, parts,
   });
   const budget = 4096 - Buffer.byteLength(JSON.stringify(payload("", 9999, 9999)));
   if (budget < 100) throw new Error("SMS notification metadata exceeds the APNs limit");

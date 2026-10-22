@@ -139,6 +139,7 @@ struct FirewallSettingsView: View {
             }
         }
         .navigationTitle("Firewall")
+        .keyboardDismissal()
         .refreshable { await viewModel.refresh() }
         .overlay {
             if viewModel.isLoading {

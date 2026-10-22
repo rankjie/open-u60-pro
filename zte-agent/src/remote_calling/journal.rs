@@ -6,6 +6,24 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallPhone {
+    pub id: Uuid,
+    pub name: String,
+    pub model: String,
+}
+impl CallPhone {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.name.trim().is_empty() || self.name.chars().count() > 80
+            || self.name.chars().any(char::is_control) || self.model.is_empty()
+            || self.model.len() > 64 || !self.model.bytes().all(|b| b.is_ascii_alphanumeric() || b",._-".contains(&b)) {
+            return Err("invalid_call_device");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Command {
@@ -17,6 +35,8 @@ pub struct Command {
     pub expires_at: u64,
     pub number: Option<String>,
     pub digits: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone: Option<CallPhone>,
 }
 impl Command {
     pub fn remaining(&self, now: u64) -> Result<std::time::Duration, &'static str> {
@@ -28,6 +48,10 @@ impl Command {
         Ok(std::time::Duration::from_secs(seconds.min(20)))
     }
     pub fn validate(&self) -> Result<(), &'static str> {
+        if let Some(phone) = &self.phone {
+            phone.validate()?;
+            if !matches!(self.action.as_str(), "dial" | "answer") { return Err("invalid_call_device"); }
+        }
         if self.expires_at == 0
             || self.kind != "command"
             || !matches!(self.action.as_str(), "dial" | "answer" | "hangup" | "dtmf")
@@ -81,6 +105,8 @@ pub struct Call {
     pub sequence: u64,
     pub state: String,
     pub number: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<crate::cellular_line::CellularLine>,
     pub media_ready: bool,
 }
 
@@ -176,7 +202,7 @@ impl Journal {
     pub fn call(&self) -> Option<Call> {
         self.data.call.clone()
     }
-    pub fn start(&mut self, id: Uuid, state: &str, number: Option<String>) -> Result<(), String> {
+    pub fn start(&mut self, id: Uuid, state: &str, number: Option<String>, line: Option<crate::cellular_line::CellularLine>) -> Result<(), String> {
         if self.data.call.as_ref().is_some_and(|call| call.id != id) {
             return Err("call_in_progress".into());
         }
@@ -186,6 +212,7 @@ impl Journal {
                 state: state.into(),
                 sequence: 0,
                 number,
+                line,
                 media_ready: false,
             });
             self.persist()?;
@@ -256,6 +283,7 @@ mod tests {
             expires_at: 1_800_000_020,
             number: Some("+12345".into()),
             digits: None,
+            phone: None,
         };
         (directory, command)
     }
@@ -311,7 +339,7 @@ mod tests {
         let file = directory.join("journal.private.json");
         let mut journal = Journal::open(&file).unwrap();
         journal
-            .start(command.call_id, "ringing", command.number)
+            .start(command.call_id, "ringing", command.number, None)
             .unwrap();
         let event = journal.event("ringing", false, None, 1800000000).unwrap();
         drop(journal);

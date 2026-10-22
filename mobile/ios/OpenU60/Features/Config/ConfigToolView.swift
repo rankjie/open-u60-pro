@@ -79,6 +79,7 @@ struct ConfigToolView: View {
             }
         }
         .navigationTitle("Config Tool")
+        .keyboardDismissal()
         .sheet(isPresented: $viewModel.showDocumentPicker) {
             DocumentPickerView { data in
                 viewModel.importFile(data: data)

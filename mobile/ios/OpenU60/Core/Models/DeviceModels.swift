@@ -9,12 +9,84 @@ struct BatteryStatus: Equatable {
     var timeToEmpty: Int = -1     // minutes, -1 = unknown
     var currentMA: Int?            // milliamps; negative = discharging, positive = charging
     var voltageMV: Int?            // millivolts from agent
+    var fullChargeMAH: Double?
+    var averageCurrentMA: Double?
+    var usbPower: USBPowerStatus = .init()
+
+    // The generic kernel charge_counter is relative, not guaranteed remaining charge.
+    var estimatedRemainingMAH: Double? {
+        guard let capacityPercent, let fullChargeMAH, fullChargeMAH.isFinite, fullChargeMAH > 0 else { return nil }
+        return fullChargeMAH * Double(capacityPercent) / 100
+    }
+
+    var estimatedRuntimeMinutes: Int? {
+        guard usbPower.externalPower != true, charging == "discharging",
+              let currentMA, currentMA <= -50,
+              let averageCurrentMA, averageCurrentMA.isFinite, averageCurrentMA <= -50,
+              let remaining = estimatedRemainingMAH else { return nil }
+        let minutes = remaining / -averageCurrentMA * 60
+        guard minutes.isFinite, minutes < Double(Int.max) else { return nil }
+        return Int(minutes)
+    }
+
+    var remainingChargeText: String {
+        estimatedRemainingMAH.map { "≈ " + $0.formatted(.number.precision(.fractionLength(0))) + " mAh" } ?? "— mAh"
+    }
+
+    var runtimeText: String {
+        guard let minutes = estimatedRuntimeMinutes else { return "—" }
+        if minutes < 5 { return "< 5 min" }
+        let rounded = minutes / 5 * 5
+        return rounded >= 60 ? "≈ \(rounded / 60)h \(rounded % 60)m" : "≈ \(rounded)m"
+    }
+
+    var statusText: String {
+        if charging == "stopped" { return "Charge Stopped" }
+        if charging == "charging" { return capacityPercent == 100 ? "Full" : "Charging" }
+        if charging == "discharging" { return usbPower.externalPower == true ? "External power" : "Discharging" }
+        return "Unavailable"
+    }
 
     /// Preserve invalid telemetry as unknown instead of displaying or clamping it to full.
     var capacityPercent: Int? { (0...100).contains(capacity) ? capacity : nil }
     var capacityText: String { capacityPercent.map { "\($0)%" } ?? "—" }
+    var powerWatts: Double? {
+        guard let voltageMV, voltageMV > 0, let currentMA else { return nil }
+        return Double(voltageMV) * Double(currentMA) / 1_000_000
+    }
+    var powerText: String {
+        guard let powerWatts else { return "— W" }
+        let sign = abs(powerWatts) < 0.05 ? "" : powerWatts > 0 ? "+" : "−"
+        return sign + String(format: "%.1f W", abs(powerWatts))
+    }
 
     static let empty = BatteryStatus()
+}
+
+struct USBPowerStatus: Equatable {
+    var role: String?
+    var online: Bool?
+    var inputVoltageMV: Double?
+    var inputCurrentMA: Double?
+    var outputVoltageMV: Double?
+    var outputCurrentLimitMA: Double?
+
+    var externalPower: Bool? {
+        guard let role, let online else { return nil }
+        return role == "sink" && online
+    }
+
+    var inputWatts: Double? {
+        guard externalPower == true, let inputVoltageMV, inputVoltageMV.isFinite, inputVoltageMV > 0,
+              let inputCurrentMA, inputCurrentMA.isFinite, inputCurrentMA >= 0 else { return nil }
+        return inputVoltageMV * inputCurrentMA / 1_000_000
+    }
+
+    var outputLimitWatts: Double? {
+        guard role == "source", let outputVoltageMV, outputVoltageMV.isFinite, outputVoltageMV > 0,
+              let outputCurrentLimitMA, outputCurrentLimitMA.isFinite, outputCurrentLimitMA > 0 else { return nil }
+        return outputVoltageMV * outputCurrentLimitMA / 1_000_000
+    }
 }
 
 struct TemperatureSensor: Equatable, Identifiable {
@@ -156,6 +228,63 @@ enum USBStatusError: LocalizedError {
     var errorDescription: String? { "The router did not provide its USB power state. Update the device agent and retry." }
 }
 
+struct USBPowerReservePolicy: Codable, Equatable {
+    var minCapacityPercent: Int?
+    var reserveMinutes: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case minCapacityPercent = "min_capacity_percent", reserveMinutes = "reserve_minutes"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        if let minCapacityPercent { try values.encode(minCapacityPercent, forKey: .minCapacityPercent) }
+        else { try values.encodeNil(forKey: .minCapacityPercent) }
+        if let reserveMinutes { try values.encode(reserveMinutes, forKey: .reserveMinutes) }
+        else { try values.encodeNil(forKey: .reserveMinutes) }
+    }
+}
+
+struct USBPowerReserveStatus: Decodable, Equatable {
+    struct Stop: Decodable, Equatable {
+        let reason: String
+        let at: UInt64?
+    }
+    let policy: USBPowerReservePolicy?
+    let baselineReady: Bool
+    let routerLoadW: Double?
+    let routerRuntimeMinutes: Double?
+    let pendingStop: String?
+    let lastStop: Stop?
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case policy, error
+        case baselineReady = "baseline_ready", routerLoadW = "router_load_w"
+        case routerRuntimeMinutes = "router_runtime_minutes", pendingStop = "pending_stop", lastStop = "last_stop"
+    }
+
+    var stopText: String? {
+        let reason = pendingStop ?? lastStop?.reason
+        let prefix = pendingStop == nil ? "USB output stopped: " : "Stopping USB output: "
+        switch reason {
+        case "minimum_battery": return prefix + "battery reserve reached"
+        case "reserved_runtime": return prefix + "router runtime reserve reached"
+        case "load_unavailable": return prefix + "router load needs to be measured"
+        case "telemetry_unavailable": return prefix + "battery data unavailable"
+        case nil: return nil
+        default: return prefix + "\(reason!)"
+        }
+    }
+
+    var runtimeText: String {
+        guard let minutes = routerRuntimeMinutes, minutes.isFinite, minutes >= 0, minutes < Double(Int.max) else { return "—" }
+        let rounded = Int(minutes) / 5 * 5
+        if rounded < 5 { return "< 5 min" }
+        return rounded >= 60 ? "≈ \(rounded / 60)h \(rounded % 60)m" : "≈ \(rounded)m"
+    }
+}
+
 struct USBStatus: Equatable {
     var mode: String = ""
     var typecCC: String = "no_cc"
@@ -187,6 +316,18 @@ enum DeviceParser {
         battery.temperature = asDouble(data["temperature"]).flatMap { validTemperature($0 / 10) }
         battery.currentMA = asInt(data["current_ua"]).map { $0 / 1000 }
         battery.voltageMV = asInt(data["voltage_uv"]).map { $0 / 1000 }
+        battery.fullChargeMAH = asDouble(data["charge_full_uah"]).map { $0 / 1000 }
+        battery.averageCurrentMA = asDouble(data["current_avg_ua"]).map { $0 / 1000 }
+        if let usb = data["usb"] as? [String: Any] {
+            battery.usbPower = USBPowerStatus(
+                role: usb["role"] as? String,
+                online: usb["online"] as? Bool,
+                inputVoltageMV: asDouble(usb["input_voltage_uv"]).map { $0 / 1000 },
+                inputCurrentMA: asDouble(usb["input_current_ua"]).map { $0 / 1000 },
+                outputVoltageMV: asDouble(usb["output_voltage_mv"]),
+                outputCurrentLimitMA: asDouble(usb["output_current_limit_ma"])
+            )
+        }
         switch data["status"] as? String {
         case "Charging", "Full": battery.charging = "charging"
         case "Not charging": battery.charging = "stopped"
@@ -198,13 +339,13 @@ enum DeviceParser {
 
     static func parseCharger(_ data: [String: Any], into battery: inout BatteryStatus, chargeControl: [String: Any]? = nil) {
         battery.chargeStatus = asInt(data["charge_status"]) ?? 0
-        let chargerConnected = asInt(data["charger_connect"]) == 1
+        let chargerConnected = asInt(data["charger_connect"])
         let chargingStopped = chargeControl?["charging_stopped"] as? Bool ?? (data["direct_power_supply_mode"] as? String == "enable")
-        if chargerConnected && chargingStopped {
+        if chargerConnected == 1 && chargingStopped {
             battery.charging = "stopped"
         } else if battery.chargeStatus == 1 {
             battery.charging = "charging"
-        } else {
+        } else if battery.charging.isEmpty && chargerConnected == 0 {
             battery.charging = "discharging"
         }
     }

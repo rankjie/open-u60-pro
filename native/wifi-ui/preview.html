@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>U60 机身界面预览</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#eceeef;color:#172026;font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:1080px;margin:auto;padding:28px 24px}h1{font-size:25px;line-height:1.3;margin:0 0 8px;font-weight:650}
+.intro{color:#59636a;margin:0 0 24px;max-width:760px}.tag{font-size:12px;color:#49606e;letter-spacing:.05em;margin-bottom:10px}
+nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:24px}button{font:inherit;cursor:pointer;color:inherit}
+nav button{border:1px solid #c6cdd1;padding:7px 14px;border-radius:7px;background:transparent}nav button[aria-selected=true]{background:#172026;color:white;border-color:#172026}
+button:focus-visible{outline:3px solid #009dff;outline-offset:3px}.workspace{display:grid;grid-template-columns:320px 1fr;gap:32px;align-items:start}
+.screen{position:relative;width:320px;height:480px;flex:none;background:black;box-shadow:0 0 0 1px #0002}
+.screen img{display:block;width:320px;height:480px;image-rendering:auto}.hotspot{position:absolute;border:0;background:transparent;padding:0;border-radius:4px}
+.hotspot:hover{outline:1px solid #009dff;outline-offset:-1px;background:#009dff12}aside{max-width:340px;padding-top:6px}h2{font-size:18px;margin:0 0 10px}aside p{margin:0 0 16px;color:#59636a}
+.note{font-size:13px;padding-top:16px;border-top:1px solid #cdd3d6}.gallery{display:none;grid-template-columns:repeat(auto-fit,320px);gap:28px;justify-content:start}.gallery figure{margin:0}.gallery figcaption{margin-bottom:8px;font-weight:600}.gallery img{display:block;width:320px;height:480px;background:black}
+.gallery-on .workspace{display:none}.gallery-on .gallery{display:grid}footer{color:#78838a;font-size:12px;margin-top:24px}.all{margin-left:auto}
+@media(max-width:700px){main{padding:20px 16px}.workspace{grid-template-columns:1fr;gap:20px}.screen{margin:auto}aside{max-width:100%}.all{margin-left:0}}
+</style>
+<main>
+<div class="tag">本地预览 · 原厂 LVGL 渲染 · 320 × 480</div>
+<h1>U60 机身界面</h1>
+<p class="intro">使用当前 C 代码和原厂 LVGL 渲染器生成画面，网络与速率为示例数据。Wi-Fi 菜单使用已核对的原厂布局。</p>
+<nav aria-label="预览页面" role="tablist">
+<button data-view="home" role="tab">首页</button><button data-view="lock" role="tab">锁屏</button><button data-view="menu" role="tab">原生 Wi-Fi 菜单</button><button data-view="panel" role="tab">Wi-Fi 中继</button><button data-view="confirmation" role="tab">切换确认</button><button data-view="keyboard" role="tab">输入网络</button><button data-view="connection" role="tab">连接 App</button><button data-view="factory" role="tab" id="factory-tab">原厂对照</button><button class="all" id="all" role="tab">全部页面</button>
+<button data-view="calls" role="tab">通话记录</button><button data-view="help" role="tab">帮助与升级</button><button data-view="call-home" role="tab">来电状态</button>
+</nav>
+<div class="workspace"><div class="screen"><img id="frame" width="320" height="480" alt=""><div id="hotspots"></div></div>
+<aside><h2 id="name"></h2><p id="description"></p><p class="note">可以点击画面中的 Wi-Fi、返回、QR 和 Other network 切换页面。这里演示页面导航，不会连接网络或修改设备。</p><p>像素按机身原尺寸显示；浏览器可放大查看。</p></aside></div>
+<div class="gallery" id="gallery"></div>
+<footer>页面内容来自固件原渲染器的实际输出；原厂触屏、亮度和触感仍需最终上机确认。</footer>
+</main>
+<script>
+const hasFactory=__HAS_FACTORY__;
+const views={
+ calls:{name:'通话记录',description:'通话入口占用原来的升级菜单位置，记录显示方向、接听结果和设备当地时间。',links:[[0,24,64,42,'home','返回首页']]},
+ help:{name:'帮助与升级',description:'帮助保留原厂使用帮助，并提供原厂固件升级入口。预览不会执行升级。',links:[[0,24,64,42,'home','返回首页']]},
+ 'call-home':{name:'来电状态',description:'来电和正在通话状态覆盖首页或锁屏上方的网络标题区域；提示不拦截触摸，原来的长按解锁继续有效。',links:[]},
+ home:{name:'首页',description:'沿用原生锁屏的地球背景、中文字体、大号数字及黄色上行、绿色下行箭头；上方显示上游网络和联网状态，下方显示本机广播的热点名称。',links:[]},
+ lock:{name:'锁屏',description:'中继模式与首页显示相同的上游、联网状态和热点名称。原生速率、锁图标和长按解锁保留；切回 SIM 热点会恢复原生锁屏信息。',links:[]},
+ menu:{name:'原生 Wi-Fi 菜单',description:'Wi-Fi 中继与原厂设置位于同一列表，使用相同中文字体、深灰圆角和文字颜色，并随原生菜单滚动。',links:[[18,186,284,52,'panel','打开 Wi-Fi 中继']]},
+ panel:{name:'Wi-Fi 中继',description:'当前连接、频段、扫描、网络列表按操作顺序排列。SIM 热点带切换图标，点击先确认；扫描结果缓存 30 秒，扫描仍可手动刷新。',links:[[4,24,48,48,'menu','返回原生 Wi-Fi 菜单'],[266,24,50,48,'connection','连接 App'],[190,76,112,48,'confirmation','确认切换到 SIM 热点'],[18,428,284,52,'keyboard','输入其他网络'],[18,176,284,52,'keyboard','选择网络']]},
+ confirmation:{name:'切换到 SIM 热点',description:'确认会断开上游 Wi-Fi，改用 SIM 卡联网。取消保留当前连接；锁屏也会取消这次确认。此预览中的切换按钮只返回列表，不操作设备。',links:[[34,288,120,48,'panel','取消切换'],[166,288,120,48,'panel','确认切换（仅演示）']]},
+ keyboard:{name:'输入网络',description:'统一页头和返回操作。当前输入框用细蓝边标示，密码保持遮蔽，连接是唯一主操作。键盘保留字母、符号、大小写和删除。',links:[[4,24,48,48,'panel','返回网络列表']]},
+ connection:{name:'连接 App',description:'二维码留足白边，说明简短居中。完整连接字符串和服务器地址保留在下方，方便手动输入。',links:[[4,24,48,48,'panel','返回网络列表']]},
+ factory:{name:'原厂首页对照',description:'这台固件原有的黑底、白字、蓝色状态图标及底部滑页圆点。新增界面沿用这套视觉基础。',links:[]}
+};
+if(!hasFactory)document.getElementById('factory-tab').hidden=true;
+function show(view){
+ document.body.classList.remove('gallery-on');
+ const info=views[view];document.getElementById('frame').src=view+'.png';document.getElementById('frame').alt=info.name;
+ document.getElementById('name').textContent=info.name;document.getElementById('description').textContent=info.description;
+ document.querySelectorAll('nav button').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.view===view)));
+ const hotspots=document.getElementById('hotspots');hotspots.replaceChildren();
+ for(const [x,y,w,h,next,label] of info.links){const b=document.createElement('button');b.className='hotspot';b.style.cssText=`left:${x}px;top:${y}px;width:${w}px;height:${h}px`;b.setAttribute('aria-label',label);b.title=label;b.onclick=()=>show(next);hotspots.append(b);}
+}
+document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>show(b.dataset.view));
+document.getElementById('all').onclick=()=>{document.body.classList.add('gallery-on');document.querySelectorAll('nav button').forEach(b=>b.setAttribute('aria-selected',String(b.id==='all')));};
+for(const [key,v] of Object.entries(views)){if(key==='factory'&&!hasFactory)continue;const f=document.createElement('figure');const c=document.createElement('figcaption');c.textContent=v.name;const i=document.createElement('img');i.src=key+'.png';i.alt=v.name;i.width=320;i.height=480;f.append(c,i);document.getElementById('gallery').append(f);}
+show('home');
+</script>
+</html>

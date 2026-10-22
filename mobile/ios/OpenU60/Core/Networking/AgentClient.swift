@@ -11,7 +11,9 @@ final class AgentClient {
     var baseURL: String
     var token: String?
     @ObservationIgnored var relayAccess: (@MainActor () -> AgentRelayAccess?)?
+    @ObservationIgnored var peerRequest: AgentPeerRequest?
     private let transport = AgentTransport()
+    private let reads = AgentReadPool()
     var connectionRoute: AgentTransport.Route {
         relayAccess?() == nil ? (token == nil ? .unavailable : .local) : transport.route
     }
@@ -22,10 +24,8 @@ final class AgentClient {
     @ObservationIgnored
     var onUnauthorized: (@MainActor () async -> Bool)?
 
-    /// Moves each time a response shows the router on another SIM identity or in another
-    /// switch phase (see `SimIdentityTracker`). Screens re-read SIM-bound state when it does.
-    private(set) var identityRevision = 0
-    @ObservationIgnored private var identity = SimIdentityTracker()
+    let simState = SIMState()
+    var identityRevision: Int { simState.identityRevision }
 
     private let session: URLSession
 
@@ -69,19 +69,30 @@ final class AgentClient {
     /// waking the session-recovery hook, which would otherwise offer the router password to
     /// whatever happens to be listening on that address.
     func getJSON(_ path: String, retryOnUnauthorized: Bool = true) async throws -> [String: Any] {
+        if path == "/api/sim/info", retryOnUnauthorized {
+            selectSIMDevice()
+            return try await simState.read {
+                guard let data = try await self.envelopeData(method: "GET", path: path, body: nil) as? [String: Any] else {
+                    throw AgentError.decodingError("Expected SIM information object")
+                }
+                return data
+            }
+        }
         let payload = try await envelopeData(
             method: "GET",
             path: path,
             body: nil,
             retryOnUnauthorized: retryOnUnauthorized
         )
-        return payload as? [String: Any] ?? [:]
+        guard let data = payload as? [String: Any] else { throw AgentError.decodingError("Expected object for \(path)") }
+        return data
     }
 
     /// GET a path and return the `data` field as an array of dictionaries.
     func getJSONArray(_ path: String) async throws -> [[String: Any]] {
         let payload = try await envelopeData(method: "GET", path: path, body: nil)
-        return payload as? [[String: Any]] ?? []
+        guard let data = payload as? [[String: Any]] else { throw AgentError.decodingError("Expected array for \(path)") }
+        return data
     }
 
     /// POST with a raw dict body and return the `data` field as a raw dictionary.
@@ -107,13 +118,37 @@ final class AgentClient {
 
     // MARK: - SIM identity
 
-    /// Keeps `identityRevision` current on a screen that polls nothing stamped itself: the
-    /// dashboard's poller stops while another tab is shown. `/api/esim/switch` is answered from
-    /// the agent's memory, so this costs the router no ubus fork.
-    func watchSimIdentity() async {
+    private var simDevice: String { relayAccess?().map { $0.routerID.uuidString } ?? baseURL }
+
+    private func selectSIMDevice() { simState.selectDevice(simDevice) }
+
+    /// One foreground monitor for all tabs. Identity checks cost no ubus fork; SIM details
+    /// refresh at most every 30 seconds unless an explicit read or identity change needs them.
+    func watchSIMState() async {
+        var failures = 0
         while !Task.isCancelled {
-            _ = try? await getJSON("/api/esim/switch")
-            try? await Task.sleep(for: .seconds(2))
+            selectSIMDevice()
+            do {
+                _ = try await getJSON("/api/esim/switch")
+            } catch {
+                if Task.isCancelled { return }
+                // The ordinary SIM read can still succeed if the identity endpoint failed.
+            }
+            guard !Task.isCancelled else { return }
+            do {
+                _ = try await simState.read(force: false) {
+                    guard let data = try await self.envelopeData(method: "GET", path: "/api/sim/info", body: nil) as? [String: Any] else {
+                        throw AgentError.decodingError("Expected SIM information object")
+                    }
+                    return data
+                }
+                failures = 0
+            } catch {
+                if error.isCancellation, Task.isCancelled { return }
+                failures = min(failures + 1, 4)
+                // SIMState retains the last confirmed value and publishes refresh errors.
+            }
+            do { try await Task.sleep(for: .seconds(min(30, 2 * (1 << failures)))) } catch { return }
         }
     }
 
@@ -176,6 +211,8 @@ final class AgentClient {
         body: Data?,
         retryOnUnauthorized: Bool = true
     ) async throws -> Any? {
+        selectSIMDevice()
+        let device = simDevice
         let payload = try await send(
             method: method,
             path: path,
@@ -190,7 +227,15 @@ final class AgentClient {
             }
             return json["data"]
         }
-        if identity.observe(payload as? [String: Any]) { identityRevision += 1 }
+        guard device == simDevice else {
+            selectSIMDevice()
+            if path == "/api/sim/info" || path == "/api/sim/phone-number" { throw CancellationError() }
+            return payload
+        }
+        simState.observeIdentity(payload as? [String: Any])
+        if path == "/api/sim/phone-number", let data = payload as? [String: Any] {
+            try simState.updateNumber(data)
+        }
         return payload
     }
 
@@ -204,9 +249,35 @@ final class AgentClient {
         retryOnUnauthorized: Bool = true,
         parse: @escaping @Sendable (Data) throws -> T
     ) async throws -> T {
+        let isRead = method == "GET" || (method == "POST" && path == "/api/sms/list")
+        if isRead, authenticated, retryOnUnauthorized {
+            let scope = "\(relayAccess?()?.server.absoluteString ?? "local")/\(simDevice)/\(baseURL)"
+            let key = path + (body.map { "?" + $0.base64EncodedString() } ?? "")
+            let bytes = try await reads.read(scope: scope, path: key) {
+                try await self.sendUnshared(method: method, path: path, body: body, parse: { $0 })
+            }
+            return try await Self.process(AgentHTTPResponse(status: 200, data: bytes), parse: parse).value
+        }
+        // A read that overlaps a mutation cannot publish the preceding state afterwards.
+        let group = "/" + path.split(separator: "/").prefix(2).joined(separator: "/")
+        if authenticated { reads.invalidate(prefix: group) }
+        let value = try await sendUnshared(method: method, path: path, body: body,
+            authenticated: authenticated, retryOnUnauthorized: retryOnUnauthorized, parse: parse)
+        if authenticated { reads.invalidate(prefix: group) }
+        return value
+    }
+
+    private func sendUnshared<T>(
+        method: String,
+        path: String,
+        body: Data?,
+        authenticated: Bool = true,
+        retryOnUnauthorized: Bool = true,
+        parse: @escaping @Sendable (Data) throws -> T
+    ) async throws -> T {
         if authenticated, retryOnUnauthorized, Self.canRelay(path), let access = relayAccess?() {
             let response = try await transport.send(method: method, path: path, body: body, baseURL: baseURL,
-                access: access, token: { self.token }, reauthenticate: { await self.onUnauthorized?() ?? false })
+                access: access, peer: peerRequest, token: { self.token }, reauthenticate: { await self.onUnauthorized?() ?? false })
             return try await Self.process(response, parse: parse).value
         }
         do {

@@ -5,61 +5,63 @@ struct SMSConversationView: View {
     let conversation: SMSConversation
     @State private var messageText = ""
     @State private var sendFailure: String?
-    @FocusState private var isInputFocused: Bool
+    @FocusState private var messageFocused: Bool
 
     private var messages: [SMSMessage] {
         viewModel.conversations.first(where: { $0.id == conversation.id })?.messages ?? conversation.messages
     }
 
+    private var timeline: [MessageTimelineItem] {
+        let messages = messages
+        return messages.enumerated().map { index, message in
+            let showDate = index == 0 || message.date.timeIntervalSince(messages[index - 1].date) > 300
+                || !Calendar.autoupdatingCurrent.isDate(message.date, inSameDayAs: messages[index - 1].date)
+            return MessageTimelineItem(message: message, showDate: showDate)
+        }
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(messages) { message in
-                            SMSBubbleView(message: message)
-                                .id(message.id)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(timeline) { item in
+                        if item.showDate {
+                            Text(item.message.date.formatted(date: .abbreviated, time: .shortened))
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 12)
+                                .padding(.bottom, 6)
+                                .frame(maxWidth: .infinity)
                         }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                }
-                // Lands on the newest message at first layout, unlike an onAppear scrollTo
-                // that fires before the LazyVStack has materialized its rows.
-                .defaultScrollAnchor(.bottom)
-                .onChange(of: messages.count) {
-                    guard let lastId = messages.last?.id else { return }
-                    withAnimation {
-                        proxy.scrollTo(lastId, anchor: .bottom)
+                        SMSBubbleView(message: item.message,
+                                      isLatest: item.message.id == messages.last?.id)
+                            .id(item.message.id)
                     }
                 }
-            }
-
-            if let sendFailure {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                    Text(sendFailure)
-                    Spacer(minLength: 0)
-                }
-                .font(.caption)
-                .foregroundStyle(.red)
                 .padding(.horizontal, 12)
-                .padding(.bottom, 4)
+                .padding(.vertical, 8)
             }
-
-            Divider()
-
-            // Input bar
-            HStack(spacing: 8) {
-                TextField("Message", text: $messageText, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...5)
-                    .focused($isInputFocused)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 20))
-
-                Button {
+            // Lands on the newest message at first layout, unlike an onAppear scrollTo
+            // that fires before the LazyVStack has materialized its rows.
+            .defaultScrollAnchor(.bottom)
+            .onChange(of: messages.count) {
+                guard let lastId = messages.last?.id else { return }
+                withAnimation {
+                    proxy.scrollTo(lastId, anchor: .bottom)
+                }
+            }
+        }
+        .background(Color(.systemBackground))
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                if let sendFailure {
+                    Label(sendFailure, systemImage: "exclamationmark.circle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                }
+                SMSInputBar(text: $messageText, isFocused: $messageFocused, isSending: viewModel.isSending) {
                     let text = messageText
                     guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
                     sendFailure = nil
@@ -67,32 +69,43 @@ struct SMSConversationView: View {
                         // Only clear the field once the agent accepted it, so a failed send
                         // leaves the user's text intact to retry.
                         if await viewModel.sendSMS(to: conversation.number, message: text) {
-                            messageText = ""
+                            if messageText == text { messageText = "" }
                         } else {
                             sendFailure = viewModel.error ?? "Message not sent"
                         }
                     }
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.title2)
                 }
-                .accessibilityLabel("Send")
-                .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewModel.isSending)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color(.systemBackground))
+            .background(.bar)
         }
         .navigationTitle(conversation.number)
+        .scrollDismissesKeyboard(.interactively)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .tabBar)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                if viewModel.isSending {
-                    ProgressView()
+            ToolbarItem(placement: .topBarTrailing) {
+                if messageFocused {
+                    Button("Hide keyboard", systemImage: "keyboard.chevron.compact.down") {
+                        messageFocused = false
+                    }
+                    .labelStyle(.iconOnly)
+                    .accessibilityIdentifier("dismiss-keyboard")
                 }
             }
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 2) {
+                    Image(systemName: "person.crop.circle.fill")
+                        .font(.system(size: 26))
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                    Text(conversation.number)
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+                }
+                .accessibilityElement(children: .combine)
+            }
         }
-        .task {
+        .task(id: messages.filter { $0.tag == .unread }.map(\.id)) {
             // Mark unread messages as read when conversation is opened
             let unreadIds = messages.filter { $0.tag == .unread }.map(\.id)
             await viewModel.markAsRead(ids: unreadIds)
@@ -100,10 +113,17 @@ struct SMSConversationView: View {
     }
 }
 
+private struct MessageTimelineItem: Identifiable {
+    let message: SMSMessage
+    let showDate: Bool
+    var id: Int { message.id }
+}
+
 // MARK: - Bubble View
 
 private struct SMSBubbleView: View {
     let message: SMSMessage
+    let isLatest: Bool
 
     private var isOutgoing: Bool { !message.tag.isIncoming }
 
@@ -114,33 +134,33 @@ private struct SMSBubbleView: View {
             VStack(alignment: isOutgoing ? .trailing : .leading, spacing: 2) {
                 Text(message.content)
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(bubbleColor, in: RoundedRectangle(cornerRadius: 16))
+                    .padding(.vertical, 10)
+                    .background(isOutgoing ? Color.green : Color(.systemGray5), in: RoundedRectangle(cornerRadius: 18))
                     .foregroundStyle(isOutgoing ? .white : .primary)
+                    .textSelection(.enabled)
 
                 HStack(spacing: 4) {
+                    Text(message.line.map { "\(isOutgoing ? "From" : "To") \($0.label)" } ?? "Line unknown")
+                        .foregroundStyle(.secondary)
                     if message.tag == .failed {
                         Image(systemName: "exclamationmark.circle.fill")
                             .foregroundStyle(.red)
                             .font(.caption2)
                             .accessibilityLabel("Not delivered")
                     }
-                    Text(message.date, style: .time)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    if message.tag == .failed {
+                        Text("Not Delivered").foregroundStyle(.red)
+                    } else if message.tag == .draft {
+                        Text("Draft").foregroundStyle(.secondary)
+                    } else if isLatest && message.tag == .sent {
+                        Text("Sent").foregroundStyle(.secondary)
+                    }
                 }
+                .font(.caption2)
+                .padding(.horizontal, 6)
             }
 
             if !isOutgoing { Spacer(minLength: 60) }
-        }
-    }
-
-    private var bubbleColor: Color {
-        switch message.tag {
-        case .failed: return .red
-        case .sent: return .blue
-        case .draft: return .orange
-        default: return Color(.systemGray5)
         }
     }
 }

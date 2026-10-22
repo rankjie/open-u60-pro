@@ -30,12 +30,17 @@ impl EventBus {
     /// Register interest in a specific ubus event. Returns a receiver
     /// that will get the event payload each time it fires.
     pub fn subscribe(&self, event_name: &str) -> mpsc::Receiver<Value> {
+        self.subscribe_many(&[event_name])
+    }
+
+    /// Several event types can wake one consumer without adding concurrent
+    /// writers to a stateful collector.
+    pub fn subscribe_many(&self, event_names: &[&str]) -> mpsc::Receiver<Value> {
         let (tx, rx) = mpsc::channel();
         let mut subs = self.subscribers.lock().unwrap();
-        subs.push(Subscriber {
-            event: event_name.to_string(),
-            tx,
-        });
+        for event in event_names {
+            subs.push(Subscriber { event: event.to_string(), tx: tx.clone() });
+        }
         rx
     }
 
@@ -306,5 +311,16 @@ mod tests {
         let payload = serde_json::json!({"phase": "changed"});
         bus.publish("zte_agent.sim_identity", &payload);
         assert_eq!(identity.try_recv().unwrap(), payload);
+    }
+
+    #[test]
+    fn one_sms_owner_receives_firmware_arrival_and_resume_in_order() {
+        let bus = EventBus::new();
+        let events = bus.subscribe_many(&["zwrt_wms_status_event", crate::power::RESUMED]);
+        assert_eq!(bus.listen_patterns(), ["zwrt_wms_status_event"]);
+        bus.read_events(Cursor::new("{\"zwrt_wms_status_event\":{\"wms_status\":\"new_sms_received\"}}\n"));
+        bus.publish(crate::power::RESUMED, &serde_json::json!({"resumed":true}));
+        assert_eq!(events.try_recv().unwrap()["wms_status"], "new_sms_received");
+        assert_eq!(events.try_recv().unwrap()["resumed"], true);
     }
 }

@@ -157,14 +157,14 @@ fn handle_request(mut request: Request, state: &AppState) {
         _ => {}
     }
 
-    if (path.starts_with("/api/live-activity") || path.starts_with("/api/remote-calling") || path.starts_with("/api/calling") || path == "/api/management") && !state.auth.has_password() {
+    if (path.starts_with("/api/live-activity") || path.starts_with("/api/remote-calling") || path.starts_with("/api/calling") || path.starts_with("/api/wifi/uplink") || path == "/api/management") && !state.auth.has_password() {
         respond(request, 403, json!({"ok": false, "error": "agent password required"}));
         return;
     }
 
     // Read body
     let mut body = Vec::new();
-    if path.starts_with("/api/live-activity") || path.starts_with("/api/remote-calling") || path.starts_with("/api/calling") || path == "/api/management" {
+    if path.starts_with("/api/live-activity") || path.starts_with("/api/remote-calling") || path.starts_with("/api/calling") || path.starts_with("/api/wifi/uplink") || path == "/api/management" {
         let limit = if path == "/api/management" { 98304 } else if path.starts_with("/api/live-activity") { 4096 } else { 8192 };
         if std::io::Read::read_to_end(&mut request.as_reader().take((limit + 1) as u64), &mut body).is_err() {
             respond(request, 400, json!({"ok":false,"error":"incomplete_request_body"}));
@@ -198,6 +198,7 @@ fn parse_query_usize(url: &str, key: &str) -> Option<usize> {
 }
 
 pub fn route(method: &Method, path: &str, state: &AppState, body: &[u8]) -> (u16, Value) {
+    if let Some(response)=state.remote_calling.recordings.route(method,path,body) {return response;}
     match (method, path) {
         (&Method::Get, "/api/remote-calling/status") => (200, state.remote_calling.status()),
         (&Method::Get, "/api/sms/notifications/status") => (200, state.sms_notifications.status()),
@@ -244,6 +245,10 @@ pub fn route(method: &Method, path: &str, state: &AppState, body: &[u8]) -> (u16
         (&Method::Get, "/api/system/top") => handlers::system_top(state),
         (&Method::Post, "/api/system/kill-bloat") => handlers::system_kill_bloat(state, body),
         // WiFi
+        (&Method::Get, "/api/wifi/uplink") => state.wifi_uplink.status(),
+        (&Method::Put, "/api/wifi/uplink") => state.wifi_uplink.apply(body),
+        (&Method::Post, "/api/wifi/uplink/scan") => state.wifi_uplink.scan(body),
+        (&Method::Post, "/api/wifi/uplink/portal") => state.wifi_uplink.portal(),
         (&Method::Get, "/api/wifi/status") => wifi::wifi_status(state),
         (&Method::Put, "/api/wifi/settings") => wifi::wifi_set(state, body),
         (&Method::Get, "/api/wifi/guest") => wifi::guest_status(state),
@@ -288,6 +293,7 @@ pub fn route(method: &Method, path: &str, state: &AppState, body: &[u8]) -> (u16
         (&Method::Post, "/api/sms/forward/retry") => sms_forward::retry_forward(state, body),
         // SIM
         (&Method::Get, "/api/sim/info") => sim::sim_info(state),
+        (&Method::Put, "/api/sim/phone-number") => sim::sim_phone_number_set(state, body),
         (&Method::Get, "/api/sim/imei") => sim::sim_imei(state),
         (&Method::Post, "/api/sim/pin/verify") => sim::sim_pin_verify(state, body),
         (&Method::Post, "/api/sim/pin/change") => sim::sim_pin_change(state, body),
@@ -348,6 +354,8 @@ pub fn route(method: &Method, path: &str, state: &AppState, body: &[u8]) -> (u16
         (&Method::Get, "/api/usb/status") => usb::usb_status(state),
         (&Method::Put, "/api/usb/mode") => usb::usb_mode_set(state, body),
         (&Method::Put, "/api/usb/powerbank") => usb::usb_powerbank_set(state, body),
+        (&Method::Get, "/api/usb/power-reserve") => (200, json!({"ok":true,"data":state.powerbank_reserve.status()})),
+        (&Method::Put, "/api/usb/power-reserve") => state.powerbank_reserve.configure(body),
         // Telephony — calls
         (&Method::Post, "/api/call/dial") => telephony::call_dial(state, body),
         (&Method::Post, "/api/call/hangup") => telephony::call_hangup(state),

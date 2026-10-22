@@ -1,0 +1,16 @@
+#!/bin/sh /etc/rc.common
+USE_PROCD=1
+START=99
+STOP=98
+
+start_service() {
+    local armed=0
+    test ! -f /data/openu60-ui/recovery/enabled.sha256 || armed=1
+    echo "OpenU60 screen: uptime=$(cut -d ' ' -f1 /proc/uptime) enabled=$armed"
+    test -f /data/openu60-ui/recovery/enabled.sha256 || return 0
+    procd_open_instance
+    procd_set_param command /data/openu60-ui/recovery/guard serve
+    procd_set_param respawn 3600 2 2
+    procd_set_param term_timeout 45
+    procd_close_instance
+}

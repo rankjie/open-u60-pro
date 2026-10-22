@@ -556,6 +556,9 @@ final class DashboardViewModel {
         async let chargerResponse = try? client.getJSON("/api/device/charger")
         let (info, charger) = await (batteryResponse, chargerResponse)
         guard !Task.isCancelled else { return false }
+        if let errors = info?["telemetry_errors"] as? [String], !errors.isEmpty {
+            logger.error("Battery telemetry: \(errors.joined(separator: "; "), privacy: .public)")
+        }
         var fresh = info.map(DeviceParser.parseKernelBattery) ?? .empty
         fresh.timeToFull = battery.timeToFull
         fresh.timeToEmpty = battery.timeToEmpty

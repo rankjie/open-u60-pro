@@ -175,6 +175,7 @@ struct SchedulerJobFormView: View {
                 }
             }
             .navigationTitle(editingJob != nil ? "Edit Automation" : "New Automation")
+            .keyboardDismissal()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

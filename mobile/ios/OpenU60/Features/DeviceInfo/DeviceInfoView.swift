@@ -36,7 +36,6 @@ struct DeviceInfoView: View {
             }
         }
         .task(id: viewModel.identityRevision) { await viewModel.refresh() }
-        .task { await viewModel.watchIdentity() }
     }
 
     // MARK: - Rows

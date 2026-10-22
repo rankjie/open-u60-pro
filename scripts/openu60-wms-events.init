@@ -1,0 +1,82 @@
+#!/bin/sh /etc/rc.common
+START=99
+STOP=98
+EXTRA_COMMANDS="healthcheck rollback"
+
+state=/data/openu60-wms-event
+target=/usr/bin/zte_topsw_wms
+logfile=/tmp/openu60-wms-event.log
+
+log() { echo "[wms-events] $1" >> "$logfile"; }
+mounted() { grep -q " $target " /proc/mounts; }
+running() { test -n "$(pidof zte_topsw_wms)"; }
+wms_service() { /etc/init.d/zte_topsw_wms "$@"; }
+healthy() {
+    running &&
+        ubus -t 2 call zwrt_wms zwrt_wms_get_wms_capacity '{}' >/dev/null 2>&1
+}
+
+stop_wms() {
+    local attempt=0
+    wms_service stop || return 1
+    while running; do
+        attempt=$((attempt+1))
+        if test "$attempt" -ge 10; then log stop_failed; return 1; fi
+        sleep 1
+    done
+}
+
+rollback() {
+    # Persist the decision before changing the live process or mount.
+    : > "$state/disabled" || return 1
+    if mounted; then
+        # Executing this file pins its bind mount until the process exits.
+        stop_wms || return 1
+        if ! umount "$target"; then
+            wms_service start
+            log unmount_failed
+            return 1
+        fi
+    fi
+    wms_service start || return 1
+    log factory_restored
+}
+
+healthcheck() {
+    local attempt=0 failed=0
+    # Allow the original service to finish initialization after its restart.
+    while ! healthy; do
+        attempt=$((attempt+1))
+        if test "$attempt" -ge 60; then rollback; return 1; fi
+        sleep 2
+    done
+    attempt=0
+    while test "$attempt" -lt 12; do
+        sleep 5
+        if healthy; then failed=0; else failed=$((failed+1)); fi
+        if test "$failed" -ge 3; then rollback; return 1; fi
+        attempt=$((attempt+1))
+    done
+    log healthy
+}
+
+start() {
+    if test -e "$state/disabled"; then log disabled; return 0; fi
+    if mounted; then return 0; fi
+    if ! test -x "$state/patched" || ! test -f "$state/factory"; then
+        log missing_patch_files
+        return 1
+    fi
+    # A firmware update must leave its own service in place until re-inspected.
+    if ! cmp -s "$target" "$state/factory"; then
+        log firmware_changed
+        return 1
+    fi
+    mount --bind "$state/patched" "$target" || return 1
+    if running && ! wms_service restart; then rollback; return 1; fi
+    healthcheck </dev/null >> "$logfile" 2>&1 &
+}
+
+stop() {
+    if mounted; then stop_wms && umount "$target"; fi
+}
