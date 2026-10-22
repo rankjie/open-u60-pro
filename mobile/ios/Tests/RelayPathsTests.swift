@@ -49,11 +49,14 @@ import Foundation
 
         // Automatic: the fastest answering path.
         var base = await paths.select(server: server, token: "phone-token", doors: [hangzhou, netherlands, broken], preference: nil)
-        precondition(paths.current == hangzhou.address && base.absoluteString == "http://127.0.0.1:5001")
+        precondition(paths.current == hangzhou.address && base.absoluteString == "http://127.0.0.1:5001",
+                     "chose \(paths.current) base \(base) options \(paths.options)")
         precondition(paths.options.map(\.id) == [RelayPaths.direct, hangzhou.address, netherlands.address, broken.address])
         precondition(paths.options.last?.reachable == false)
         // Late probes still fill in the list after the choice.
-        try? await Task.sleep(for: .milliseconds(400))
+        for _ in 0..<200 where paths.options.first(where: { $0.id == netherlands.address })?.latency == nil {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
         precondition(paths.options.first { $0.id == netherlands.address }?.latency == 0.090)
         // Tunnels are reused across selections.
         _ = await paths.select(server: server, token: "phone-token", doors: [hangzhou, netherlands], preference: nil)

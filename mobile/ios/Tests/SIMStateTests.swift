@@ -25,10 +25,12 @@ struct SIMStateTests {
                                           "msisdn": number, "msisdn_source": "manual"]) { _, new in new }
     }
 
+    /// Waits in real time: the client holds reads for a few milliseconds so concurrent ones
+    /// can share one batch request.
     @MainActor private static func started(_ pending: PendingRead) async {
-        for _ in 0..<1000 {
+        for _ in 0..<2000 {
             if pending.started { return }
-            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(1))
         }
         preconditionFailure("Shared request never started")
     }

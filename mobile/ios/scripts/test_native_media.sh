@@ -24,6 +24,7 @@ xcrun --sdk iphonesimulator swiftc -swift-version 5 -parse-as-library -sdk "$ope
     -target "$openu60_arch-apple-ios17.0-simulator" -F "$openu60_framework" \
     -Xlinker -rpath -Xlinker "$openu60_framework" -framework WebRTC \
     mobile/ios/OpenU60/Core/RemoteCalling/CallingCredentials.swift \
+    mobile/ios/OpenU60/Core/RemoteCalling/RelayPaths.swift \
     mobile/ios/OpenU60/Core/RemoteCalling/CallingMedia.swift \
     mobile/ios/Tests/NativeMediaInteropTests.swift -o "$openu60_work/tests"
 target/debug/examples/native_media_gateway > "$openu60_work/gateway.log" 2>&1 &

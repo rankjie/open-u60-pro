@@ -109,37 +109,52 @@ final class RelayPaths {
         options = candidates.map { Option(id: $0.id, label: $0.label, latency: nil, reachable: nil) }
             + doors.filter { door in !candidates.contains { $0.id == door.address } }
                 .map { Option(id: $0.address, label: $0.label, latency: nil, reachable: false) }
-        // The first path to answer is the fastest, so the choice is made then; the remaining
-        // probes keep filling in latencies for the path list. A manual choice waits for its own.
+        // The choice is made shortly after the first answer, from the measured latencies of the
+        // paths that answered by then, so a dead door costs nothing. The short grace absorbs
+        // answers that completed together but resumed out of order. A manual choice waits for
+        // its own answer and falls back if it fails. The other probes keep filling the list.
         let generation = UUID()
         self.generation = generation
         let preferred = preference.flatMap { id in candidates.contains { $0.id == id } ? id : nil }
-        current = await withCheckedContinuation { (decided: CheckedContinuation<String, Never>) in
-            var pending = candidates.count
-            var resumed = false
-            func decide(_ id: String) { if !resumed { resumed = true; decided.resume(returning: id) } }
-            for candidate in candidates {
-                Task { @MainActor [probe] in
-                    let latency = await probe(candidate.base, token)
-                    guard self.generation == generation else { return }
-                    if let index = self.options.firstIndex(where: { $0.id == candidate.id }) {
-                        self.options[index].latency = latency
-                        self.options[index].reachable = latency != nil
-                    }
-                    pending -= 1
-                    let answered = self.options.filter { $0.reachable == true }
-                    let preferredFailed = preferred.map { id in self.options.contains { $0.id == id && $0.reachable == false } } ?? true
-                    if let preferred, latency != nil, candidate.id == preferred {
-                        decide(preferred)
-                    } else if preferredFailed, let fastest = answered.min(by: { ($0.latency ?? .infinity) < ($1.latency ?? .infinity) }) {
-                        decide(fastest.id)
-                    } else if pending == 0 {
-                        decide(Self.direct)
-                    }
+        enum Event { case answered(reachable: Bool), graceOver }
+        let (events, sink) = AsyncStream.makeStream(of: Event.self)
+        for candidate in candidates {
+            Task { @MainActor [probe] in
+                let latency = await probe(candidate.base, token)
+                // A newer selection or stop() supersedes this one.
+                guard self.generation == generation else { sink.finish(); return }
+                if let index = self.options.firstIndex(where: { $0.id == candidate.id }) {
+                    self.options[index].latency = latency
+                    self.options[index].reachable = latency != nil
                 }
+                sink.yield(.answered(reachable: latency != nil))
             }
-            if candidates.isEmpty { decide(Self.direct) }
         }
+        var pending = candidates.count
+        var graceStarted = false, graceOver = false
+        var choice: String?
+        for await event in events {
+            switch event {
+            case .answered(let reachable):
+                pending -= 1
+                if reachable, !graceStarted {
+                    graceStarted = true
+                    Task { try? await Task.sleep(for: .milliseconds(50)); sink.yield(.graceOver) }
+                }
+            case .graceOver:
+                graceOver = true
+            }
+            let answered = options.filter { $0.reachable == true }
+            if let preferred, answered.contains(where: { $0.id == preferred }) { choice = preferred; break }
+            let preferredOpen = preferred.map { id in options.contains { $0.id == id && $0.reachable == nil } } ?? false
+            if graceOver || pending == 0, !preferredOpen,
+               let fastest = answered.min(by: { ($0.latency ?? .infinity) < ($1.latency ?? .infinity) }) {
+                choice = fastest.id; break
+            }
+            if pending == 0 { break }
+        }
+        sink.finish()
+        current = choice ?? Self.direct
         return base(server: server)
     }
 
