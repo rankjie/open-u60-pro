@@ -181,10 +181,22 @@ struct BatteryTile: View {
                 if stale {
                     Facts(age.map { "Updated \(Self.ago($0))" } ?? "No recent data")
                 } else {
-                    let discharging = battery.statusText == "Discharging"
-                    let watts = battery.powerWatts.map { abs($0) >= 0.05 } == true ? battery.powerText : nil
-                    Facts(usb.usbStatus.powerbankActive ? "Powering USB" : discharging ? nil : battery.statusText,
-                          watts, discharging && battery.runtimeText != "—" ? battery.runtimeText : nil)
+                    // Power flow: USB input when external power is present, then what the battery
+                    // itself takes (+) or gives (draw), then runtime while discharging.
+                    let input = battery.usbPower.externalPower == true
+                        ? battery.usbPower.inputWatts.map { String(format: "In %.1f W", $0) } : nil
+                    let watts = battery.powerWatts.flatMap { abs($0) >= 0.05 ? $0 : nil }
+                    let flow = watts.map { $0 > 0 ? String(format: "+%.1f W", $0) : String(format: "Draw %.1f W", -$0) }
+                    let discharging = (watts ?? 0) < 0
+                    if usb.usbStatus.powerbankActive {
+                        Facts("Powering USB", flow)
+                    } else if discharging {
+                        Facts(flow, battery.runtimeText == "—" ? nil : battery.runtimeText)
+                    } else if watts != nil {
+                        Facts(input, flow)
+                    } else {
+                        Facts(battery.statusText == "Unavailable" ? nil : battery.statusText, input)
+                    }
                 }
             }
         }

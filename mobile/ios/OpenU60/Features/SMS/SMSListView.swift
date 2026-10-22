@@ -60,7 +60,9 @@ struct SMSListView: View {
     }
 
     private var inbox: some View {
-        List(selection: horizontalSizeClass == .regular ? selection : .constant(nil)) {
+        // Selection drives the split view only; on a phone a selection binding would swallow
+        // the row tap instead of pushing the conversation.
+        List(selection: horizontalSizeClass == .regular ? selection : nil) {
             if let error = viewModel.error {
                 Section {
                     Text(error)

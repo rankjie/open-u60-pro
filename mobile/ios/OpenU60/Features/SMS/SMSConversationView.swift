@@ -146,8 +146,8 @@ private struct SMSBubbleView: View {
                 }
 
                 HStack(spacing: 4) {
-                    if showsLine {
-                        Text(message.line.map { "\(isOutgoing ? "From" : "To") \($0.label)" } ?? "Line unknown")
+                    if showsLine, let line = message.line {
+                        Text("\(isOutgoing ? "From" : "To") \(line.label)")
                             .foregroundStyle(.secondary)
                     }
                     if message.tag == .failed {
