@@ -34,16 +34,18 @@ struct InternetHero: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var repeater: Bool { internet.status?.config.mode == .repeater }
+    /// The live source, or the one restored with the snapshot while the first status loads.
+    private var config: WiFiInternetConfig? { internet.status?.config ?? viewModel.restoredInternetConfig }
+    private var repeater: Bool { config?.mode == .repeater }
 
     private var title: String {
-        if repeater, let ssid = internet.status?.config.ssid, !ssid.isEmpty { return ssid }
+        if repeater, let ssid = config?.ssid, !ssid.isEmpty { return ssid }
         let provider = viewModel.operatorInfo.provider
         return provider.isEmpty ? "U60" : provider
     }
 
     private var detail: String? {
-        if repeater { return internet.status.map { "Repeater · \($0.config.band.label)" } }
+        if repeater { return config.map { "Repeater · \($0.band.label)" } }
         let info = viewModel.operatorInfo
         guard !info.networkType.isEmpty else { return nil }
         return info.displayNetworkType(nrConnected: viewModel.nrSignal.isConnected, lteSignal: viewModel.lteSignal)
@@ -141,16 +143,24 @@ struct SignalTile: View {
         let rsrp = nr.isConnected ? nr.rsrp : lte.rsrp
         let sinr = nr.isConnected ? nr.sinr : lte.sinr
         let band = nr.isConnected ? nr.band.bandLabel(prefix: "n") : lte.band.bandLabel(prefix: "B")
-        Tile(title: "Signal", icon: "antenna.radiowaves.left.and.right", tint: Color.rsrpColor(rsrp), action: action) {
+        Tile(title: "Signal", icon: viewModel.isAirplaneMode ? "airplane" : "cellularbars", tint: Color.rsrpColor(rsrp),
+             level: viewModel.isAirplaneMode ? nil : Double(Color.signalBars(rsrp)) / 4, action: action) {
             if viewModel.isAirplaneMode {
                 Metric(value: "Off")
                 Facts("Airplane mode")
             } else {
                 Metric(value: rsrp.map { "\(Int($0.rounded()))" }, unit: "dBm")
-                Facts(sinr.map { "SINR \(Int($0.rounded()))" }, band)
+                Facts(sinr.map { "SINR \(Int($0.rounded()))" }, band, qos)
             }
         }
         .accessibilityIdentifier("home-signal")
+    }
+
+    /// 5G SA sessions name their QoS class 5QI; LTE and NSA bearers call it QCI.
+    private var qos: String? {
+        guard let qci = viewModel.bearer?.qci else { return nil }
+        let sa = SignalActivityMode(networkType: viewModel.operatorInfo.networkType, lteCarrierCount: nil) == .sa
+        return "\(sa ? "5QI" : "QCI") \(qci)"
     }
 }
 

@@ -5,6 +5,8 @@ import SwiftUI
 final class DeviceInfoViewModel {
     var identity: DeviceIdentity = .empty
     var operatorInfo: OperatorInfo = .empty
+    /// RSRP of the serving radio (NR when connected, otherwise LTE).
+    var servingRSRP: Double?
     var isLoading: Bool = false
     var error: String?
 
@@ -44,7 +46,8 @@ final class DeviceInfoViewModel {
             lanStatus: lanStatus ?? [:]
         )
         if let signalInfo {
-            operatorInfo = signalInfo
+            operatorInfo = signalInfo.info
+            servingRSRP = signalInfo.rsrp
         }
         isLoading = false
     }
@@ -74,11 +77,11 @@ final class DeviceInfoViewModel {
         try? await client.getJSON("/api/network/lan-status")
     }
 
-    private func fetchSignalInfo() async -> OperatorInfo? {
+    private func fetchSignalInfo() async -> (info: OperatorInfo, rsrp: Double?)? {
         do {
             let data = try await client.getJSON("/api/network/signal")
-            let (_, _, _, opInfo) = SignalParser.parseNetInfo(data)
-            return opInfo
+            let (nr, lte, _, opInfo) = SignalParser.parseNetInfo(data)
+            return (opInfo, nr.isConnected ? nr.rsrp : lte.rsrp)
         } catch { return nil }
     }
 }

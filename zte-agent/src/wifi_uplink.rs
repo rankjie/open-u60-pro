@@ -1121,8 +1121,11 @@ impl WifiUplink {
             {
                 return Err("Invalid configured time server".into());
             }
-            let lookup = run("nslookup", &[server], 5)?;
-            let addresses = crate::wifi_time::addresses(&lookup)?;
+            let status = network_status().unwrap_or(Value::Null);
+            let addresses = resolve_time_server(server, &status, |name, dns| match dns {
+                Some(dns) => run("nslookup", &[name, &dns.to_string()], 3),
+                None => run("nslookup", &[name], 5),
+            })?;
             let mut failure = "The configured time server did not reply";
             for address in addresses.into_iter().take(3) {
                 match crate::wifi_time::query(address) {
@@ -1527,6 +1530,41 @@ fn run(program: &str, args: &[&str], seconds: u64) -> Result<String, String> {
 fn json_command(program: &str, args: &[&str]) -> Result<Value, String> {
     serde_json::from_str(&run(program, args, 5)?).map_err(|_| "Invalid Wi-Fi network status".into())
 }
+/// IPv4 DNS servers the upstream network handed out with its DHCP lease.
+fn uplink_dns_servers(status: &Value) -> Vec<Ipv4Addr> {
+    status["dns-server"]
+        .as_array()
+        .map(|servers| servers.iter().filter_map(|v| v.as_str()?.parse().ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Resolves the NTP server through the uplink's own DNS first: the system resolver may still
+/// forward to the cellular servers, which can stall right after the switch to Wi-Fi.
+fn resolve_time_server(
+    server: &str,
+    status: &Value,
+    mut lookup: impl FnMut(&str, Option<Ipv4Addr>) -> Result<String, String>,
+) -> Result<Vec<Ipv4Addr>, String> {
+    if let Ok(address) = server.parse::<Ipv4Addr>() {
+        return Ok(vec![address]);
+    }
+    let mut failure = String::new();
+    let resolvers = uplink_dns_servers(status).into_iter().take(2).map(Some).chain([None]);
+    for dns in resolvers {
+        match lookup(server, dns).and_then(|output| {
+            crate::wifi_time::addresses(&output).map_err(String::from)
+        }) {
+            Ok(addresses) => return Ok(addresses),
+            Err(error) => failure = error,
+        }
+    }
+    Err(if failure.contains("timed out") {
+        "The time server name could not be resolved: DNS lookup timed out".into()
+    } else {
+        format!("The time server name could not be resolved: {failure}")
+    })
+}
+
 fn network_status() -> Result<Value, String> {
     json_command(
         "ubus",
@@ -1936,6 +1974,35 @@ fn probe_portal(iface: &str) -> Result<(&'static str, Option<String>), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn time_server_lookup_prefers_the_uplink_dns() {
+        let status = json!({"dns-server": ["192.168.1.1", "not-an-ip", "8.8.8.8", "::1"]});
+        assert_eq!(
+            uplink_dns_servers(&status),
+            vec![Ipv4Addr::new(192, 168, 1, 1), Ipv4Addr::new(8, 8, 8, 8)]
+        );
+        assert!(uplink_dns_servers(&json!({})).is_empty());
+        let mut asked = Vec::new();
+        let found = resolve_time_server("pool.ntp.org", &status, |server, dns| {
+            asked.push((server.to_string(), dns));
+            if dns == Some(Ipv4Addr::new(192, 168, 1, 1)) {
+                Err("Wi-Fi command timed out".into())
+            } else {
+                Ok("Server: 8.8.8.8\nName: pool.ntp.org\nAddress: 203.0.113.7\n".into())
+            }
+        });
+        assert_eq!(found, Ok(vec![Ipv4Addr::new(203, 0, 113, 7)]));
+        assert_eq!(asked.len(), 2);
+        assert_eq!(asked[1].1, Some(Ipv4Addr::new(8, 8, 8, 8)));
+        let literal = resolve_time_server("203.0.113.9", &status, |_, _| unreachable!());
+        assert_eq!(literal, Ok(vec![Ipv4Addr::new(203, 0, 113, 9)]));
+        let failed = resolve_time_server("pool.ntp.org", &json!({}), |_, dns| {
+            assert_eq!(dns, None);
+            Err("Wi-Fi command timed out".into())
+        });
+        assert_eq!(failed, Err("The time server name could not be resolved: DNS lookup timed out".into()));
+    }
+
 
     #[test]
     fn control_socket_recovery_distinguishes_live_and_stale_daemons() {

@@ -29,10 +29,13 @@ struct OperatorCardView: View, Equatable {
                         .foregroundStyle(.orange)
                 }
                 NetworkTypeIcon(networkType: displayType)
-                Image(systemName: "cellularbars")
+                // The same RSRP thresholds as Home, so the bar count agrees everywhere.
+                let bars = Color.signalBars(nrSignal.isConnected ? nrSignal.rsrp : lteSignal.rsrp)
+                Image(systemName: "cellularbars", variableValue: Double(bars) / 4)
                     .font(.title3.weight(.semibold))
-                    .foregroundStyle(operatorInfo.signalBar > 0 ? .primary : .secondary)
+                    .foregroundStyle(bars > 0 ? .primary : .secondary)
                     .accessibilityLabel(Text("Signal"))
+                    .accessibilityValue(Text("\(bars) of 4 bars"))
             }
         }
     }

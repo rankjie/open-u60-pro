@@ -86,7 +86,9 @@ struct WiFiInternetView: View {
                     model.select(network); join = JoinRequest(manual: false)
                 } label: {
                     HStack {
-                        Image(systemName: network.supported ? "wifi" : "wifi.exclamationmark")
+                        // Arcs follow the scanned signal: -60 dBm or better fills all three.
+                        Image(systemName: network.supported ? "wifi" : "wifi.exclamationmark",
+                              variableValue: network.supported ? (network.signal >= -60 ? 1 : network.signal >= -70 ? 0.66 : network.signal >= -80 ? 0.33 : 0) : nil)
                         Text(network.ssid).foregroundStyle(.primary)
                         Spacer()
                         if model.status?.config.ssid == network.ssid,

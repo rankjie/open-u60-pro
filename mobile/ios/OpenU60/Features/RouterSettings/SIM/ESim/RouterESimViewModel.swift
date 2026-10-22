@@ -352,7 +352,7 @@ final class RouterESimViewModel {
             let (nr, lte, _, op) = SignalParser.parseNetInfo(signal)
             operatorName = op.provider
             networkType = op.networkType.isEmpty ? "" : op.displayNetworkType(nrConnected: nr.isConnected, lteSignal: lte)
-            signalBars = min(max(op.signalBar, 0), 5)
+            signalBars = Color.signalBars(nr.isConnected ? nr.rsrp : lte.rsrp)
             connectionNote = nil
             let status = data["connect_status"] as? String ?? ""
             if var tracker = reconnectTracker, let switchedAt {
@@ -421,7 +421,7 @@ final class RouterESimViewModel {
         let (nr, lte, _, op) = SignalParser.parseNetInfo(signal)
         operatorName = op.provider
         networkType = op.networkType.isEmpty ? "" : op.displayNetworkType(nrConnected: nr.isConnected, lteSignal: lte)
-        signalBars = min(max(op.signalBar, 0), 5)
+        signalBars = Color.signalBars(nr.isConnected ? nr.rsrp : lte.rsrp)
     }
 
     private func loadProfiles() async {

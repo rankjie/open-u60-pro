@@ -82,10 +82,7 @@ final class RouterSession {
         let internet = WiFiInternetViewModel(client: client)
         self.internet = internet
         dashboard = DashboardViewModel(client: client, authManager: auth, identity: { [weak client] in client?.relayAccess?()?.routerID },
-            uplinkInterface: { [weak internet] in
-                guard let config = internet?.status?.config, config.mode == .repeater else { return nil }
-                return config.band == .two ? "wlan0" : "wlan2"
-            })
+            internetConfig: { [weak internet] in internet?.status?.config })
         messages = SMSViewModel(client: client, identity: { [weak client] in client?.relayAccess?()?.routerID })
         usb = USBConnectionViewModel(client: client, authManager: auth)
         sim = SIMViewModel(client: client, authManager: auth)

@@ -230,7 +230,7 @@ private struct CellularPanelData: Equatable {
     static func nr(_ signal: NRSignal) -> CellularPanelData {
         CellularPanelData(
             title: "5G NR",
-            systemImage: "antenna.radiowaves.left.and.right",
+            systemImage: "cellularbars",
             accent: .blue,
             isNR: true,
             isConnected: signal.isConnected,
@@ -304,7 +304,12 @@ private struct CellularPanel: View, Equatable {
 
     private var header: some View {
         HStack {
-            Label(data.title, systemImage: data.systemImage)
+            Label {
+                Text(data.title)
+            } icon: {
+                Image(systemName: data.systemImage,
+                      variableValue: data.systemImage == "cellularbars" ? Double(Color.signalBars(data.rsrp)) / 4 : nil)
+            }
                 .font(.headline)
             if data.showsNSAAnchor {
                 badge("NSA Anchor")
@@ -398,7 +403,11 @@ private struct WCDMAPanel: View {
         CardView(padding: 12) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Label("WCDMA", systemImage: "antenna.radiowaves.left.and.right.circle")
+                    Label {
+                        Text("WCDMA")
+                    } icon: {
+                        Image(systemName: "cellularbars", variableValue: Double(Color.rscpBars(signal.rscp)) / 4)
+                    }
                         .font(.headline)
                     Spacer()
                     if signal.isConnected {

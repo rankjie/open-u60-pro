@@ -60,27 +60,20 @@ struct DeviceInfoView: View {
     }
 
     private var signalBarsRow: some View {
-        let bars = viewModel.operatorInfo.signalBar
-        let maxBars = 5
+        // The same RSRP thresholds as Home and the Live Activity.
+        let rsrp = viewModel.servingRSRP
+        let bars = Color.signalBars(rsrp)
         return HStack {
             Text("Signal")
                 .foregroundStyle(.secondary)
             Spacer()
-            Image(systemName: "cellularbars")
-                .foregroundStyle(bars > 0 ? signalColor(bars: bars, max: maxBars) : .secondary)
-            Text("\(bars)/\(maxBars)")
+            Image(systemName: "cellularbars", variableValue: Double(bars) / 4)
+                .foregroundStyle(rsrp == nil ? .secondary : Color.rsrpColor(rsrp))
+                .accessibilityLabel("\(bars) of 4 bars")
+            Text(rsrp.map { "\(Int($0.rounded())) dBm" } ?? "—")
                 .font(.body.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .padding(.leading, 4)
         }
-    }
-
-    // MARK: - Helpers
-
-    private func signalColor(bars: Int, max: Int) -> Color {
-        let ratio = Double(bars) / Double(max)
-        if ratio >= 0.6 { return .green }
-        if ratio >= 0.4 { return .yellow }
-        return .red
     }
 }

@@ -31,7 +31,7 @@ struct WiFiUpstreamNetwork: Decodable, Identifiable {
         }.sorted { $0.signal == $1.signal ? $0.ssid < $1.ssid : $0.signal > $1.signal }
     }
 }
-struct WiFiInternetConfig: Decodable {
+struct WiFiInternetConfig: Codable {
     let mode: WiFiInternetMode, band: WiFiInternetBand, ssid: String, security: WiFiInternetSecurity
     let hasPassword: Bool, macMode: String, cloneMac: String, ttl: Int?
     enum CodingKeys: String, CodingKey {

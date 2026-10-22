@@ -26,6 +26,8 @@ final class DashboardViewModel {
     var lteSignal: LTESignal = .empty
     var wcdmaSignal: WCDMASignal = .empty
     var operatorInfo: OperatorInfo = .empty
+    /// QoS of the data session (QCI/5QI); nil while it is down or on older agents.
+    var bearer: BearerInfo?
     var battery: BatteryStatus = .empty
     var thermal: ThermalStatus = .empty
     var thermalUpdatedAt: Date?
@@ -129,21 +131,24 @@ final class DashboardViewModel {
         var wifi: WifiStatus, devices: [ConnectedDevice]
         var wanIPv4: String, wanIPv6: String
         var airplane: Bool, mobileDataOff: Bool
+        var internetConfig: WiFiInternetConfig?
         var updatedAt: Date
     }
+    /// The internet source from the last snapshot, until the live status arrives.
+    private(set) var restoredInternetConfig: WiFiInternetConfig?
     private let identity: () -> UUID?
-    /// The upstream Wi-Fi interface while U60 runs as a repeater; nil on the SIM hotspot.
-    private let uplinkInterface: () -> String?
+    /// The current internet source; repeater mode selects the upstream Wi-Fi interface.
+    private let internetConfig: () -> WiFiInternetConfig?
     private let cache: DeviceSnapshotCache<Snapshot>
     @ObservationIgnored private var savedAt: Date?
 
     init(client: AgentClient, authManager: AuthManager, identity: @escaping () -> UUID? = { nil },
-         uplinkInterface: @escaping () -> String? = { nil },
+         internetConfig: @escaping () -> WiFiInternetConfig? = { nil },
          directory: URL = .applicationSupportDirectory.appending(path: "Dashboard", directoryHint: .isDirectory)) {
         self.client = client
         self.authManager = authManager
         self.identity = identity
-        self.uplinkInterface = uplinkInterface
+        self.internetConfig = internetConfig
         self.cache = DeviceSnapshotCache(directory: directory)
         restore()
     }
@@ -159,6 +164,7 @@ final class DashboardViewModel {
             wifiStatus = saved.wifi; connectedDevices = saved.devices
             wanIPv4 = saved.wanIPv4; wanIPv6 = saved.wanIPv6
             isAirplaneMode = saved.airplane; isMobileDataOff = saved.mobileDataOff
+            restoredInternetConfig = saved.internetConfig
             lastUpdated = saved.updatedAt; savedAt = saved.updatedAt
         } catch {
             logger.error("Dashboard snapshot unreadable: \(error.localizedDescription, privacy: .public)")
@@ -174,7 +180,7 @@ final class DashboardViewModel {
             battery: battery, batteryUpdatedAt: batteryUpdatedAt, thermal: thermal, thermalUpdatedAt: thermalUpdatedAt,
             systemInfo: systemInfo, cpuUpdatedAt: cpuUpdatedAt, wifi: wifiStatus, devices: connectedDevices,
             wanIPv4: wanIPv4, wanIPv6: wanIPv6, airplane: isAirplaneMode, mobileDataOff: isMobileDataOff,
-            updatedAt: lastUpdated)
+            internetConfig: internetConfig() ?? restoredInternetConfig, updatedAt: lastUpdated)
         let cache = cache
         Task.detached(priority: .utility) {
             do { try cache.save(snapshot, routerID: router) }
@@ -397,6 +403,8 @@ final class DashboardViewModel {
         do {
             let data = try await client.getJSON("/api/network/signal")
             if error != nil { error = nil }
+            let session = SignalParser.parseBearer(data)
+            if session != bearer { bearer = session }
             let parsed = SignalParser.parseNetInfo(data)
             return (parsed.0, parsed.1, parsed.2, parsed.3)
         } catch let fetchError {
@@ -472,7 +480,8 @@ final class DashboardViewModel {
 
     private func fetchTraffic() async -> TrafficStats? {
         // A repeater's internet crosses the upstream Wi-Fi link, not the modem.
-        if let interface = uplinkInterface() {
+        if let config = internetConfig(), config.mode == .repeater {
+            let interface = config.band == .two ? "wlan0" : "wlan2"
             do { return try await fetchUplinkTraffic(interface) } catch { return nil }
         }
         let now = Date()

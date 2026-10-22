@@ -29,7 +29,10 @@ They retain the selected upstream name on failure, distinguish an unavailable
 status from a disconnected uplink, and provide a saved-network reconnect action.
 
 When automatic time is enabled, an online Wi-Fi uplink synchronizes the Linux UTC
-clock through the configured primary NTP server. DNS and UDP waits are bounded;
+clock through the configured primary NTP server. The server name is resolved
+through the uplink's DHCP DNS servers first (3 s each), then the system resolver
+(5 s), because the system resolver may still forward to cellular DNS right after
+the switch; a literal IPv4 server needs no lookup. DNS and UDP waits are bounded;
 reply validation checks the source socket, request timestamp, mode, version,
 stratum and synchronization state. Failures remain visible in uplink status and
 retry no more often than once per minute. Successful synchronization is refreshed

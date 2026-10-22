@@ -469,8 +469,8 @@ private struct ESimConnectionCard: View {
                         }
                     }.frame(maxWidth: .infinity, alignment: .leading)
                     if phase == .connected {
-                        Image(systemName: "cellularbars", variableValue: Double(signalBars) / 5)
-                            .foregroundStyle(Color.eSimAccent).accessibilityLabel("Signal \(signalBars) of 5")
+                        Image(systemName: "cellularbars", variableValue: Double(signalBars) / 4)
+                            .foregroundStyle(Color.eSimAccent).accessibilityLabel("Signal \(signalBars) of 4")
                     }
                 }
                 if target != nil && (isProgress || phase == .connected) {

@@ -18,6 +18,8 @@ struct Tile<Content: View>: View {
     let title: String
     let icon: String
     var tint: Color = .secondary
+    /// Fill level for variable symbols such as cellularbars (0…1).
+    var level: Double? = nil
     var action: (() -> Void)?
     @ViewBuilder let content: Content
 
@@ -34,7 +36,8 @@ struct Tile<Content: View>: View {
     private var surface: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Image(systemName: icon).foregroundStyle(tint).imageScale(.small)
+                Image(systemName: icon, variableValue: level).foregroundStyle(tint)
+                    .imageScale(level == nil ? .small : .medium)
                 Text(title).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
             }
