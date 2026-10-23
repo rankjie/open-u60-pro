@@ -234,6 +234,16 @@ polls the modem every 250 ms while a call is being set up (1 s otherwise) and wa
 media and modem events instead of its 100 ms tick. Each step is logged as
 `[calling-timeline] <call> +<ms> ms <step>`, from ringing or dialing to audio flowing.
 
+The router offers, so its ICE agent nominates the path. webrtc-rs by default holds back a
+working non-host pair (0.5 s server-reflexive, 1 s peer-reflexive, 2 s relay) hoping for a
+better one; between two carrier NATs only the relay works, so the agent nominates the first
+working pair at once. On a shared LAN the host pair answers first and still wins.
+Away from home (no Wi-Fi, wired or VPN interface and a private router address) the phone
+skips the LAN probe entirely and sends every call command over the open socket. A VoIP
+push starts reconnecting before CallKit finishes presenting the call. The server keeps its
+APNs connection open (opened at startup and on token registration, kept with an HTTP/2
+PING each minute), so a push does not first spend ~0.4 s on DNS, TCP and TLS.
+
 Each call and command has a stable UUID. The server persists a command before
 sending it. The agent persists its execution journal before touching the modem.
 The server includes the original 20-second expiry on every delivery. Retries keep
