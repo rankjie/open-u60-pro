@@ -11,6 +11,7 @@ export function privateFile(path: string): string {
 }
 
 export interface PushCall { id: string; routerId: string; number: string; expiresAt: number }
+export type PushMissedCall = PushCall;
 export interface SMSMetadata {
   date: string; tag: number; memStore: string; groupId: string;
   line: { iccid: string; number: string | null; source: string } | null;
@@ -20,6 +21,7 @@ export type PushOutcome = { kind: "accepted" | "retry" | "reject"; code: string 
 export interface PushProvider {
   send(token: string, environment: "sandbox" | "production", call: PushCall): Promise<PushOutcome>;
   sendSMS(token: string, environment: "sandbox" | "production", event: PushSMS): Promise<PushOutcome>;
+  sendMissedCall?(token: string, environment: "sandbox" | "production", call: PushMissedCall): Promise<PushOutcome>;
   /** Opens the connection a later push will use. */
   warm?(environment: "sandbox" | "production"): void;
   close(): void;
@@ -54,6 +56,10 @@ export class APNs implements PushProvider {
       "apns-priority": "10", "apns-expiration": "0", "apns-id": call.id },
       { aps: { "content-available": 1 }, callId: call.id, routerId: call.routerId,
         handle: call.number || "Unknown", expiresAt: call.expiresAt });
+  }
+  async sendMissedCall(token: string, environment: "sandbox" | "production", call: PushMissedCall): Promise<PushOutcome> {
+    const request = missedCallPushRequest(this.bundleId, call);
+    return this.post(token, environment, request.headers, request.payload);
   }
   async sendSMS(token: string, environment: "sandbox" | "production", event: PushSMS): Promise<PushOutcome> {
     for (const request of smsPushRequests(this.bundleId, event)) {
@@ -124,7 +130,7 @@ export class APNs implements PushProvider {
 
 export function smsPushRequests(bundle: string, event: PushSMS) {
   const payload = (body: string, part: number, parts: number) => ({
-    aps: { alert: { title: event.sender, subtitle: parts === 1 ? "SMS" : `SMS ${part}/${parts}`, body },
+    aps: { alert: { title: event.sender, ...(parts === 1 ? {} : { subtitle: `${part}/${parts}` }), body },
       sound: "default", "thread-id": event.routerId, "content-available": 1 }, kind: "sms", eventId: event.id,
     routerId: event.routerId, messageId: event.messageId, expiresAt: event.expiresAt, message: event.message, part, parts,
   });
@@ -145,4 +151,11 @@ export function smsPushRequests(bundle: string, event: PushSMS) {
       "apns-expiration": String(event.expiresAt), "apns-id": id, "apns-collapse-id": `${event.id}:${index}` },
       payload: payload(text, index + 1, chunks.length) };
   });
+}
+
+export function missedCallPushRequest(bundle: string, call: PushMissedCall) {
+  return { headers: { "apns-topic": bundle, "apns-push-type": "alert", "apns-priority": "10",
+      "apns-expiration": String(call.expiresAt), "apns-collapse-id": `missed:${call.id}` },
+    payload: { aps: { alert: { title: call.number || "Unknown", body: "Missed call" }, sound: "default", "thread-id": `${call.routerId}:missed` },
+      kind: "missed_call", callId: call.id, routerId: call.routerId } };
 }

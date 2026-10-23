@@ -110,7 +110,8 @@ final class SMSNotificationManager: NSObject, @preconcurrency UNUserNotification
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completion: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completion(receive(notification,open:false) ? [.banner,.sound,.list] : [])
+        let missedCall = notification.request.content.userInfo["kind"] as? String == "missed_call"
+        completion(receive(notification,open:false) || missedCall ? [.banner,.sound,.list] : [])
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completion: @escaping () -> Void) {

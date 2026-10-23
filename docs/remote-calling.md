@@ -165,6 +165,12 @@ audio; other phones receive `answered_elsewhere` and close their CallKit UI.
 Declining on one phone silences only that phone; the last decline hangs up the
 modem. Outgoing calls and active audio remain owned by the initiating/answering
 phone. Only that phone may send media, DTMF, or hangup for the active call.
+An incoming call that ends before any phone answers or declines it (the caller
+hangs up, the router reports it ended, or the 45 s ring timeout) is recorded in
+the same transaction as a missed call for every phone it rang, and each phone
+with an SMS notification token gets one "Missed call" alert titled with the
+caller's number, retried like SMS. A decline on any phone means the call was
+seen, so it is not reported as missed.
 
 The SMS list retains the firmware's pagination, dates and storage metadata, but
 reads sender and body from the same local SMS database as notifications. Some

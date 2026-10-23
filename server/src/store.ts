@@ -41,7 +41,10 @@ export class Store {
         phone_id TEXT NOT NULL REFERENCES endpoints(id), dismissed INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(call_id,phone_id));
       CREATE TABLE IF NOT EXISTS operation_phones(operation_id TEXT PRIMARY KEY REFERENCES operations(id),
-        phone_id TEXT NOT NULL REFERENCES endpoints(id));`);
+        phone_id TEXT NOT NULL REFERENCES endpoints(id));
+      CREATE TABLE IF NOT EXISTS missed_calls(call_id TEXT NOT NULL REFERENCES calls(id), phone_id TEXT NOT NULL REFERENCES endpoints(id),
+        status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL, last_error TEXT,
+        PRIMARY KEY(call_id,phone_id));`);
     this.transaction(() => {
       const callColumns = this.all<{ name: string }>("PRAGMA table_info(calls)");
       for (const [name, type] of [["phone_name", "TEXT"], ["phone_model", "TEXT"], ["answered_at", "INTEGER"], ["alerting", "INTEGER NOT NULL DEFAULT 0"]]) {
@@ -311,12 +314,22 @@ export class Store {
         body.alerting === true ? 1 : 0, id);
       this.run("INSERT INTO router_events VALUES(?,?)", endpoint.id, eventId);
       if (state !== "ringing") this.run("UPDATE push_outbox SET status='cancelled' WHERE call_id=? AND status='pending'", id);
+      if (state === "ended") this.recordMissed(id);
       return this.call(id);
     });
   }
   end(id: string, reason: string) {
     this.run("UPDATE calls SET state='ended',reason=?,updated_at=? WHERE id=? AND state<>'ended'", reason, this.now(), id);
     this.run("UPDATE push_outbox SET status='cancelled' WHERE call_id=? AND status='pending'", id);
+    this.recordMissed(id);
+  }
+  /** An incoming call that ended before any phone answered or declined it is missed on every phone it rang. */
+  private recordMissed(id: string) {
+    this.run(`INSERT OR IGNORE INTO missed_calls(call_id,phone_id,status,next_attempt)
+      SELECT calls.id,call_participants.phone_id,'pending',? FROM calls JOIN call_participants ON call_participants.call_id=calls.id
+      JOIN endpoints ON endpoints.id=call_participants.phone_id
+      WHERE calls.id=? AND calls.state='ended' AND calls.direction='incoming' AND calls.phone_id='' AND calls.answered_at IS NULL AND endpoints.revoked=0
+        AND NOT EXISTS(SELECT 1 FROM call_participants WHERE call_id=calls.id AND dismissed=1)`, this.now(), id);
   }
   revoke(router: Endpoint) {
     if (router.role !== "router") throw new Fault(403, "router_required");

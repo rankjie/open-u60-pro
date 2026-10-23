@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer, type ServerHttp2Stream } from "node:http2";
 import { join } from "node:path";
-import { APNs, smsPushRequests, type PushProvider, type PushOutcome } from "../src/apns";
+import { APNs, missedCallPushRequest, smsPushRequests, type PushProvider, type PushOutcome } from "../src/apns";
 import { Fault, secret, snapshot, type Endpoint } from "../src/protocol";
 import { Store } from "../src/store";
 import { CallingService } from "../src/service";
@@ -354,6 +354,14 @@ describe("full SMS notifications", () => {
       }
       expect(smsPushRequests("com.beexio.openu60", event)).toEqual(requests);
     }
+  });
+  test("a text in one part is labelled only by its sender; a split text numbers its parts", () => {
+    const event = { id: randomUUID(), routerId: randomUUID(), messageId: "7", sender: "+31611145952", text: "aaaa", expiresAt: 1800086400 };
+    expect(smsPushRequests("com.beexio.openu60", event).map(request => request.payload.aps.alert))
+      .toEqual([{ title: "+31611145952", body: "aaaa" }]);
+    const split = smsPushRequests("com.beexio.openu60", { ...event, text: "中".repeat(3000) });
+    expect(split.map(request => (request.payload.aps.alert as { subtitle?: string }).subtitle)).toEqual(split.map((_, i) => `${i + 1}/${split.length}`));
+    expect(split.length).toBeGreaterThan(1);
   });
   test("durable SMS admission acknowledges once and retries the full content without repeating VoIP", async () => {
     const sent: any[] = []; let attempt = 0;
@@ -816,6 +824,57 @@ describe("multiple paired phones", () => {
     expect(sent.get(tokens[0])).toHaveLength(2); expect(sent.get(tokens[1])).toHaveLength(1);
     expect(f.store.all("SELECT phone_id FROM sms_events WHERE event_id=?", event.eventId)).toHaveLength(2);
     expect(f.store.all<any>("SELECT payload FROM sms_events WHERE event_id=?", event.eventId).every(row => row.payload === null)).toBe(true);
+  });
+  test("a missed call alert names the caller and stays out of the call push topic", () => {
+    const call = { id: randomUUID(), routerId: randomUUID(), number: "+31611145952", expiresAt: 1800086400 };
+    const request = missedCallPushRequest("com.beexio.openu60", call);
+    expect(request.payload.aps.alert).toEqual({ title: "+31611145952", body: "Missed call" });
+    expect(request.payload).toMatchObject({ kind: "missed_call", callId: call.id, routerId: call.routerId });
+    expect(request.headers).toMatchObject({ "apns-topic": "com.beexio.openu60", "apns-push-type": "alert", "apns-expiration": "1800086400" });
+    expect(missedCallPushRequest("com.beexio.openu60", { ...call, number: "" }).payload.aps.alert.title).toBe("Unknown");
+  });
+  test("a call that rang out unanswered and undeclined is a missed call on every phone", async () => {
+    const sent: Array<{ token: string; id: string; number: string }> = [];
+    const f = fixture({ close() {}, async send() { return { kind: "accepted", code: "accepted" }; }, async sendSMS() { throw new Error("Unexpected SMS"); },
+      async sendMissedCall(token, _, call) {
+        sent.push({ token, id: call.id, number: call.number });
+        return token.startsWith("ab") && sent.filter(item => item.token === token && item.id === call.id).length === 1
+          ? { kind: "retry", code: "apns_transport" } : { kind: "accepted", code: "accepted" };
+      } });
+    const other = addPhone(f), tokens = ["ab".repeat(32), "cd".repeat(32)];
+    for (const [i, endpoint] of [f.phone, other.endpoint].entries()) {
+      f.store.run("INSERT INTO notification_tokens(endpoint_id,token,environment) VALUES(?,?,'sandbox')", endpoint.id, tokens[i]);
+    }
+    const router = new Peer(f.url, f.routerToken); await router.next("hello");
+    const end = (callId: string, sequence: number, reason = "remote_hangup") =>
+      f.store.event(f.router, { callId, eventId: randomUUID(), sequence, state: "ended", reason, observedAt: f.store.now(), mediaReady: false });
+
+    // The caller gives up while every phone still rings: alerted at once, without waiting for maintenance.
+    const missed = randomUUID();
+    ring(f, missed);
+    router.send({ type: "event", callId: missed, eventId: randomUUID(), sequence: 2, state: "ended", reason: "remote_hangup", observedAt: f.store.now(), mediaReady: false });
+    await router.next("event_ack"); await new Promise(resolve => setTimeout(resolve, 10));
+    expect(sent.map(item => [item.token, item.id, item.number])).toEqual([[tokens[0], missed, "12345"], [tokens[1], missed, "12345"]]);
+    f.advance(2); await f.service.tick(); await f.service.tick();
+    expect(sent.filter(item => item.id === missed).map(item => item.token)).toEqual([tokens[0], tokens[1], tokens[0]]);
+
+    // Declined on one phone: the person saw it, so no phone reports it as missed.
+    const declined = randomUUID(); ring(f, declined);
+    f.store.command(f.phone, { requestId: randomUUID(), callId: declined, action: "hangup" });
+    end(declined, 2);
+    // Answered, then ended: not missed either.
+    const answered = randomUUID(); ring(f, answered);
+    f.store.command(other.endpoint, { requestId: randomUUID(), callId: answered, action: "answer" });
+    f.store.event(f.router, { callId: answered, eventId: randomUUID(), sequence: 2, state: "active", observedAt: f.store.now(), mediaReady: true });
+    end(answered, 3);
+    await f.service.tick();
+    expect(sent.some(item => item.id === declined || item.id === answered)).toBe(false);
+
+    // Nobody touched it and the router never reported the end: the ring timeout makes it missed.
+    const unknown = randomUUID();
+    f.store.event(f.router, { callId: unknown, eventId: randomUUID(), sequence: 1, state: "ringing", observedAt: f.store.now(), mediaReady: false });
+    f.advance(45); await f.service.tick();
+    expect(sent.filter(item => item.id === unknown).map(item => [item.token, item.number])).toEqual([[tokens[0], ""], [tokens[1], ""]]);
   });
   test("forgetting one phone leaves another paired and the router monitoring messages", async () => {
     const f = fixture(), other = addPhone(f), router = new Peer(f.url, f.routerToken); await router.next("hello");

@@ -6,6 +6,7 @@ import type { PushProvider } from "./apns";
 import { AgentRelay } from "./agent-relay";
 import type { Door } from "./config";
 import { SMSNotifications, smsContent } from "./sms-notifications";
+import { MissedCalls } from "./missed-calls";
 import { PeerRendezvous } from "./peer-rendezvous";
 import { DeviceConnect } from "./device-connect";
 import { callAdmission } from "./call-admission";
@@ -28,6 +29,7 @@ export class CallingService {
   private maintenance?: ReturnType<typeof setInterval>;
   private relay: AgentRelay;
   private sms: SMSNotifications;
+  private missed: MissedCalls;
   private peers: PeerRendezvous;
   private peerRouters = new Set<string>();
   private connections: DeviceConnect;
@@ -38,6 +40,7 @@ export class CallingService {
     for (const row of store.all<{ push_environment: "sandbox" | "production" }>(
       "SELECT DISTINCT push_environment FROM phones WHERE push_token IS NOT NULL AND push_disabled=0")) options.push?.warm?.(row.push_environment);
     this.sms = new SMSNotifications(store, options.push);
+    this.missed = new MissedCalls(store, options.push);
     this.connections = new DeviceConnect(store, (id, value) => this.send(id, value));
     this.peers = new PeerRendezvous(store, id => this.sockets.has(id), (id, value) => this.send(id, value), () => {
       const urls = [...new Set((options.turn?.urls ?? []).filter(url => url.startsWith("turn:") && !url.includes("transport=tcp"))
@@ -207,6 +210,7 @@ export class CallingService {
   }
   private broadcast(call: Call) {
     if (call.state !== "ringing") this.prepared.delete(call.id);
+    if (call.state === "ended") void this.missed.tick().catch(() => console.error("missed_call_maintenance_failed"));
     this.send(call.router_id, { type: "call", ...snapshot(call) });
     for (const phone of this.store.phones(call.router_id)) {
       const visible = this.visibleSnapshot(call, phone);
@@ -393,6 +397,7 @@ export class CallingService {
   async tick() {
     this.peers.tick();
     const sms = this.sms.tick().catch(() => console.error("sms_notification_maintenance_failed"));
+    const missed = this.missed.tick().catch(() => console.error("missed_call_maintenance_failed"));
     const expired = this.store.all<Operation>("SELECT * FROM operations WHERE status='pending' AND expires_at<=?", this.store.now());
     for (const operation of expired) {
       this.store.transaction(() => {
@@ -409,6 +414,6 @@ export class CallingService {
     await Promise.allSettled(pending.map(row => this.push(row.call_id))).then(results => {
       for (const result of results) if (result.status === "rejected") console.error("push_maintenance_failed");
     });
-    await sms;
+    await sms; await missed;
   }
 }
