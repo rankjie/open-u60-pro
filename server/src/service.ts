@@ -177,7 +177,10 @@ export class CallingService {
         return Response.json({ ok: true });
       }
       if (request.method === "PUT" && path === "/v1/push-token") {
-        this.store.pushToken(endpoint, object(await this.json(request)));
+        const body = object(await this.json(request));
+        this.store.pushToken(endpoint, body);
+        // The next incoming call then rings without first connecting to APNs.
+        this.options.push?.warm?.(body.environment as "sandbox" | "production");
         return Response.json({ ok: true });
       }
       throw new Fault(404, "not_found");

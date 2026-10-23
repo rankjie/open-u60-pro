@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createECDH, generateKeyPairSync, randomUUID, verify } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer, type ServerHttp2Stream } from "node:http2";
 import { join } from "node:path";
 import { APNs, smsPushRequests, type PushProvider, type PushOutcome } from "../src/apns";
 import { Fault, secret, snapshot, type Endpoint } from "../src/protocol";
@@ -559,6 +560,39 @@ describe("incoming-call delivery and recovery", () => {
     f.store.event(f.router, { eventId: randomUUID(), callId: randomUUID(), sequence: 1, observedAt: 1800000000, mediaReady: false, state: "ringing" });
     await f.service.tick(); f.advance(3); await f.service.tick(); expect(attempts).toBe(1);
     expect(f.store.one<{ push_disabled: number }>("SELECT push_disabled FROM phones WHERE endpoint_id=?", f.phone.id)?.push_disabled).toBe(1);
+  });
+  test("the APNs connection is opened before the first call and reused by its push", async () => {
+    const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    const sessions: string[] = [], paths: string[] = [];
+    const server = createServer();
+    server.on("session", session => { sessions.push("open"); session.on("close", () => sessions.push("closed")); });
+    server.on("stream", (stream: ServerHttp2Stream, headers) => { paths.push(String(headers[":path"])); stream.respond({ ":status": 200 }); stream.end(); });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const apns = new APNs("SYNTHETIC1", "SYNTHETIC2", "test.openu60", privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      { sandbox: address, production: "http://127.0.0.1:9" });
+    apns.warm("sandbox");
+    for (let i = 0; i < 100 && sessions.length === 0; i++) await Bun.sleep(10);
+    expect(sessions).toEqual(["open"]);
+    for (const id of [randomUUID(), randomUUID()]) {
+      const outcome = await apns.send("ab".repeat(32), "sandbox", { id, routerId: randomUUID(), number: "12345", expiresAt: 1800000000 });
+      expect(outcome.kind).toBe("accepted");
+    }
+    expect(sessions).toEqual(["open"]);
+    expect(paths).toEqual([`/3/device/${"ab".repeat(32)}`, `/3/device/${"ab".repeat(32)}`]);
+    apns.close();
+    server.close();
+  });
+  test("a registered push token opens the APNs connection for its environment", async () => {
+    const warmed: string[] = [];
+    const push: PushProvider = { close() {}, warm(environment) { warmed.push(environment); },
+      async sendSMS() { throw new Error("Unexpected SMS push"); }, async send() { throw new Error("Unexpected push"); } };
+    const f = fixture(push);
+    const response = await fetch(f.url + "/v1/push-token", { method: "PUT",
+      headers: { authorization: `Bearer ${f.phoneToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ token: "cd".repeat(32), environment: "production" }) });
+    expect(response.status).toBe(200);
+    expect(warmed).toEqual(["production"]);
   });
   test("provider JWTs use ES256, the correct team/key IDs, and refresh after a clock rollback", () => {
     const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });

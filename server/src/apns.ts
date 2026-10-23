@@ -20,6 +20,8 @@ export type PushOutcome = { kind: "accepted" | "retry" | "reject"; code: string 
 export interface PushProvider {
   send(token: string, environment: "sandbox" | "production", call: PushCall): Promise<PushOutcome>;
   sendSMS(token: string, environment: "sandbox" | "production", event: PushSMS): Promise<PushOutcome>;
+  /** Opens the connection a later push will use. */
+  warm?(environment: "sandbox" | "production"): void;
   close(): void;
 }
 
@@ -27,8 +29,11 @@ export class APNs implements PushProvider {
   private readonly key: KeyObject;
   private jwt?: { value: string; issued: number };
   private sessions = new Map<string, ClientHttp2Session>();
+  private warmed = new Set<"sandbox" | "production">();
+  private keepalive?: ReturnType<typeof setInterval>;
   constructor(private readonly teamId: string, private readonly keyId: string,
-    private readonly bundleId: string, keyPem: string) {
+    private readonly bundleId: string, keyPem: string,
+    private readonly hosts = { sandbox: "https://api.sandbox.push.apple.com", production: "https://api.push.apple.com" }) {
     if (!/^[A-Z0-9]{10}$/.test(teamId) || !/^[A-Z0-9]{10}$/.test(keyId)
       || !/^[A-Za-z0-9.-]+$/.test(bundleId) || !bundleId.includes(".")) throw new Error("Invalid APNs identifiers");
     this.key = createPrivateKey(keyPem);
@@ -57,20 +62,40 @@ export class APNs implements PushProvider {
     }
     return { kind: "accepted", code: "accepted" };
   }
+  /**
+   * A new connection costs DNS, TCP and TLS (about half a second from the service host) before
+   * an incoming call can ring, so the connection stays open, as Apple recommends: a PING each
+   * minute keeps it alive and replaces it once it is closed or stops answering.
+   */
+  warm(environment: "sandbox" | "production") {
+    this.warmed.add(environment);
+    this.session(environment);
+    this.keepalive ??= setInterval(() => {
+      for (const environment of this.warmed) {
+        const session = this.session(environment);
+        if (!session.connecting) session.ping(error => { if (error) session.destroy(); });
+      }
+    }, 60000);
+    this.keepalive.unref?.();
+  }
+  private session(environment: "sandbox" | "production"): ClientHttp2Session {
+    const host = this.hosts[environment];
+    const current = this.sessions.get(host);
+    if (current && !current.closed && !current.destroyed) return current;
+    const session = connect(host);
+    session.on("error", () => {});
+    session.on("close", () => { if (this.sessions.get(host) === session) this.sessions.delete(host); });
+    this.sessions.set(host, session);
+    return session;
+  }
   private async post(token: string, environment: "sandbox" | "production", headers: Record<string, string>, payload: unknown): Promise<PushOutcome> {
-    const host = environment === "sandbox" ? "https://api.sandbox.push.apple.com" : "https://api.push.apple.com";
-    let session = this.sessions.get(host);
-    if (!session || session.closed || session.destroyed) {
-      session = connect(host);
-      session.on("error", () => { if (this.sessions.get(host) === session) this.sessions.delete(host); });
-      session.setTimeout(60000, () => session?.close());
-      this.sessions.set(host, session);
-    }
+    this.warm(environment);
+    const session = this.session(environment);
     return new Promise(resolve => {
       let settled = false;
       let deadline: ReturnType<typeof setTimeout> | undefined;
       const finish = (outcome: PushOutcome) => { if (!settled) { settled = true; clearTimeout(deadline); resolve(outcome); } };
-      const request = session!.request({ ":method": "POST", ":path": `/3/device/${token}`,
+      const request = session.request({ ":method": "POST", ":path": `/3/device/${token}`,
         authorization: `bearer ${this.authorization()}`, ...headers });
       deadline = setTimeout(() => { request.close(); finish({ kind: "retry", code: "apns_timeout" }); }, 8000);
       let status = 0, body = "";
@@ -90,7 +115,11 @@ export class APNs implements PushProvider {
       request.end(JSON.stringify(payload));
     });
   }
-  close() { for (const session of this.sessions.values()) session.destroy(); this.sessions.clear(); }
+  close() {
+    clearInterval(this.keepalive); this.keepalive = undefined; this.warmed.clear();
+    for (const session of this.sessions.values()) session.destroy();
+    this.sessions.clear();
+  }
 }
 
 export function smsPushRequests(bundle: string, event: PushSMS) {
