@@ -244,6 +244,17 @@ push starts reconnecting before CallKit finishes presenting the call. The server
 APNs connection open (opened at startup and on token registration, kept with an HTTP/2
 PING each minute), so a push does not first spend ~0.4 s on DNS, TCP and TLS.
 
+Before an outgoing call is answered: when the modem reports the call alerting, the router
+sends a dialing event with `alerting: true` (the app shows Ringing instead of Calling) and
+a CEPT ringback tone (425 Hz, 1 s on, 4 s off) over the call's audio track. Once the dial
+is acknowledged a separate helper also forwards the network's own audio: measured on a live
+call, an announcement (unknown number) arrives as real-time audio while the call is still
+dialing, whereas ordinary ringing reads as zeros far faster than real time. Silent chunks
+are dropped, forwarding is capped at real time, the generated tone pauses while network
+audio plays, and the uplink carries only silence, so the callee hears nothing before
+pickup. The early helper is stopped before the call's own helper starts. The app vibrates
+once when the callee picks up.
+
 Each call and command has a stable UUID. The server persists a command before
 sending it. The agent persists its execution journal before touching the modem.
 The server includes the original 20-second expiry on every delivery. Retries keep

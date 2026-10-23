@@ -336,16 +336,19 @@ impl Media {
         let mut bridge = AudioBridge::start()?;
         let (track, heard, call_id) = (self.audio_track(), self.early_heard.clone(), self.call_id);
         self.early = Some(tokio::spawn(async move {
+            // The callee hears nothing before pickup: the uplink is silence, one frame per 20 ms
+            // however fast an idle modem path returns capture.
             let silence = audio::frame(3, &[0; 320]).expect("silence frame");
             let mut packet = [0; 8201];
             let mut check = tokio::time::interval(Duration::from_millis(250));
+            let mut uplink = tokio::time::interval(Duration::from_millis(20));
             let (mut second, mut sent, mut first) = (Instant::now(), 0u32, true);
             loop {
                 tokio::select! {
+                    _ = uplink.tick() => { let _ = bridge.socket.send(&silence).await; }
                     count = bridge.socket.recv(&mut packet) => {
                         let Ok(count) = count else { return };
                         let Ok((2, pcm)) = audio::parse(&packet[..count]) else { continue };
-                        let _ = bridge.socket.send(&silence).await;
                         if second.elapsed() >= Duration::from_secs(1) { (second, sent) = (Instant::now(), 0); }
                         // Real audio comes once per 20 ms; beyond that the path carries no call.
                         let Some(frame) = early_frame(pcm) else { continue };
