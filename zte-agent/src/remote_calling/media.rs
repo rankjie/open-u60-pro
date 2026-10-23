@@ -9,7 +9,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 use webrtc::api::{
-    interceptor_registry::register_default_interceptors, media_engine::MediaEngine, APIBuilder,
+    interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
+    setting_engine::SettingEngine, APIBuilder,
 };
 use webrtc::ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer};
 use webrtc::interceptor::registry::Registry;
@@ -73,9 +74,18 @@ async fn peer_config(config: RTCConfiguration) -> Result<Arc<RTCPeerConnection>,
         .map_err(|_| "codec_registration")?;
     let registry = register_default_interceptors(Registry::new(), &mut engine)
         .map_err(|_| "media_interceptors")?;
+    // The router offers, so it picks the path. By default it holds back a working path that
+    // isn't a direct host one (500 ms for a public mapping, 1 s for a discovered one and 2 s
+    // for a relay) hoping for a better one. Between two carrier NATs only a relay works, so
+    // the wait is pure delay; on a shared LAN the host pair answers first and still wins.
+    let mut settings = SettingEngine::default();
+    settings.set_srflx_acceptance_min_wait(Some(Duration::ZERO));
+    settings.set_prflx_acceptance_min_wait(Some(Duration::ZERO));
+    settings.set_relay_acceptance_min_wait(Some(Duration::ZERO));
     let api = APIBuilder::new()
         .with_media_engine(engine)
         .with_interceptor_registry(registry)
+        .with_setting_engine(settings)
         .build();
     Ok(Arc::new(
         api.new_peer_connection(config)
@@ -545,6 +555,75 @@ mod tests {
     #[tokio::test]
     async fn real_webrtc_negotiation_delivers_g711_audio() {
         exercise(vec![], false).await;
+    }
+
+    /// Between two carrier NATs only a relayed pair works. The router offers, so it nominates the
+    /// pair; it must do so as soon as the relay answers, not after an acceptance wait.
+    #[tokio::test]
+    async fn a_working_relay_is_chosen_without_waiting() {
+        use webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy;
+        use webrtc::turn::{auth::{generate_auth_key, AuthHandler}, relay::relay_static::RelayAddressGeneratorStatic,
+            server::{config::{ConnConfig, ServerConfig}, Server}};
+        struct Key(Vec<u8>);
+        impl AuthHandler for Key {
+            fn auth_handle(&self, username: &str, _: &str, _: std::net::SocketAddr) -> Result<Vec<u8>, webrtc::turn::Error> {
+                if username == "phone" { Ok(self.0.clone()) } else { Err(webrtc::turn::Error::ErrFakeErr) }
+            }
+        }
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let port = socket.local_addr().unwrap().port();
+        let server = Server::new(ServerConfig {
+            conn_configs: vec![ConnConfig {
+                conn: socket,
+                relay_addr_generator: Box::new(RelayAddressGeneratorStatic {
+                    relay_address: "127.0.0.1".parse().unwrap(),
+                    address: "127.0.0.1".into(),
+                    net: Arc::new(webrtc::util::vnet::net::Net::new(None)),
+                }),
+            }],
+            realm: "openu60".into(),
+            auth_handler: Arc::new(Key(generate_auth_key("phone", "openu60", "secret"))),
+            channel_bind_timeout: Duration::from_secs(0),
+            alloc_close_notify: None,
+        })
+        .await
+        .unwrap();
+        let servers = vec![RTCIceServer {
+            urls: vec![format!("turn:127.0.0.1:{port}?transport=udp")],
+            username: "phone".into(),
+            credential: "secret".into(),
+        }];
+        let config = || RTCConfiguration {
+            ice_servers: servers.clone(),
+            ice_transport_policy: RTCIceTransportPolicy::Relay,
+            ..Default::default()
+        };
+        let (a, b) = (peer_config(config()).await.unwrap(), peer_config(config()).await.unwrap());
+        let track = Arc::new(TrackLocalStaticSample::new(capability(), "test".into(), "synthetic".into()));
+        a.add_track(track as Arc<dyn TrackLocal + Send + Sync>).await.unwrap();
+        let mut gathered = a.gathering_complete_promise().await;
+        a.set_local_description(a.create_offer(None).await.unwrap()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), gathered.recv()).await.unwrap();
+        assert!(a.local_description().await.unwrap().sdp.contains(" typ relay"));
+        b.set_remote_description(a.local_description().await.unwrap()).await.unwrap();
+        let mut gathered = b.gathering_complete_promise().await;
+        b.set_local_description(b.create_answer(None).await.unwrap()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), gathered.recv()).await.unwrap();
+        let started = Instant::now();
+        a.set_remote_description(b.local_description().await.unwrap()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while a.connection_state() != RTCPeerConnectionState::Connected {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let elapsed = started.elapsed();
+        assert!(route(&a).await.starts_with("Relay/"));
+        assert!(elapsed < Duration::from_millis(1000), "relay connected after {elapsed:?}");
+        a.close().await.unwrap();
+        b.close().await.unwrap();
+        server.close().await.unwrap();
     }
 
     fn external_servers(transport: &str) -> Vec<RTCIceServer> {
