@@ -81,6 +81,8 @@ final class RemoteCallingManager: NSObject {
     @ObservationIgnored private var registry: PKPushRegistry?
     @ObservationIgnored private var credentials: CallingCredentials?
     @ObservationIgnored var localCommandDelivery: (@MainActor ([String:Any], UUID) async throws -> Bool)?
+    /// False when the phone cannot reach the router's LAN address (away from home, no VPN).
+    @ObservationIgnored var localCommandsPossible: (@MainActor () -> Bool)?
     @ObservationIgnored var commandAdmission: (@MainActor ([String:Any], String) async throws -> [String:Any])?
     @ObservationIgnored var deviceConnectionRequest: (@MainActor (String, URL, String, [String:Any]?) async throws -> [String:Any])?
     @ObservationIgnored var onSMSReceived: (@MainActor (UUID, UUID, String?, [String: Any]) -> Void)?
@@ -657,9 +659,12 @@ final class RemoteCallingManager: NSObject {
         }
     }
     private func deliverCommand(_ body: [String:Any], id: UUID) async throws {
-        // Answer and dial are what the user waits on. Away from home, probing the LAN address and
-        // opening a P2P channel take seconds; the open socket reaches the router in one hop.
-        if ["answer", "dial"].contains(body["action"] as? String), routerOnline { try await send(body); return }
+        // Answer and dial are what the user waits on, and away from home every command is: the
+        // server admission, LAN probe and P2P channel cost seconds there, while the open socket
+        // reaches the router in one hop.
+        if routerOnline, ["answer", "dial"].contains(body["action"] as? String) || localCommandsPossible?() == false {
+            try await send(body); return
+        }
         guard let localCommandDelivery, let routerID = credentials?.routerId else { try await send(body); return }
         let admission: [String:Any]
         do { admission = try await admit(body, delivery: "local") }
@@ -1148,6 +1153,8 @@ extension RemoteCallingManager: @preconcurrency PKPushRegistryDelegate {
         if call == nil, !expired {
             call = RemoteCall(callId: id, routerId: routerId, direction: .incoming, state: .ringing,
                 number: number, reason: nil, mediaReady: false, updatedAt: Int(Date().timeIntervalSince1970), sequence: 0)
+            // Reconnecting overlaps CallKit's presentation instead of following it.
+            resumeSignaling()
         }
         reportIncoming(id: id, number: number, expired: expired, completion: completion)
     }

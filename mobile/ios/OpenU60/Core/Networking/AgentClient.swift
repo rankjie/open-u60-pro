@@ -37,7 +37,7 @@ final class AgentClient {
         // to Wi-Fi would fail every request as "Cannot reach the agent" with no way to relax it.
         let session = AgentTransport.makeSession()
         self.session = session
-        self.transport = AgentTransport(session: session)
+        self.transport = AgentTransport(session: session, network: { LocalNetworkPath.shared.state })
         self.baseURL = baseURL
         batcher = AgentReadBatcher(
             single: { [weak self] path in
@@ -161,6 +161,8 @@ final class AgentClient {
     }
 
     // MARK: - Auth
+
+    var mayReachLocally: Bool { transport.mayReachLocally(baseURL: baseURL) }
 
     func deliverLocalCall(_ command: [String:Any], routerID: UUID) async throws -> Bool {
         try await transport.deliverCall(JSONSerialization.data(withJSONObject: command), baseURL: baseURL, routerID: routerID,

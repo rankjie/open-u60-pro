@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Observation
 
 struct AgentRelayAccess: Sendable {
@@ -14,6 +15,32 @@ struct AgentHTTPResponse: Sendable {
 }
 typealias AgentPeerRequest = @MainActor (Data, UUID, TimeInterval, AgentRelayAccess) async throws -> AgentHTTPResponse?
 
+/// Whether the phone has an interface that can lead to a private LAN (Wi-Fi, wired, or a VPN),
+/// and a counter that changes with every network change.
+struct LocalNetworkState: Equatable {
+    var lan: Bool
+    var generation: Int
+}
+
+@MainActor
+final class LocalNetworkPath {
+    static let shared = LocalNetworkPath()
+    /// Until the first update nothing is known, so the LAN is still tried.
+    private(set) var state = LocalNetworkState(lan: true, generation: 0)
+    private let monitor = NWPathMonitor()
+
+    private init() {
+        monitor.pathUpdateHandler = { path in
+            let lan = path.status == .satisfied && [.wifi, .wiredEthernet, .other].contains { path.usesInterfaceType($0) }
+            Task { @MainActor in
+                let shared = LocalNetworkPath.shared
+                shared.state = LocalNetworkState(lan: lan, generation: shared.state.generation + 1)
+            }
+        }
+        monitor.start(queue: .main)
+    }
+}
+
 /// One effect identifier spans local and server delivery. Only the device may claim it.
 @Observable @MainActor
 final class AgentTransport {
@@ -21,7 +48,8 @@ final class AgentTransport {
     private(set) var route: Route = .connecting
     @ObservationIgnored private let load: @Sendable (URLRequest, Int) async throws -> AgentHTTPResponse
     @ObservationIgnored private var probe: (key: String, task: Task<LocalIdentity?, Error>)?
-    @ObservationIgnored private var cached: (key: String, identity: LocalIdentity?, until: ContinuousClock.Instant)?
+    @ObservationIgnored private var cached: (key: String, identity: LocalIdentity?, until: ContinuousClock.Instant, network: Int)?
+    @ObservationIgnored private let network: @MainActor () -> LocalNetworkState
     @ObservationIgnored private var active = 0
 
     private struct LocalIdentity {
@@ -44,7 +72,9 @@ final class AgentTransport {
     }
 
     init(session: URLSession = AgentTransport.makeSession(),
-         load: (@Sendable (URLRequest, Int) async throws -> AgentHTTPResponse)? = nil) {
+         load: (@Sendable (URLRequest, Int) async throws -> AgentHTTPResponse)? = nil,
+         network: @escaping @MainActor () -> LocalNetworkState = { LocalNetworkState(lan: true, generation: 0) }) {
+        self.network = network
         self.load = load ?? { request, limit in
             let (bytes, response) = try await session.bytes(for: request)
             guard let response = response as? HTTPURLResponse else { throw AgentError.serverUnreachable }
@@ -153,9 +183,31 @@ final class AgentTransport {
         }
     }
 
+    /// False only when the agent's address is private and the phone has no interface that can
+    /// lead there: on cellular alone a LAN probe can only time out. Any other address is tried.
+    func mayReachLocally(baseURL: String) -> Bool {
+        network().lan || !Self.isPrivate(URL(string: baseURL)?.host(percentEncoded: false))
+    }
+
+    private static func isPrivate(_ host: String?) -> Bool {
+        guard let host = host?.lowercased() else { return false }
+        if host.hasSuffix(".local") { return true }
+        if let address = IPv4Address(host) {
+            let b = [UInt8](address.rawValue)
+            return b[0] == 10 || (b[0] == 172 && (16...31).contains(b[1])) || (b[0] == 192 && b[1] == 168) || (b[0] == 169 && b[1] == 254)
+        }
+        if let address = IPv6Address(host) {
+            let b = [UInt8](address.rawValue)
+            return (b[0] == 0xfe && b[1] & 0xc0 == 0x80) || b[0] & 0xfe == 0xfc
+        }
+        return false
+    }
+
     private func localIdentity(baseURL: String, routerID: UUID) async throws -> LocalIdentity? {
+        guard mayReachLocally(baseURL: baseURL) else { return nil }
         let key = baseURL + "/" + routerID.uuidString
-        if let cached, cached.key == key, .now < cached.until { return cached.identity }
+        let generation = network().generation
+        if let cached, cached.key == key, cached.network == generation, .now < cached.until { return cached.identity }
         if let probe, probe.key == key { return try await probe.task.value }
         let load = load
         let task = Task<LocalIdentity?, Error> {
@@ -179,7 +231,7 @@ final class AgentTransport {
         probe = (key, task)
         defer { if probe?.key == key { probe = nil } }
         let result = try await task.value
-        cached = (key, result, .now.advanced(by: .seconds(result == nil ? 2 : 3)))
+        cached = (key, result, .now.advanced(by: .seconds(result == nil ? 2 : 3)), generation)
         return result
     }
 

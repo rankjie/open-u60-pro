@@ -102,6 +102,20 @@ import WebRTC
             f.manager.commandAdmission = nil; f.manager.localCommandDelivery = nil; f.manager.disconnect()
         }
         do {
+            // Away from home the LAN cannot answer: call control takes the open socket at once.
+            let f = Fixture(); let id = UUID(); try await f.start(id)
+            var probed = false
+            f.manager.commandAdmission = { _, _ in probed = true; return [:] }
+            f.manager.localCommandDelivery = { _, _ in probed = true; return false }
+            f.manager.localCommandsPossible = { false }
+            let action = TestDTMFAction(call:id, digits:"5", type:.singleTone)
+            f.manager.provider(f.provider, perform:action)
+            try await wait { f.socket.messages.contains { $0["action"] as? String == "dtmf" } }
+            expect(!probed, "away from home, call control must not wait for admission, LAN or P2P")
+            f.manager.commandAdmission = nil; f.manager.localCommandDelivery = nil; f.manager.localCommandsPossible = nil
+            f.manager.disconnect()
+        }
+        do {
             let f = Fixture(); let id = UUID(); try await f.start(id)
             f.socket.emit(["type":"ice_servers", "iceServers":[["urls":["turn:synthetic.invalid:3478"]]]])
             f.socket.emit(f.snapshot(id, sequence: 2))

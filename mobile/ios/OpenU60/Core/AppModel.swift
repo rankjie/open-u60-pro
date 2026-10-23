@@ -31,6 +31,7 @@ final class AppModel {
             guard let client else { throw CallingError.disconnected }
             return try await client.deliverLocalCall(command, routerID: routerID)
         }
+        calling.localCommandsPossible = { [weak client] in client?.mayReachLocally ?? false }
         auth.hasRemoteAccess = { [weak calling] in calling?.hasSavedPairing == true }
         deviceKey = calling.managementAccess?.routerID.uuidString ?? client.baseURL
         device = RouterSession(client: client, auth: auth)

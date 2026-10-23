@@ -152,6 +152,40 @@ private actor RouterFixture {
                 precondition(!requests.contains { $0.url!.path == "/openu60/v1/agent" })
             }
         }
+        // Without Wi-Fi, a wired link or a VPN, a private LAN address cannot answer: no probe, no timeout.
+        for (base, probes) in [("http://192.168.0.1:9090", false), ("http://10.8.0.1:9090", false), ("http://[fe80::1]:9090", false),
+                               ("http://router.local:9090", false), ("http://router.example:9090", true), ("http://203.0.113.7:9090", true)] {
+            let fixture = RouterFixture(router:router, mode:.local)
+            let transport = AgentTransport(load:{ request, _ in try await fixture.load(request) },
+                                           network:{ LocalNetworkState(lan:false, generation:0) })
+            precondition(transport.mayReachLocally(baseURL:base) == probes, base)
+            let response = try await transport.send(method:"GET", path:"/api/battery", body:nil, baseURL:base, access:access,
+                token:{"synthetic-admin"}, reauthenticate:{false})
+            let requests = await fixture.requests
+            precondition(response.status == 200)
+            precondition(requests.contains { $0.url!.path == "/api/identity" } == probes, "\(base) probed=\(!probes)")
+            precondition(transport.route == (probes ? .local : .relay), base)
+        }
+        // A network change discards a failed probe at once instead of waiting out its cache.
+        do {
+            final class Box { var online = false; var network = LocalNetworkState(lan:true, generation:1); var identities = 0 }
+            let box = Box()
+            let fixture = RouterFixture(router:router, mode:.local)
+            let transport = AgentTransport(load:{ request, _ in
+                if request.url!.path == "/api/identity" {
+                    box.identities += 1
+                    if !box.online { throw URLError(.timedOut) }
+                }
+                return try await fixture.load(request)
+            }, network:{ box.network })
+            for (online, generation, route) in [(false, 1, AgentTransport.Route.relay), (true, 1, .relay), (true, 2, .local)] {
+                box.online = online; box.network.generation = generation
+                _ = try await transport.send(method:"GET", path:"/api/battery", body:nil, baseURL:"http://192.168.0.1:9090",
+                                             access:access, token:{"synthetic-admin"}, reauthenticate:{false})
+                precondition(transport.route == route, "online=\(online) generation=\(generation) route=\(transport.route)")
+            }
+            precondition(box.identities == 2, "the failed probe is cached until the network changes")
+        }
         var assembler = PeerFrames()
         for size in [1, 12288, 12289, 98304, PeerFrames.limit] {
             let id = UUID(), data = Data(repeating:UInt8(size % 251), count:size)
