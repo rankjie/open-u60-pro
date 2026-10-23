@@ -56,6 +56,19 @@ class AudioBridgeTest(unittest.TestCase):
         self.assertEqual(self.bridge.zte_rtp_dsp_receive_handler(output, 320), 320)
         self.assertEqual(output.raw, pcm)
 
+    def test_a_backlog_is_trimmed_to_the_newest_frames(self):
+        # The helper takes one frame per 20 ms; anything queued beyond 80 ms is late audio.
+        frames = [struct.pack("<160h", *([index] * 160)) for index in range(10)]
+        for pcm in frames:
+            self.parent.send(b"OU60\x03\x00\x40\x01" + pcm)
+        output = ctypes.create_string_buffer(320)
+        for expected in frames[6:]:
+            self.assertEqual(self.bridge.zte_rtp_dsp_receive_handler(output, 320), 320)
+            self.assertEqual(output.raw, expected)
+        self.parent.send(b"OU60\x03\x00\x40\x01" + frames[1])
+        self.assertEqual(self.bridge.zte_rtp_dsp_receive_handler(output, 320), 320)
+        self.assertEqual(output.raw, frames[1])
+
     def test_malformed_packets_fail_without_substituting_silence(self):
         for packet in [b"short", b"OU60\x02\x00\x40\x01" + bytes(320), b"OU60\x03\x00\x40\x01" + bytes(318)]:
             with self.subTest(packet_length=len(packet)):

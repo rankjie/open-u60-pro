@@ -253,6 +253,17 @@ failures retry through a persistent outbox only while the call remains ringing.
 Invalidated push tokens are removed. Transport attempts have finite deadlines.
 An uncertain modem operation is not a reason to issue another dial.
 
+## Audio delay bounds
+
+The vendor helper plays one 20 ms frame per HAL write and reads nothing ahead, so audio
+waiting in front of it becomes delay. Every stage is therefore bounded instead of queued:
+the audio adapter keeps at most four uplink frames (80 ms) and drops the oldest; the agent
+sends only the newest three capture chunks when the socket holds a backlog after a stall;
+and the phone's jitter buffer is capped at 25 packets (500 ms) with fast acceleration,
+where WebRTC otherwise allows 200 (4 s). During a call the agent logs, every five seconds,
+`[calling-media] <call> capture … B/s chunks … dropped … | sent … frames/s slowest … ms |
+phone … frames/s via <local> -> <remote> rtt … ms`, naming the ICE pair that carries audio.
+
 ## Firmware audio boundary
 
 The initial adapter supports the inspected EU/Poland firmware

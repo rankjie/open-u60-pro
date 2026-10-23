@@ -47,6 +47,9 @@ import WebRTC
 @main struct NativeMediaInteropTests {
     @MainActor static func main() async {
         RTCSetMinDebugLogLevel(.none)
+        // Call audio never queues seconds behind a burst: WebRTC's default allows 200 packets.
+        let config=CallingMedia.configuration(servers:[],relayOnly:true)
+        precondition(config.audioJitterBufferMaxPackets==25 && config.audioJitterBufferFastAccelerate && config.iceTransportPolicy == .relay)
         let client=NativeMediaInterop()
         do {try await client.run()} catch {
             // Never print SDP, ICE credentials, candidate strings, or SDK error descriptions.

@@ -271,31 +271,45 @@ impl Media {
         let ready = self.ready_sender.clone();
         let failure = self.failure.clone();
         let generation = self.generation;
+        let (peer, call_id) = (self.peer.clone(), self.call_id);
         self.audio = Some(tokio::spawn(async move {
             let outcome=async {
                 let mut packet=[0;8201];
                 let count=tokio::time::timeout(Duration::from_secs(3),bridge.socket.recv(&mut packet)).await.map_err(|_| "audio_adapter_timeout")?.map_err(|_| "audio_socket_receive")?;
                 let (kind,format)=audio::parse(&packet[..count])?;
                 if kind!=1 || format!=[0x40,0x1f,0,0,1,0,16,0] {return Err("unsupported_audio_format");}
+                eprintln!("[calling-media] {call_id} audio started via {}", route(&peer).await);
                 let mut uplink=Vec::with_capacity(640); let mut downlink=Vec::with_capacity(640);
                 let mut last_capture=Instant::now(); let mut last_received=Instant::now(); let mut first=true;
                 let mut check=tokio::time::interval(Duration::from_millis(250));
+                let mut stats=Stats::new();
                 loop {
                     tokio::select! {
                         count=bridge.socket.recv(&mut packet)=>{
-                            let count=count.map_err(|_| "audio_socket_receive")?; let (kind,pcm)=audio::parse(&packet[..count])?;
-                            if kind!=2 || pcm.is_empty() || pcm.len()%2!=0 {return Err("invalid_capture_audio");}
-                            if let Some(recorder)=&recorder {recorder.push(0,pcm);}
-                            last_capture=Instant::now(); downlink.extend_from_slice(pcm);
-                            while downlink.len()>=320 {
-                                let data=downlink.drain(..320).collect::<Vec<_>>().as_chunks::<2>().0.iter().map(|s|codec::encode(i16::from_le_bytes([s[0],s[1]]))).collect::<Vec<_>>();
-                                track.write_sample(&Sample {data:data.into(),duration:Duration::from_millis(20),..Default::default()}).await.map_err(|_| "audio_send_failed")?;
-                                if first {first=false;let _=ready.send(true);}
+                            let count=count.map_err(|_| "audio_socket_receive")?;
+                            // Capture queued while this loop was held up is late: only the newest
+                            // chunks are sent, so a stall never becomes lasting delay for the phone.
+                            let (chunks,dropped)=newest_capture(&bridge.socket,packet[..count].to_vec())?;
+                            stats.capture_dropped+=dropped;
+                            for chunk in &chunks {
+                                let (kind,pcm)=audio::parse(chunk)?;
+                                if kind!=2 || pcm.is_empty() || pcm.len()%2!=0 {return Err("invalid_capture_audio");}
+                                if let Some(recorder)=&recorder {recorder.push(0,pcm);}
+                                stats.capture(pcm.len());
+                                last_capture=Instant::now(); downlink.extend_from_slice(pcm);
+                                while downlink.len()>=320 {
+                                    let data=downlink.drain(..320).collect::<Vec<_>>().as_chunks::<2>().0.iter().map(|s|codec::encode(i16::from_le_bytes([s[0],s[1]]))).collect::<Vec<_>>();
+                                    let started=Instant::now();
+                                    track.write_sample(&Sample {data:data.into(),duration:Duration::from_millis(20),..Default::default()}).await.map_err(|_| "audio_send_failed")?;
+                                    stats.sent(started.elapsed());
+                                    if first {first=false;let _=ready.send(true);}
+                                }
                             }
                         }
                         pcm=inbound.recv()=>{
                             let pcm=pcm.ok_or("remote_audio_closed")?;last_received=Instant::now();uplink.extend_from_slice(&pcm);
                             if let Some(recorder)=&recorder {recorder.push(1,&pcm);}
+                            stats.uplink+=1;
                             while uplink.len()>=320 {
                                 let frame=audio::frame(3,&uplink.drain(..320).collect::<Vec<_>>())?;
                                 bridge.socket.send(&frame).await.map_err(|_| "audio_socket_send")?;
@@ -305,11 +319,16 @@ impl Media {
                             bridge.check()?;
                             if last_capture.elapsed()>Duration::from_secs(3) {return Err("cellular_audio_timeout");}
                             if last_received.elapsed()>Duration::from_secs(10) {return Err("remote_audio_timeout");}
+                            if stats.started.elapsed()>=Duration::from_secs(5) {
+                                eprintln!("[calling-media] {call_id} {} via {}", stats.report(), route(&peer).await);
+                                stats=Stats::new();
+                            }
                         }
                     }
                 }
                 #[allow(unreachable_code)] Ok::<(),&'static str>(())
             }.await;
+            if let Err(error) = outcome { eprintln!("[calling-media] {call_id} audio ended: {error}"); }
             let _ = ready.send(false);
             if let Err(error) = outcome {
                 let _ = failure.send((generation, error)).await;
@@ -330,6 +349,79 @@ impl Media {
     }
 }
 
+/// Capture chunks kept when the socket holds a backlog (one chunk is normally 20 ms).
+const CAPTURE_KEEP: usize = 3;
+
+/// `first` plus whatever capture is already queued, keeping the newest `CAPTURE_KEEP` chunks;
+/// also returns how many were dropped.
+fn newest_capture(socket: &tokio::net::UnixDatagram, first: Vec<u8>) -> Result<(std::collections::VecDeque<Vec<u8>>, usize), &'static str> {
+    let mut chunks = std::collections::VecDeque::from([first]);
+    let mut dropped = 0;
+    let mut packet = [0; 8201];
+    loop {
+        match socket.try_recv(&mut packet) {
+            Ok(count) => {
+                chunks.push_back(packet[..count].to_vec());
+                if chunks.len() > CAPTURE_KEEP {
+                    chunks.pop_front();
+                    dropped += 1;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok((chunks, dropped)),
+            Err(_) => return Err("audio_socket_receive"),
+        }
+    }
+}
+
+/// Per-call audio counters, logged every five seconds so delay can be traced to its stage.
+struct Stats {
+    started: Instant,
+    capture_bytes: usize,
+    chunk: (usize, usize),
+    capture_dropped: usize,
+    frames: usize,
+    slowest: Duration,
+    uplink: usize,
+}
+impl Stats {
+    fn new() -> Self {
+        Stats { started: Instant::now(), capture_bytes: 0, chunk: (usize::MAX, 0), capture_dropped: 0, frames: 0, slowest: Duration::ZERO, uplink: 0 }
+    }
+    fn capture(&mut self, bytes: usize) {
+        self.capture_bytes += bytes;
+        self.chunk = (self.chunk.0.min(bytes), self.chunk.1.max(bytes));
+    }
+    fn sent(&mut self, took: Duration) {
+        self.frames += 1;
+        self.slowest = self.slowest.max(took);
+    }
+    fn report(&self) -> String {
+        let seconds = self.started.elapsed().as_secs_f64();
+        format!(
+            "capture {:.0} B/s chunks {}-{} B dropped {} | sent {:.1} frames/s slowest {} ms | phone {:.1} frames/s",
+            self.capture_bytes as f64 / seconds, if self.chunk.1 == 0 { 0 } else { self.chunk.0 }, self.chunk.1, self.capture_dropped,
+            self.frames as f64 / seconds, self.slowest.as_millis(), self.uplink as f64 / seconds,
+        )
+    }
+}
+
+/// The selected ICE pair, e.g. "Relay/Udp4 udp -> Srflx/Udp4 rtt 41 ms".
+async fn route(peer: &RTCPeerConnection) -> String {
+    use webrtc::stats::StatsReportType;
+    let reports = peer.get_stats().await.reports;
+    let pair = reports.values().filter_map(|report| match report {
+        StatsReportType::CandidatePair(pair) if pair.nominated => Some(pair),
+        _ => None,
+    }).max_by_key(|pair| pair.bytes_sent);
+    let Some(pair) = pair else { return "no selected pair".into() };
+    let describe = |id: &str| match reports.get(id) {
+        Some(StatsReportType::LocalCandidate(c) | StatsReportType::RemoteCandidate(c)) =>
+            format!("{:?}/{:?} {}", c.candidate_type, c.network_type, c.relay_protocol).trim_end().to_string(),
+        _ => "?".into(),
+    };
+    format!("{} -> {} rtt {:.0} ms", describe(&pair.local_candidate_id), describe(&pair.remote_candidate_id), pair.current_round_trip_time * 1000.0)
+}
+
 impl Drop for Media {
     fn drop(&mut self) {
         if let Some(task) = self.audio.take() {
@@ -348,6 +440,24 @@ impl Drop for Media {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn capture_held_up_behind_a_stall_is_trimmed_to_the_newest_chunks() {
+        let (helper, agent) = tokio::net::UnixDatagram::pair().unwrap();
+        for index in 0..9u8 {
+            helper.send(&[index; 320]).await.unwrap();
+        }
+        let mut packet = [0; 8201];
+        let count = agent.recv(&mut packet).await.unwrap();
+        let (chunks, dropped) = newest_capture(&agent, packet[..count].to_vec()).unwrap();
+        assert_eq!(chunks.iter().map(|c| c[0]).collect::<Vec<_>>(), vec![6, 7, 8]);
+        assert_eq!(dropped, 6);
+        // With nothing queued behind it, a chunk is passed on as it is.
+        helper.send(&[42; 640]).await.unwrap();
+        let count = agent.recv(&mut packet).await.unwrap();
+        let (chunks, dropped) = newest_capture(&agent, packet[..count].to_vec()).unwrap();
+        assert_eq!((chunks.len(), chunks[0].len(), chunks[0][0], dropped), (1, 640, 42, 0));
+    }
     #[tokio::test]
     async fn production_receiver_decodes_pcmu_payload_zero_after_padding() {
         use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
@@ -584,6 +694,10 @@ mod tests {
                 .unwrap(),
             payload
         );
+        // The logged path names the pair actually carrying audio.
+        let path = route(&a).await;
+        let expected = if relay { "Relay/" } else { "Host/" };
+        assert!(path.starts_with(expected) && path.contains(" -> ") && path.ends_with(" ms"), "{path}");
         a.close().await.unwrap();
         b.close().await.unwrap();
     }

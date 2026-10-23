@@ -37,11 +37,7 @@ final class CallingMedia: NSObject, CallingMediaConnection {
         self.send = send
         self.stateChanged = stateChanged
         super.init()
-        let config = RTCConfiguration()
-        config.sdpSemantics = .unifiedPlan
-        config.continualGatheringPolicy = .gatherContinually
-        config.iceTransportPolicy = relayOnly ? .relay : .all
-        config.iceServers = servers.map { RTCIceServer(urlStrings: $0.urls, username: $0.username ?? "", credential: $0.credential ?? "") }
+        let config = Self.configuration(servers: servers, relayOnly: relayOnly)
 #if DEBUG && OPENU60_NATIVE_CALLKIT_PROBE
         if Foundation.ProcessInfo.processInfo.arguments.contains("--native-callkit-relay") { config.iceTransportPolicy = .relay }
 #endif
@@ -55,6 +51,20 @@ final class CallingMedia: NSObject, CallingMediaConnection {
         track.isEnabled = !muted
         audioTrack = track
         peer.add(track, streamIds: [callId.uuidString.lowercased()])
+    }
+
+    /// Live call audio: the jitter buffer holds at most 25 packets (500 ms) and catches up
+    /// quickly, so a burst from the router after a network or CPU stall is played or dropped
+    /// at once instead of becoming delay for the rest of the call (WebRTC allows 4 s).
+    static func configuration(servers: [CallingICEServer], relayOnly: Bool) -> RTCConfiguration {
+        let config = RTCConfiguration()
+        config.sdpSemantics = .unifiedPlan
+        config.continualGatheringPolicy = .gatherContinually
+        config.iceTransportPolicy = relayOnly ? .relay : .all
+        config.iceServers = servers.map { RTCIceServer(urlStrings: $0.urls, username: $0.username ?? "", credential: $0.credential ?? "") }
+        config.audioJitterBufferMaxPackets = 25
+        config.audioJitterBufferFastAccelerate = true
+        return config
     }
 
     func answer(sdp: String) async throws -> String {

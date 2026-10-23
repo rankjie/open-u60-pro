@@ -1,4 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE /* MSG_DONTWAIT for the host test build */
+#endif
 #include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -14,7 +17,12 @@
  * The inherited socket is private to this child and never carries IP traffic. */
 static int audio_fd = -1;
 static pthread_rwlock_t lifecycle = PTHREAD_RWLOCK_INITIALIZER;
-enum { MAX_PCM = 8192, HEADER = 8 };
+enum { MAX_PCM = 8192, HEADER = 8, KEEP = 4 };
+/* Phone audio waiting for the modem. The helper takes one frame per 20 ms, so frames queued
+ * beyond KEEP (80 ms) are late audio: the oldest are dropped instead of delaying the call. */
+static pthread_mutex_t held_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned char held[KEEP][MAX_PCM];
+static int held_first, held_count;
 
 static int packet(int fd, unsigned char kind, const void *data, unsigned int size) {
     if (size > MAX_PCM) return -EMSGSIZE;
@@ -55,20 +63,42 @@ int zte_rtp_dsp_send_handler(const void *pcm, unsigned short size) {
     return result;
 }
 
+/* One uplink frame of exactly `capacity` bytes into `pcm`, or -EAGAIN when none is queued
+ * and `flags` asks not to wait. */
+static int take(int fd, int flags, void *pcm, unsigned int capacity) {
+    unsigned char bytes[HEADER + MAX_PCM + 1];
+    ssize_t count = recv(fd, bytes, sizeof(bytes), flags);
+    if (count < 0) return errno == EWOULDBLOCK ? -EAGAIN : -errno;
+    if (count < HEADER || memcmp(bytes, "OU60", 4) || bytes[4] != 3 || bytes[5] != 0) return -EPROTO;
+    unsigned int size = bytes[6] | ((unsigned int)bytes[7] << 8);
+    if (size != capacity || count != (ssize_t)(size + HEADER)) return -EMSGSIZE;
+    memcpy(pcm, bytes + HEADER, size);
+    return (int)size;
+}
+
 int zte_rtp_dsp_receive_handler(void *pcm, unsigned int capacity) {
     if (!pcm || !capacity || capacity > MAX_PCM || capacity % 2) return -EINVAL;
-    unsigned char bytes[HEADER + MAX_PCM + 1];
     pthread_rwlock_rdlock(&lifecycle);
     if (audio_fd < 0) { pthread_rwlock_unlock(&lifecycle); return -ENOTCONN; }
-    ssize_t count = recv(audio_fd, bytes, sizeof(bytes), 0);
-    int result;
-    if (count < 0) result = -errno;
-    else if (count < HEADER || memcmp(bytes, "OU60", 4) || bytes[4] != 3 || bytes[5] != 0) result = -EPROTO;
-    else {
-        unsigned int size = bytes[6] | ((unsigned int)bytes[7] << 8);
-        if (size != capacity || count != (ssize_t)(size + HEADER)) result = -EMSGSIZE;
-        else { memcpy(pcm, bytes + HEADER, size); result = (int)size; }
+    pthread_mutex_lock(&held_lock);
+    int result = 0;
+    unsigned char frame[MAX_PCM];
+    while ((result = take(audio_fd, MSG_DONTWAIT, frame, capacity)) > 0) {
+        if (held_count == KEEP) { held_first = (held_first + 1) % KEEP; held_count--; }
+        memcpy(held[(held_first + held_count) % KEEP], frame, capacity);
+        held_count++;
     }
+    if (result == -EAGAIN) {
+        if (held_count) {
+            memcpy(pcm, held[held_first], capacity);
+            held_first = (held_first + 1) % KEEP; held_count--;
+            result = (int)capacity;
+        } else {
+            result = take(audio_fd, 0, frame, capacity);
+            if (result > 0) memcpy(pcm, frame, capacity);
+        }
+    }
+    pthread_mutex_unlock(&held_lock);
     pthread_rwlock_unlock(&lifecycle);
     return result;
 }
@@ -76,5 +106,6 @@ int zte_rtp_dsp_receive_handler(void *pcm, unsigned int capacity) {
 void zte_rtp_deinit(void) {
     pthread_rwlock_wrlock(&lifecycle);
     if (audio_fd >= 0) { close(audio_fd); audio_fd = -1; }
+    pthread_mutex_lock(&held_lock); held_first = held_count = 0; pthread_mutex_unlock(&held_lock);
     pthread_rwlock_unlock(&lifecycle);
 }
