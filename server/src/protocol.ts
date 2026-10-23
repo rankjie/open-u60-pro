@@ -47,7 +47,7 @@ export interface Call {
   id: string; router_id: string; phone_id: string; direction: "incoming" | "outgoing";
   state: CallState; number: string; reason: string | null; created_at: number; updated_at: number;
   event_sequence: number; media_ready: number;
-  phone_name: string | null; phone_model: string | null; answered_at: number | null;
+  phone_name: string | null; phone_model: string | null; answered_at: number | null; alerting: number;
 }
 export interface Operation {
   id: string; call_id: string; action: Action; fingerprint: string; payload: string;
@@ -57,7 +57,7 @@ export interface Operation {
 export function snapshot(call: Call) {
   return { callId: call.id, routerId: call.router_id, direction: call.direction, state: call.state,
     number: call.number, reason: call.reason, mediaReady: !!call.media_ready,
-    updatedAt: call.updated_at, sequence: call.event_sequence, answeredAt: call.answered_at,
+    updatedAt: call.updated_at, sequence: call.event_sequence, answeredAt: call.answered_at, alerting: !!call.alerting,
     phone: call.phone_id && call.phone_name && call.phone_model
       ? { id: call.phone_id, name: call.phone_name, model: call.phone_model } : null };
 }

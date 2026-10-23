@@ -15,6 +15,32 @@ import WebRTC
         expect(CallingDeviceInfo.displayName(assigned: "Office phone", model: "iPhone17,1") == "Office phone", "an available assigned name must be preserved")
         expect(CallingDeviceInfo.displayName(assigned: "iPhone", model: "future-model") == "iPhone (future-model)", "unmapped hardware must retain its actual model identifier")
         do {
+            // An outgoing call says whether the network is still placing it or the callee's phone
+            // rings, and the phone vibrates once when the callee picks up.
+            let f = Fixture(); let id = UUID()
+            var buzzes = 0
+            f.manager.connectedFeedback = { buzzes += 1 }
+            func outgoing(_ state: String, _ sequence: Int, alerting: Bool? = nil) -> [String: Any] {
+                var value = f.snapshot(id, state: state, sequence: sequence); value["direction"] = "outgoing"
+                if let alerting { value["alerting"] = alerting }
+                return value
+            }
+            try await f.connect(calls: [outgoing("dialing", 1)])
+            expect(f.manager.call?.progress == "Calling…", "a call the network is placing must say Calling")
+            f.socket.emit(outgoing("dialing", 2, alerting: true)); try await wait { f.manager.call?.sequence == 2 }
+            expect(f.manager.call?.progress == "Ringing…", "a call whose callee rings must say Ringing")
+            expect(buzzes == 0, "nothing vibrates before the callee picks up")
+            f.socket.emit(outgoing("active", 3)); try await wait { f.manager.call?.sequence == 3 }
+            f.socket.emit(outgoing("active", 4)); try await wait { f.manager.call?.sequence == 4 }
+            expect(buzzes == 1, "the phone must vibrate exactly once when the callee picks up, not \(buzzes) times")
+            f.manager.disconnect()
+            let g = Fixture(); let incoming = UUID(); var incomingBuzzes = 0
+            g.manager.connectedFeedback = { incomingBuzzes += 1 }
+            try await g.connect(calls: [g.snapshot(incoming)])
+            expect(incomingBuzzes == 0 && g.manager.call?.progress == "Active", "an answered incoming call needs no pickup vibration")
+            g.manager.disconnect()
+        }
+        do {
             let f = Fixture(); let id = UUID()
             try await f.connect(calls: [f.snapshot(id)])
             let connected = f.manager.call?.connectedDate

@@ -36,12 +36,23 @@ pub struct Media {
     connected: watch::Receiver<RTCPeerConnectionState>,
     inbound: Option<mpsc::Receiver<Vec<u8>>>,
     audio: Option<JoinHandle<()>>,
+    ringback: Option<JoinHandle<()>>,
     tasks: Vec<JoinHandle<()>>,
     audio_ready: watch::Receiver<bool>,
     ready_sender: watch::Sender<bool>,
     failure: mpsc::Sender<Failure>,
     candidates: Vec<RTCIceCandidateInit>,
     wake: Arc<tokio::sync::Notify>,
+}
+
+/// One 20 ms PCMU frame of the CEPT ringback tone: 425 Hz, 1 s on, 4 s off.
+fn ringback_frame(frame: u64) -> [u8; 160] {
+    let on = frame % 250 < 50;
+    std::array::from_fn(|i| {
+        let n = (frame * 160 + i as u64) as f64;
+        let level = if on { (2.0 * std::f64::consts::PI * 425.0 * n / 8000.0).sin() * 8000.0 } else { 0.0 };
+        codec::encode(level as i16)
+    })
 }
 
 pub fn capability() -> RTCRtpCodecCapability {
@@ -212,6 +223,7 @@ impl Media {
             connected,
             inbound: Some(inbound),
             audio: None,
+            ringback: None,
             tasks: vec![rtcp],
             audio_ready,
             ready_sender,
@@ -278,10 +290,34 @@ impl Media {
     pub fn audio_ready(&self) -> bool {
         *self.audio_ready.borrow()
     }
+    /// While the callee's phone rings the modem gives no audio, so the phone hears a ringback
+    /// tone generated here until cellular audio replaces it.
+    pub fn start_ringback(&mut self) {
+        if self.audio.is_some() || self.ringback.is_some() {
+            return;
+        }
+        let track = self.audio_track();
+        self.ringback = Some(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(20));
+            for frame in 0u64.. {
+                tick.tick().await;
+                let sample = Sample { data: ringback_frame(frame).to_vec().into(), duration: Duration::from_millis(20), ..Default::default() };
+                if track.write_sample(&sample).await.is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+    pub fn stop_ringback(&mut self) {
+        if let Some(task) = self.ringback.take() {
+            task.abort();
+        }
+    }
     pub fn start_audio(&mut self, recordings: &Arc<super::recordings::Recordings>) -> Result<(), &'static str> {
         if self.audio.is_some() {
             return Ok(());
         }
+        self.stop_ringback();
         let mut bridge = AudioBridge::start()?;
         let recorder=match recordings.start(self.call_id) {
             Ok(sink)=>Some(sink),
@@ -359,6 +395,7 @@ impl Media {
         Ok(())
     }
     pub async fn close(mut self) {
+        self.stop_ringback();
         if let Some(task) = self.audio.take() {
             task.abort();
             let _ = task.await;
@@ -446,6 +483,7 @@ async fn route(peer: &RTCPeerConnection) -> String {
 
 impl Drop for Media {
     fn drop(&mut self) {
+        self.stop_ringback();
         if let Some(task) = self.audio.take() {
             task.abort();
         }
@@ -549,6 +587,64 @@ mod tests {
             .0
             .iter()
             .all(|sample| i16::from_le_bytes(*sample) == codec::decode(codec::encode(1000))));
+        media.close().await;
+        remote.close().await.unwrap();
+    }
+    #[test]
+    fn ringback_is_425_hz_one_second_on_four_off() {
+        let samples = |frame: u64| ringback_frame(frame).into_iter().map(codec::decode).collect::<Vec<i16>>();
+        // On for 50 frames (1 s), silent for the next 200 (4 s), then again.
+        for frame in [0, 25, 49, 250, 299] {
+            let tone = samples(frame);
+            assert_eq!(tone.len(), 160);
+            assert!(tone.iter().map(|s| s.unsigned_abs()).max().unwrap() > 4000, "frame {frame} is silent");
+        }
+        for frame in [50, 150, 249, 300] {
+            assert!(samples(frame).iter().all(|s| s.unsigned_abs() < 16), "frame {frame} is not silent");
+        }
+        // 425 Hz: 850 sign changes in one second of tone.
+        let second: Vec<i16> = (0..50).flat_map(samples).collect();
+        let crossings = second.windows(2).filter(|pair| (pair[0] < 0) != (pair[1] < 0)).count();
+        assert!((845..=855).contains(&crossings), "{crossings} crossings");
+    }
+    #[tokio::test]
+    async fn ringback_reaches_the_phone_until_audio_starts() {
+        let (signals, _signals) = mpsc::channel(64);
+        let (failure, _errors) = mpsc::channel(8);
+        let mut media = Media::new(Uuid::new_v4(), vec![], signals, failure, Arc::new(tokio::sync::Notify::new()))
+            .await
+            .unwrap();
+        let remote = peer(vec![]).await.unwrap();
+        let (heard, mut tone) = mpsc::channel(64);
+        remote.on_track(Box::new(move |track, _, _| {
+            let heard = heard.clone();
+            Box::pin(async move {
+                while let Ok((packet, _)) = track.read_rtp().await {
+                    if heard.send(packet.payload.to_vec()).await.is_err() { return; }
+                }
+            })
+        }));
+        remote
+            .add_transceiver_from_kind(webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Audio, None)
+            .await
+            .unwrap();
+        let mut gathered = media.peer.gathering_complete_promise().await;
+        media.peer.set_local_description(media.peer.create_offer(None).await.unwrap()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), gathered.recv()).await.unwrap();
+        remote.set_remote_description(media.peer.local_description().await.unwrap()).await.unwrap();
+        let mut gathered = remote.gathering_complete_promise().await;
+        remote.set_local_description(remote.create_answer(None).await.unwrap()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), gathered.recv()).await.unwrap();
+        media.peer.set_remote_description(remote.local_description().await.unwrap()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !media.is_connected() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await.unwrap();
+        media.start_ringback();
+        let payload = tokio::time::timeout(Duration::from_secs(5), tone.recv()).await.unwrap().unwrap();
+        assert_eq!(payload, ringback_frame(0).to_vec());
+        media.stop_ringback();
+        while tokio::time::timeout(Duration::from_millis(200), tone.recv()).await.is_ok() {}
+        assert!(tokio::time::timeout(Duration::from_millis(300), tone.recv()).await.is_err(), "ringback kept playing");
         media.close().await;
         remote.close().await.unwrap();
     }

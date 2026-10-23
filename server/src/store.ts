@@ -44,7 +44,7 @@ export class Store {
         phone_id TEXT NOT NULL REFERENCES endpoints(id));`);
     this.transaction(() => {
       const callColumns = this.all<{ name: string }>("PRAGMA table_info(calls)");
-      for (const [name, type] of [["phone_name", "TEXT"], ["phone_model", "TEXT"], ["answered_at", "INTEGER"]]) {
+      for (const [name, type] of [["phone_name", "TEXT"], ["phone_model", "TEXT"], ["answered_at", "INTEGER"], ["alerting", "INTEGER NOT NULL DEFAULT 0"]]) {
         if (!callColumns.some(column => column.name === name)) this.db.exec(`ALTER TABLE calls ADD COLUMN ${name} ${type}`);
       }
       // Older outboxes addressed one phone; preserve each existing delivery during migration.
@@ -274,6 +274,9 @@ export class Store {
     if (!Number.isSafeInteger(body.observedAt) || Number(body.observedAt) < 1 || Number(body.observedAt) > this.now() + 30) throw new Fault(400, "invalid_event_time");
     if (typeof body.mediaReady !== "boolean") throw new Fault(400, "invalid_media_state");
     if (body.mediaReady && state !== "active") throw new Fault(400, "invalid_media_state");
+    // The callee's phone rings: only an outgoing call that is still dialing can say so.
+    if (body.alerting !== undefined && typeof body.alerting !== "boolean") throw new Fault(400, "invalid_alerting");
+    if (body.alerting && state !== "dialing") throw new Fault(400, "invalid_alerting");
     const observedAt = Number(body.observedAt);
     const number = body.number === undefined ? "" : phoneNumber(body.number);
     return this.transaction(() => {
@@ -303,8 +306,9 @@ export class Store {
       }
       const reason = state === "ended" ? text(body.reason, 80) : null;
       if (reason && !/^[a-z0-9_]+$/.test(reason)) throw new Fault(400, "invalid_error_code");
-      this.run("UPDATE calls SET state=?,updated_at=?,event_sequence=?,media_ready=?,reason=?,answered_at=COALESCE(answered_at,?) WHERE id=?",
-        state, this.now(), body.sequence as number, body.mediaReady === true ? 1 : 0, reason, state === "active" ? observedAt : null, id);
+      this.run("UPDATE calls SET state=?,updated_at=?,event_sequence=?,media_ready=?,reason=?,answered_at=COALESCE(answered_at,?),alerting=? WHERE id=?",
+        state, this.now(), body.sequence as number, body.mediaReady === true ? 1 : 0, reason, state === "active" ? observedAt : null,
+        body.alerting === true ? 1 : 0, id);
       this.run("INSERT INTO router_events VALUES(?,?)", endpoint.id, eventId);
       if (state !== "ringing") this.run("UPDATE push_outbox SET status='cancelled' WHERE call_id=? AND status='pending'", id);
       return this.call(id);

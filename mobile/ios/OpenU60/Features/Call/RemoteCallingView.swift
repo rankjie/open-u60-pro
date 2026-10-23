@@ -237,7 +237,7 @@ struct RemoteCallingView: View {
                 if call.connectedDate == nil || !manager.audioConnected || !call.mediaReady {
                     Text(call.state == .active
                          ? (manager.audioConnected && call.mediaReady ? "Connected" : "Connecting audio…")
-                         : call.state.rawValue.capitalized)
+                         : call.progress)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }

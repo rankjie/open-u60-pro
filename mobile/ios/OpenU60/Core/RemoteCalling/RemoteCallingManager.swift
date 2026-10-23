@@ -1,4 +1,5 @@
 import AVFoundation
+import AudioToolbox
 import CallKit
 import Foundation
 import Observation
@@ -36,11 +37,20 @@ struct RemoteCall: Decodable, Identifiable {
     let updatedAt: Int
     let sequence: Int
     var answeredAt: Int? = nil
+    /// An outgoing call whose callee's phone is ringing.
+    var alerting: Bool? = nil
     var phone: CallPhone? = nil
     var id: UUID { callId }
     var connectedDate: Date? {
         guard state == .active, let answeredAt, answeredAt > 0 else { return nil }
         return Date(timeIntervalSince1970: Double(answeredAt))
+    }
+    /// What the call screen says while the call is not connected.
+    var progress: String {
+        switch state {
+        case .dialing: alerting == true ? "Ringing…" : "Calling…"
+        default: state.rawValue.capitalized
+        }
     }
 }
 
@@ -83,6 +93,8 @@ final class RemoteCallingManager: NSObject {
     @ObservationIgnored var localCommandDelivery: (@MainActor ([String:Any], UUID) async throws -> Bool)?
     /// False when the phone cannot reach the router's LAN address (away from home, no VPN).
     @ObservationIgnored var localCommandsPossible: (@MainActor () -> Bool)?
+    /// Played once when the callee picks up an outgoing call.
+    @ObservationIgnored var connectedFeedback: @MainActor () -> Void = { AudioServicesPlaySystemSound(kSystemSoundID_Vibrate) }
     @ObservationIgnored var commandAdmission: (@MainActor ([String:Any], String) async throws -> [String:Any])?
     @ObservationIgnored var deviceConnectionRequest: (@MainActor (String, URL, String, [String:Any]?) async throws -> [String:Any])?
     @ObservationIgnored var onSMSReceived: (@MainActor (UUID, UUID, String?, [String: Any]) -> Void)?
@@ -821,7 +833,9 @@ final class RemoteCallingManager: NSObject {
         if let current = call, current.callId != next.callId { finish(current.callId, reason: .failed) }
         let restoringCall = call?.callId != next.callId && next.state != .ringing
         if call?.callId != next.callId { errorMessage = nil }
+        let pickedUp = call?.callId == next.callId && call?.state == .dialing && next.state == .active
         call = next
+        if pickedUp, next.direction == .outgoing { connectedFeedback() }
         if restoringCall { requestCallPresentation() }
         if next.direction == .incoming, next.state == .ringing, !reported.contains(next.callId) {
             reportIncoming(id: next.callId, number: next.number, expired: false, completion: {})
@@ -983,6 +997,8 @@ final class RemoteCallingManager: NSObject {
         audio.lockForConfiguration()
         defer { audio.unlockForConfiguration() }
         try audio.setConfiguration(RTCAudioSessionConfiguration.webRTC())
+        // iOS silences vibration while the microphone records; the pickup vibration needs it.
+        try AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
     }
     private func registerPushToken() async throws {
         guard let credentials, let pushToken else { return }

@@ -87,6 +87,8 @@ pub struct Worker {
     cleanup: Option<&'static str>,
     modem_seen: bool,
     modem_active: bool,
+    /// The callee's phone ringing has been reported for this outgoing call.
+    callee_ringing: bool,
     physical_id: Option<i64>,
     physical_direction: Option<String>,
     local_commands: mpsc::Receiver<super::LocalCommand>,
@@ -147,6 +149,7 @@ impl Worker {
             cleanup: None,
             modem_seen: false,
             modem_active: false,
+            callee_ringing: false,
             physical_id: None,
             physical_direction: None,
             local_commands,
@@ -603,6 +606,7 @@ impl Worker {
                         self.timeline = Some(Timeline::new(command.call_id));
                         self.modem_seen = false;
                         self.modem_active = false;
+                        self.callee_ringing = false;
                         self.state.call_active.store(true, Ordering::Relaxed);
                         match self.new_media(command.call_id, command.phone.as_ref().map(|phone| phone.id)).await {
                             Ok(()) => {
@@ -861,6 +865,13 @@ impl Worker {
                     }
                     "releasing" => self.finish("remote_hangup").await?,
                     "held" => self.status(Some("call_hold_unsupported")),
+                    "alerting" if !self.callee_ringing && call.state == "dialing" => {
+                        self.callee_ringing = true;
+                        let event = self.journal.alerting(self.manager.unix_time()?)?;
+                        self.send(event).await?;
+                        if let Some(media) = self.media.as_mut() { media.start_ringback(); }
+                        self.mark("callee ringing");
+                    }
                     "dialing" | "alerting" | "incoming" | "waiting" => {}
                     _ => self.status(Some("unknown_modem_call_state")),
                 }

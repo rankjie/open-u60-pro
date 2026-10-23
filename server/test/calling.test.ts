@@ -30,6 +30,19 @@ function fixture(push?: PushProvider) {
 }
 
 describe("call device attribution and connected time", () => {
+  test("an outgoing call reports when the callee's phone rings, and only while dialing", () => {
+    const f = fixture(), callId = randomUUID();
+    f.store.command(f.phone, { requestId: randomUUID(), callId, action: "dial", number: "+12345" });
+    const event = (sequence: number, state: string, extra: Record<string, unknown> = {}) => f.store.event(f.router,
+      { eventId: randomUUID(), callId, sequence, observedAt: 1800000000, mediaReady: state === "active", state, ...extra });
+    expect(snapshot(f.store.call(callId)).alerting).toBe(false);
+    expect(snapshot(event(1, "dialing", { alerting: true })).alerting).toBe(true);
+    expect(() => event(2, "active", { alerting: true })).toThrow("invalid_alerting");
+    expect(() => event(2, "dialing", { alerting: "yes" })).toThrow("invalid_alerting");
+    const active = snapshot(event(2, "active"));
+    expect(active.state).toBe("active");
+    expect(active.alerting).toBe(false);
+  });
   test("dial captures the authenticated phone and preserves the first connected time", () => {
     const f = fixture(), callId = randomUUID();
     const device = { name: "iPhone 16 Pro", model: "iPhone17,1", id: randomUUID() };

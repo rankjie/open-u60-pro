@@ -226,6 +226,23 @@ impl Journal {
         reason: Option<&str>,
         observed_at: u64,
     ) -> Result<Value, String> {
+        self.record(state, media, reason, observed_at, false)
+    }
+    /// The callee's phone rings: a dialing event that says so.
+    pub fn alerting(&mut self, observed_at: u64) -> Result<Value, String> {
+        if self.data.call.as_ref().is_none_or(|call| call.state != "dialing") {
+            return Err("call_not_dialing".into());
+        }
+        self.record("dialing", false, None, observed_at, true)
+    }
+    fn record(
+        &mut self,
+        state: &str,
+        media: bool,
+        reason: Option<&str>,
+        observed_at: u64,
+        alerting: bool,
+    ) -> Result<Value, String> {
         let call = self.data.call.as_mut().ok_or("no_active_call")?;
         call.sequence += 1;
         call.state = state.into();
@@ -233,6 +250,9 @@ impl Journal {
         let mut event = json!({"type":"event", "eventId":Uuid::new_v4(), "callId":call.id,
             "sequence":call.sequence, "state":state,"mediaReady":media,
             "observedAt":observed_at});
+        if alerting {
+            event["alerting"] = json!(true);
+        }
         if let Some(number) = &call.number {
             if !number.is_empty() {
                 event["number"] = json!(number);
@@ -349,6 +369,23 @@ mod tests {
             .acknowledge(event["eventId"].as_str().unwrap())
             .unwrap();
         assert!(Journal::open(&file).unwrap().events().is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn the_callee_ringing_is_a_durable_dialing_event() {
+        let (directory, command) = fixture();
+        let file = directory.join("journal.private.json");
+        let mut journal = Journal::open(&file).unwrap();
+        journal.start(command.call_id, "dialing", command.number, None).unwrap();
+        let plain = journal.event("dialing", false, None, 1800000000).unwrap();
+        assert!(plain.get("alerting").is_none());
+        let event = journal.alerting(1800000003).unwrap();
+        assert_eq!((event["state"].as_str(), event["alerting"].as_bool(), event["sequence"].as_u64()), (Some("dialing"), Some(true), Some(2)));
+        drop(journal);
+        assert_eq!(Journal::open(&file).unwrap().events(), vec![plain, event]);
+        let mut active = Journal::open(&file).unwrap();
+        active.event("active", true, None, 1800000009).unwrap();
+        assert!(active.alerting(1800000010).is_err(), "only a dialing call can report the callee ringing");
         std::fs::remove_dir_all(directory).unwrap();
     }
 }
