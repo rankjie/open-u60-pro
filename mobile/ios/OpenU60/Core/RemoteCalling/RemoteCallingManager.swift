@@ -111,6 +111,10 @@ final class RemoteCallingManager: NSObject {
     @ObservationIgnored private var mediaGeneration: UUID?
     @ObservationIgnored private var lastSignalingReceipt: ContinuousClock.Instant?
     @ObservationIgnored private var requestedMedia: UUID?
+    /// The media request that prepares a ringing call's audio; its refusal is not an error.
+    @ObservationIgnored private var prepareRequest: UUID?
+    /// Each call is prepared at most once; after a refusal or failure the answer negotiates.
+    @ObservationIgnored private var preparedCall: UUID?
     @ObservationIgnored private var relayFallbackCall: UUID?
     @ObservationIgnored private var mediaRecovery: Task<Void, Never>?
     @ObservationIgnored private var managementPeer: (any ManagementPeerConnection)?
@@ -653,6 +657,9 @@ final class RemoteCallingManager: NSObject {
         }
     }
     private func deliverCommand(_ body: [String:Any], id: UUID) async throws {
+        // Answer and dial are what the user waits on. Away from home, probing the LAN address and
+        // opening a P2P channel take seconds; the open socket reaches the router in one hop.
+        if ["answer", "dial"].contains(body["action"] as? String), routerOnline { try await send(body); return }
         guard let localCommandDelivery, let routerID = credentials?.routerId else { try await send(body); return }
         let admission: [String:Any]
         do { admission = try await admit(body, delivery: "local") }
@@ -770,6 +777,10 @@ final class RemoteCallingManager: NSObject {
             else { complete(id, outcome: .failure(CallingError.server(try Self.errorCode(value["error"])))) }
         case "error":
             let code = try Self.errorCode(value["error"])
+            if let raw = value["requestId"] as? String, let id = UUID(uuidString: raw), id == prepareRequest {
+                // A server or router that cannot prepare leaves audio to the answer.
+                prepareRequest = nil; if media == nil { requestedMedia = nil }; break
+            }
             if let raw = value["requestId"] as? String, let id = UUID(uuidString: raw), id == peerSessionID {
                 closeManagementPeer(retry: true); break
             }
@@ -810,10 +821,22 @@ final class RemoteCallingManager: NSObject {
         if next.direction == .incoming, next.state == .ringing, !reported.contains(next.callId) {
             reportIncoming(id: next.callId, number: next.number, expired: false, completion: {})
         }
+        if next.direction == .incoming, next.state == .ringing { try await prepareMedia(next) }
         if next.direction == .incoming || next.state == .active { try await requestMediaIfNeeded(next) }
         if next.direction == .outgoing, next.state == .active && next.mediaReady {
             provider.reportOutgoingCall(with: next.callId, connectedAt: Date())
         }
+    }
+    /// While a call rings, its audio connection is prepared so that answering only has to pick
+    /// up the call. Nothing is heard or sent until CallKit activates audio after the answer.
+    private func prepareMedia(_ call: RemoteCall) async throws {
+        guard routerOnline, media == nil, requestedMedia != call.callId, preparedCall != call.callId else { return }
+        requestedMedia = call.callId
+        preparedCall = call.callId
+        let id = UUID()
+        prepareRequest = id
+        try await send(["type": "media_request", "requestId": id.uuidString.lowercased(),
+                        "callId": call.callId.uuidString.lowercased(), "prepare": true])
     }
     private func requestMediaIfNeeded(_ call: RemoteCall) async throws {
         // Every paired phone rings; only the phone whose answer was admitted owns audio.
@@ -842,7 +865,11 @@ final class RemoteCallingManager: NSObject {
                 self.audioConnected = state == .connected
                 if state == .connected { self.mediaRecovery?.cancel(); self.mediaRecovery = nil }
                 if state == .failed {
-                    self.recoverMedia(id)
+                    // A connection prepared while ringing is simply dropped; answering renegotiates.
+                    if self.call?.state == .ringing {
+                        self.mediaGeneration = nil; self.media?.close(); self.media = nil
+                        self.requestedMedia = nil; self.candidates.removeAll()
+                    } else { self.recoverMedia(id) }
                 }
             })
             guard let media else { throw CallingError.media("peer_creation_failed") }
@@ -1022,16 +1049,21 @@ extension RemoteCallingManager: @preconcurrency CXProviderDelegate {
         // CallKit can answer without changing the call ID or foregrounding our view.
         requestCallPresentation()
         Task {
+            var fulfilled = false
             do {
                 let allowed = await requestMicrophone()
                 guard allowed else { throw CallingError.microphoneDenied }
                 try configureAudioSession()
-                try await command("answer", callId: action.callUUID)
                 guard call?.callId == action.callUUID, !ended.contains(action.callUUID) else { action.fail(); return }
-                action.fulfill()
+                // CallKit activates audio while the router picks up, not after it confirms; a
+                // failed answer then ends the call. Audio not prepared while ringing is requested
+                // once the answer is admitted.
+                action.fulfill(); fulfilled = true
+                if media == nil { requestedMedia = nil }
+                try await command("answer", callId: action.callUUID)
             }
             catch {
-                action.fail()
+                if !fulfilled { action.fail() }
                 if !ended.contains(action.callUUID) {
                     present(error)
                     finish(action.callUUID, reason: .failed)

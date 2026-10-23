@@ -631,6 +631,37 @@ describe("multiple paired phones", () => {
     router.send({ type: "result", requestId: admitted.requestId, callId, ok: true });
     expect((await phones[winner].next("result")).ok).toBe(true);
   });
+  test("a ringing phone prepares audio before answering, and the answer keeps that connection", async () => {
+    const f = fixture(), other = addPhone(f), router = new Peer(f.url, f.routerToken);
+    const phones = [new Peer(f.url, f.phoneToken), new Peer(f.url, other.token)];
+    await router.next("hello"); await Promise.all(phones.map(phone => phone.next("hello")));
+    const callId = randomUUID();
+    router.send({ type: "event", callId, eventId: randomUUID(), sequence: 1, state: "ringing", number: "12345", observedAt: f.store.now(), mediaReady: false });
+    await Promise.all(phones.map(async phone => expect((await phone.next("call")).state).toBe("ringing")));
+    // Only a prepared request is allowed while ringing; it names the phone for the router.
+    phones[1].send({ type: "media_request", callId });
+    expect((await phones[1].next("error")).error).toBe("call_not_claimed");
+    phones[0].send({ type: "media_request", callId, prepare: true });
+    expect(await router.next("media_request")).toMatchObject({ callId, phoneId: f.phone.id });
+    router.send({ type: "signal", callId, description: { type: "offer", sdp: "v=0\r\n" } });
+    expect((await phones[0].next("signal")).description.type).toBe("offer");
+    phones[0].send({ type: "signal", callId, description: { type: "answer", sdp: "v=0\r\n" } });
+    expect((await router.next("signal")).description.type).toBe("answer");
+    phones[0].send({ type: "signal", callId, candidate: { candidate: "candidate:1 1 udp 1 192.0.2.1 9 typ host", sdpMid: "0", sdpMLineIndex: 0 } });
+    expect((await router.next("signal")).candidate.sdpMid).toBe("0");
+    expect(phones[1].queued("signal")).toBe(false);
+    // The other phone cannot join the prepared connection.
+    phones[1].send({ type: "signal", callId, description: { type: "answer", sdp: "v=0\r\n" } });
+    expect((await phones[1].next("error")).error).toBe("call_not_claimed");
+    phones[0].send({ type: "command", requestId: randomUUID(), callId, action: "answer" });
+    await phones[0].next("accepted");
+    expect((await router.next("command")).action).toBe("answer");
+    router.send({ type: "signal", callId, candidate: { candidate: "candidate:2 1 udp 1 192.0.2.2 9 typ host", sdpMid: "0", sdpMLineIndex: 0 } });
+    await phones[0].next("signal");
+    // Once answered, preparing is over: a late prepare is refused.
+    phones[0].send({ type: "media_request", callId, prepare: true });
+    expect((await phones[0].next("error")).error).toBe("call_not_ringing");
+  });
   test("simultaneous HTTP answers persist one winner and one modem operation", async () => {
     const f = fixture(), other = addPhone(f), router = new Peer(f.url, f.routerToken); await router.next("hello");
     const call = ring(f);

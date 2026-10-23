@@ -90,6 +90,10 @@ pub struct Worker {
     physical_id: Option<i64>,
     physical_direction: Option<String>,
     local_commands: mpsc::Receiver<super::LocalCommand>,
+    /// Wakes the loop when media connects, audio starts or modem work finishes, so call setup
+    /// never waits for the next tick.
+    wake: Arc<tokio::sync::Notify>,
+    timeline: Option<Timeline>,
 }
 impl Drop for Worker {
     fn drop(&mut self) {
@@ -146,6 +150,8 @@ impl Worker {
             physical_id: None,
             physical_direction: None,
             local_commands,
+            wake: Arc::new(tokio::sync::Notify::new()),
+            timeline: None,
         })
     }
     pub async fn run(&mut self) -> Result<(), String> {
@@ -162,8 +168,10 @@ impl Worker {
             self.journal.finish()?;
         }
         let mut tick = tokio::time::interval(Duration::from_millis(100));
+        let wake = self.wake.clone();
         loop {
             tokio::select! {
+                _ = wake.notified() => self.tick().await?,
                 _ = self.manager.changed.notified() => return Ok(()),
                 change = resumed.changed() => {
                     change.map_err(|_| "wake_recovery_channel_closed")?;
@@ -189,7 +197,13 @@ impl Worker {
                 error = self.failure_rx.recv() => {
                     let (generation, error) = error.ok_or("media_worker_stopped")?;
                     if self.media.as_ref().is_some_and(|media| media.generation == generation) {
-                        if self.journal.call().is_some() { self.cleanup = Some(error); } self.status(Some(error));
+                        if self.journal.call().is_some_and(|call| call.state == "ringing") {
+                            // Only a prepared connection failed: answering negotiates a new one.
+                            eprintln!("[remote-calling] prepared media failed: {error}");
+                            if let Some(media) = self.media.take() { media.close().await; }
+                        } else {
+                            if self.journal.call().is_some() { self.cleanup = Some(error); } self.status(Some(error));
+                        }
                     }
                 },
                 _ = tick.tick() => self.tick().await?,
@@ -214,6 +228,9 @@ impl Worker {
             .send(value)
             .await
             .map_err(|_| "network_worker_stopped".into())
+    }
+    fn mark(&self, step: &str) {
+        if let Some(timeline) = &self.timeline { timeline.mark(step); }
     }
     fn record_phone(&self, command: &Command) {
         self.status(None);
@@ -244,18 +261,21 @@ impl Worker {
         self.journal.complete(command, value.clone())?;
         self.send(value).await
     }
-    async fn new_media(&mut self, id: Uuid) -> Result<(), String> {
+    async fn new_media(&mut self, id: Uuid, phone: Option<Uuid>) -> Result<(), String> {
         if let Some(media) = self.media.take() {
             media.close().await;
         }
-        let media = Media::new(
+        let mut media = Media::new(
             id,
             self.ice.clone(),
             self.signals.clone(),
             self.failures.clone(),
+            self.wake.clone(),
         )
         .await?;
+        media.phone = phone;
         media.offer(&self.signals).await?;
+        self.mark("media offer sent");
         self.media = Some(media);
         Ok(())
     }
@@ -418,7 +438,10 @@ impl Worker {
             "media_request" => {
                 if let Some(call) = self.journal.call() {
                     if value["callId"].as_str() == Some(call.id.to_string().as_str()) {
-                        if self.new_media(call.id).await.is_err() {
+                        // While ringing, a phone prepares audio so that answering only picks up.
+                        let phone = value["phoneId"].as_str().and_then(|id| Uuid::parse_str(id).ok());
+                        if call.state == "ringing" { self.mark("media prepared for a ringing phone"); }
+                        if self.new_media(call.id, phone).await.is_err() {
                             self.cleanup = Some("media_prepare_failed");
                         } else if call.media_ready {
                             self.event(&call.state, false, None).await?;
@@ -534,10 +557,12 @@ impl Worker {
                 let number = self.journal.call().and_then(|call| call.number);
                 let (tx, rx) = oneshot::channel();
                 self.work = Some(rx);
+                let wake = self.wake.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome =
                         cleanup_modem(&state, id, direction.as_deref(), number.as_deref());
                     let _ = tx.send(Work::Cleanup(outcome));
+                    wake.notify_one();
                 });
             } else {
                 self.finish(reason).await?;
@@ -575,10 +600,11 @@ impl Worker {
                             .start(command.call_id, "dialing", command.number.clone(), line)?;
                         self.record_phone(&command);
                         self.call_started = Instant::now();
+                        self.timeline = Some(Timeline::new(command.call_id));
                         self.modem_seen = false;
                         self.modem_active = false;
                         self.state.call_active.store(true, Ordering::Relaxed);
-                        match self.new_media(command.call_id).await {
+                        match self.new_media(command.call_id, command.phone.as_ref().map(|phone| phone.id)).await {
                             Ok(()) => {
                                 self.waiting = Some((command.clone(), Instant::now()));
                                 Ok(false)
@@ -600,7 +626,10 @@ impl Worker {
                         Err(error)
                     } else {
                         self.record_phone(&command);
-                        if self.media.is_none() && self.new_media(command.call_id).await.is_err() {
+                        self.mark("answer received");
+                        let answering = command.phone.as_ref().map(|phone| phone.id);
+                        let prepared = self.media.as_ref().is_some_and(|media| prepared_for(media.phone, answering));
+                        if !prepared && self.new_media(command.call_id, answering).await.is_err() {
                             self.completed(&command, Err("media_prepare_failed"))
                                 .await?;
                             self.cleanup = Some("media_prepare_failed");
@@ -650,6 +679,7 @@ impl Worker {
             if self.media.as_ref().is_some_and(Media::is_connected) {
                 let command = command.clone();
                 self.waiting = None;
+                self.mark(&format!("media connected; {} submitted", command.action));
                 if let Err(error) = self.execute(command.clone()) {
                     self.completed(&command, Err(error)).await?;
                     self.cleanup = Some(error);
@@ -659,13 +689,16 @@ impl Worker {
         }
         if let Some(call) = self.journal.call() {
             if let Some(media) = self.media.as_mut() {
-                if self.modem_active && media.is_connected() && call.state != "ringing" {
+                if self.modem_active && media.is_connected() && call.state != "ringing" && !media.audio_started() {
                     if let Err(error) = media.start_audio(&self.manager.recordings) {
                         self.cleanup = Some(error);
                         return Ok(());
                     }
+                    if let Some(timeline) = &self.timeline { timeline.mark("audio helper started"); }
                 }
                 if media.audio_ready() && (!call.media_ready || call.state != "active") {
+                    self.mark("cellular audio flowing; active reported");
+                    self.timeline = None;
                     self.event("active", true, None).await?;
                 }
             }
@@ -674,12 +707,14 @@ impl Worker {
             }
         }
         if Instant::now() >= self.next_poll {
-            self.next_poll = Instant::now() + Duration::from_secs(2);
+            self.next_poll = Instant::now() + poll_interval(self.journal.call().map(|call| call.state).as_deref(), self.modem_active);
             let state = self.state.clone();
             let (tx, rx) = oneshot::channel();
             self.work = Some(rx);
+            let wake = self.wake.clone();
             tokio::task::spawn_blocking(move || {
                 let _ = tx.send(Work::Status(read_calls(&state)));
+                wake.notify_one();
             });
         }
         Ok(())
@@ -701,9 +736,11 @@ impl Worker {
         let (tx, rx) = oneshot::channel();
         self.work = Some(rx);
         self.inflight = Some(command.clone());
+        let wake = self.wake.clone();
         tokio::task::spawn_blocking(move || {
             let (outcome, submitted) = execute(&state, &command, &cancelled, expected_line.as_ref());
             let _ = tx.send(Work::Command(command, outcome, submitted));
+            wake.notify_one();
         });
         Ok(())
     }
@@ -724,6 +761,9 @@ impl Worker {
                 self.completed(&command, outcome).await?;
                 if outcome.is_err() && command.action != "dtmf" {
                     self.cleanup = Some("modem_command_failed");
+                }
+                if outcome.is_ok() && matches!(command.action.as_str(), "answer" | "dial") {
+                    self.mark(&format!("{} acknowledged by the modem", command.action));
                 }
                 if outcome.is_ok() && command.action == "answer" {
                     self.event("answering", false, None).await?;
@@ -779,8 +819,10 @@ impl Worker {
                         self.physical_id = Some(id);
                         self.physical_direction = Some(direction.into());
                         self.call_started = Instant::now();
+                        self.timeline = Some(Timeline::new(self.journal.call().map_or(Uuid::nil(), |call| call.id)));
                         self.state.call_active.store(true, Ordering::Relaxed);
                         self.event("ringing", false, None).await?;
+                        self.mark("ringing reported");
                     } else {
                         self.state.call_active.store(true, Ordering::Relaxed);
                         self.status(Some("unmanaged_modem_call"));
@@ -801,13 +843,16 @@ impl Worker {
                 self.physical_id = Some(id);
                 self.physical_direction = Some(direction.into());
                 self.modem_seen = true;
+                if state == "active" && !self.modem_active { self.mark("modem reports the call active"); }
                 self.modem_active = state == "active";
                 match state {
                     "active" => {
                         if let Some(media) = self.media.as_mut() {
-                            if media.is_connected() {
+                            if media.is_connected() && !media.audio_started() {
                                 if let Err(error) = media.start_audio(&self.manager.recordings) {
                                     self.cleanup = Some(error);
+                                } else if let Some(timeline) = &self.timeline {
+                                    timeline.mark("audio helper started");
                                 }
                             }
                         } else if self.call_started.elapsed() > Duration::from_secs(15) {
@@ -825,6 +870,8 @@ impl Worker {
     }
     async fn finish(&mut self, reason: &'static str) -> Result<(), String> {
         self.cleanup = None;
+        self.mark(&format!("ended: {reason}"));
+        self.timeline = None;
         let recording_id=self.journal.call().map(|call|call.id);
         if let Some((command, _)) = self.waiting.take() {
             self.completed(&command, Err("call_ended")).await?;
@@ -913,6 +960,35 @@ impl Worker {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+}
+
+/// Call setup steps with their time since the call began, so a slow setup names its stage.
+struct Timeline {
+    call: Uuid,
+    started: Instant,
+}
+impl Timeline {
+    fn new(call: Uuid) -> Self {
+        Timeline { call, started: Instant::now() }
+    }
+    fn mark(&self, step: &str) {
+        eprintln!("[calling-timeline] {} +{} ms {step}", self.call, self.started.elapsed().as_millis());
+    }
+}
+
+/// A connection prepared while ringing is kept only for the phone that prepared it.
+fn prepared_for(prepared: Option<Uuid>, answering: Option<Uuid>) -> bool {
+    prepared.is_some() && prepared == answering
+}
+
+/// How soon the modem is asked about calls again: quickly while a call is being set up or
+/// rung, so ringing, answering and pickup are noticed within a quarter second.
+fn poll_interval(call: Option<&str>, modem_active: bool) -> Duration {
+    match call {
+        None => Duration::from_secs(1),
+        Some(_) if modem_active => Duration::from_secs(1),
+        Some(_) => Duration::from_millis(250),
     }
 }
 
@@ -1196,6 +1272,25 @@ mod tests {
             assert_eq!(until_resume(&mut resumed, async { 42 }).await, Ok(42));
         }
     }
+    #[test]
+    fn only_the_phone_that_prepared_audio_reuses_it_when_answering() {
+        let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+        assert!(prepared_for(Some(first), Some(first)));
+        assert!(!prepared_for(Some(first), Some(second)));
+        assert!(!prepared_for(Some(first), None));
+        assert!(!prepared_for(None, None));
+        assert!(!prepared_for(None, Some(first)));
+    }
+
+    #[test]
+    fn the_modem_is_polled_quickly_only_while_a_call_is_being_set_up() {
+        assert_eq!(poll_interval(None, false), Duration::from_secs(1));
+        for state in ["ringing", "answering", "dialing"] {
+            assert_eq!(poll_interval(Some(state), false), Duration::from_millis(250), "{state}");
+        }
+        assert_eq!(poll_interval(Some("active"), true), Duration::from_secs(1));
+    }
+
     #[test]
     fn cancellation_preserves_a_different_call_waiting_for_media() {
         let id = Uuid::new_v4();

@@ -185,7 +185,9 @@ fn busy_check(state: &Arc<AppState>) -> Box<dyn Fn() -> Option<&'static str> + S
             // the app stopped polling call_status. Fail closed: only a
             // complete "no calls" reply clears the flag; an empty, partial
             // or ERROR reply keeps deferring (the policies retry in 60 s).
-            match at_cmd::send(&state.at_port, "AT+CLCC", 2) {
+            // The direct exchange returns at the final result instead of holding the AT
+            // lock for a fixed window, which would delay a remote call's ATA or ATD.
+            match at_cmd::send_cancellable(&state.at_port, "AT+CLCC", 2, &std::sync::atomic::AtomicBool::new(false)) {
                 Ok(resp) if clcc_confirms_idle(&resp) => {
                     state.call_active.store(false, Ordering::Relaxed)
                 }

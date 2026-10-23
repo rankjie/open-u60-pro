@@ -28,6 +28,8 @@ pub type Failure = (Uuid, &'static str);
 pub struct Media {
     pub generation: Uuid,
     pub call_id: Uuid,
+    /// The phone this connection was negotiated with, when known.
+    pub phone: Option<Uuid>,
     pub peer: Arc<RTCPeerConnection>,
     track: Arc<TrackLocalStaticSample>,
     connected: watch::Receiver<RTCPeerConnectionState>,
@@ -38,6 +40,7 @@ pub struct Media {
     ready_sender: watch::Sender<bool>,
     failure: mpsc::Sender<Failure>,
     candidates: Vec<RTCIceCandidateInit>,
+    wake: Arc<tokio::sync::Notify>,
 }
 
 pub fn capability() -> RTCRtpCodecCapability {
@@ -87,6 +90,7 @@ impl Media {
         ice_servers: Vec<RTCIceServer>,
         signals: mpsc::Sender<Value>,
         failure: mpsc::Sender<Failure>,
+        wake: Arc<tokio::sync::Notify>,
     ) -> Result<Self, &'static str> {
         let generation = Uuid::new_v4();
         let peer = peer(ice_servers).await?;
@@ -105,11 +109,14 @@ impl Media {
         });
         let (connected_sender, connected) = watch::channel(RTCPeerConnectionState::New);
         let callback_failure = failure.clone();
+        let callback_wake = wake.clone();
         peer.on_peer_connection_state_change(Box::new(move |state| {
             let sender = connected_sender.clone();
             let failure = callback_failure.clone();
+            let wake = callback_wake.clone();
             Box::pin(async move {
                 let _ = sender.send(state);
+                wake.notify_one();
                 if state == RTCPeerConnectionState::Failed {
                     let _ = failure.send((generation, "media_connection_failed")).await;
                 }
@@ -189,6 +196,7 @@ impl Media {
         Ok(Self {
             generation,
             call_id,
+            phone: None,
             peer,
             track,
             connected,
@@ -199,6 +207,7 @@ impl Media {
             ready_sender,
             failure,
             candidates: Vec::new(),
+            wake,
         })
     }
     pub async fn offer(&self, signals: &mpsc::Sender<Value>) -> Result<(), &'static str> {
@@ -253,6 +262,9 @@ impl Media {
     pub fn is_connected(&self) -> bool {
         *self.connected.borrow() == RTCPeerConnectionState::Connected
     }
+    pub fn audio_started(&self) -> bool {
+        self.audio.is_some()
+    }
     pub fn audio_ready(&self) -> bool {
         *self.audio_ready.borrow()
     }
@@ -271,7 +283,7 @@ impl Media {
         let ready = self.ready_sender.clone();
         let failure = self.failure.clone();
         let generation = self.generation;
-        let (peer, call_id) = (self.peer.clone(), self.call_id);
+        let (peer, call_id, wake) = (self.peer.clone(), self.call_id, self.wake.clone());
         self.audio = Some(tokio::spawn(async move {
             let outcome=async {
                 let mut packet=[0;8201];
@@ -302,7 +314,7 @@ impl Media {
                                     let started=Instant::now();
                                     track.write_sample(&Sample {data:data.into(),duration:Duration::from_millis(20),..Default::default()}).await.map_err(|_| "audio_send_failed")?;
                                     stats.sent(started.elapsed());
-                                    if first {first=false;let _=ready.send(true);}
+                                    if first {first=false;let _=ready.send(true);wake.notify_one();}
                                 }
                             }
                         }
@@ -465,7 +477,7 @@ mod tests {
         use webrtc::rtp::{packet::Packet, header::Header};
         let (signals, _signals) = mpsc::channel(64);
         let (failure, mut errors) = mpsc::channel(8);
-        let mut media = Media::new(Uuid::new_v4(), vec![], signals, failure)
+        let mut media = Media::new(Uuid::new_v4(), vec![], signals, failure, Arc::new(tokio::sync::Notify::new()))
             .await
             .unwrap();
         let remote = peer(vec![]).await.unwrap();

@@ -40,6 +40,7 @@ import WebRTC
             expect(f.manager.callPresentationRequest == request, "a repeated ringing snapshot must not replace the answer navigation request")
             f.permission?.resume(returning: true); f.permission = nil
             try await wait { action.fulfilled }
+            try await wait { f.socket.messages.contains { $0["action"] as? String == "answer" } }
             expect((f.socket.messages.first { $0["action"] as? String == "answer" })?["device"] as? [String:String]
                    == ["name":"iPhone 16 Pro","model":"iPhone17,1"], "the actual answering phone must accompany its admitted answer")
             f.manager.requestCallPresentation()
@@ -118,18 +119,72 @@ import WebRTC
             expect(!f.socket.messages.contains { $0["action"] as? String == "dial" || $0["action"] as? String == "hangup" }, "media recovery must neither redial nor hang up the existing call")
             f.manager.disconnect()
         }
+        func mediaRequests(_ f: Fixture) -> [[String: Any]] { f.socket.messages.filter { $0["type"] as? String == "media_request" } }
         do {
             let f = Fixture(); let id = UUID()
             try await f.connect(calls: [f.snapshot(id, state: "ringing")])
+            try await wait { mediaRequests(f).count == 1 }
+            expect(mediaRequests(f)[0]["prepare"] as? Bool == true, "a ringing phone must prepare audio before the user answers")
             f.socket.emit(f.snapshot(id, state: "ringing", sequence: 2))
             try await wait { f.manager.call?.sequence == 2 }
-            expect(!f.socket.messages.contains { $0["type"] as? String == "media_request" },
-                   "ringing phones must not negotiate audio before one wins the answer")
-            f.socket.emit(f.snapshot(id, state: "answering", sequence: 2))
-            try await wait { f.socket.messages.contains { $0["type"] as? String == "media_request" } }
-            expect(f.socket.messages.filter { $0["type"] as? String == "media_request" }.count == 1,
-                   "the admitted answer must request exactly one peer")
+            f.offer(id); try await wait { f.media.count == 1 }
+            f.media[0].changed(.connected)
+            f.manager.provider(f.provider, perform: TestAnswerAction(call: id))
+            try await wait { f.socket.messages.contains { $0["action"] as? String == "answer" } }
+            f.socket.emit(f.snapshot(id, state: "answering", sequence: 3))
+            try await wait { f.manager.call?.sequence == 3 }
+            expect(mediaRequests(f).count == 1 && f.media.count == 1 && !f.media[0].closed,
+                   "answering must keep the prepared connection instead of negotiating again")
             f.manager.disconnect()
+        }
+        do {
+            let f = Fixture(); let id = UUID()
+            try await f.connect(calls: [f.snapshot(id, state: "ringing")])
+            try await wait { mediaRequests(f).count == 1 }
+            f.socket.emit(["type":"error","requestId":mediaRequests(f)[0]["requestId"]!,"error":"call_not_claimed"])
+            f.socket.emit(f.snapshot(id, state: "ringing", sequence: 2))
+            try await wait { f.manager.call?.sequence == 2 }
+            expect(f.manager.errorMessage == nil, "a server that cannot prepare audio must not show an error")
+            f.manager.provider(f.provider, perform: TestAnswerAction(call: id))
+            try await wait { f.socket.messages.contains { $0["action"] as? String == "answer" } }
+            f.socket.emit(f.snapshot(id, state: "answering", sequence: 3))
+            try await wait { mediaRequests(f).count == 2 }
+            expect(mediaRequests(f)[1]["prepare"] == nil, "without prepared audio the admitted answer must request it")
+            f.manager.disconnect()
+        }
+        do {
+            let f = Fixture(); let id = UUID()
+            try await f.connect(calls: [f.snapshot(id, state: "ringing")])
+            try await wait { mediaRequests(f).count == 1 }
+            f.offer(id); try await wait { f.media.count == 1 }
+            f.media[0].changed(.failed)
+            try await Task.sleep(for: .milliseconds(50))
+            expect(f.media[0].closed && f.manager.call?.callId == id && mediaRequests(f).count == 1
+                   && !f.socket.messages.contains { $0["action"] as? String == "hangup" },
+                   "a prepared connection that fails while ringing must be dropped without ending the call")
+            f.manager.provider(f.provider, perform: TestAnswerAction(call: id))
+            try await wait { f.socket.messages.contains { $0["action"] as? String == "answer" } }
+            f.socket.emit(f.snapshot(id, state: "answering", sequence: 2))
+            try await wait { mediaRequests(f).count == 2 }
+            f.manager.disconnect()
+        }
+        do {
+            let f = Fixture(); let id = UUID()
+            try await f.connect(calls: [f.snapshot(id, state: "ringing")])
+            try await wait { mediaRequests(f).count == 1 }
+            var probed = false
+            f.manager.commandAdmission = { _, _ in probed = true; return [:] }
+            f.manager.localCommandDelivery = { _, _ in probed = true; return false }
+            f.socket.holdSends = true
+            let action = TestAnswerAction(call: id)
+            f.manager.provider(f.provider, perform: action)
+            try await wait { action.fulfilled }
+            expect(!f.socket.messages.contains { $0["action"] as? String == "answer" },
+                   "CallKit must activate audio before the router confirms the answer")
+            f.socket.holdSends = false; f.socket.blockedSend?.resume(); f.socket.blockedSend = nil
+            try await wait { f.socket.messages.contains { $0["action"] as? String == "answer" } }
+            expect(!probed, "an answer must go over the open socket, not wait for LAN or P2P probes")
+            f.manager.commandAdmission = nil; f.manager.localCommandDelivery = nil; f.manager.disconnect()
         }
         do {
             let f = Fixture(); let id = UUID(); try await f.start(id)

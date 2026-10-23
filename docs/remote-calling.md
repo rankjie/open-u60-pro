@@ -220,6 +220,20 @@ for a media connection before submitting ATD or ATA. The audio helper starts
 only when the modem reports an active call. An active call is advertised with
 `mediaReady=true` only after actual PCM arrives from that helper.
 
+While an incoming call rings, each phone asks once to prepare its audio
+(`media_request` with `prepare: true`). The server routes the router's offer to that phone
+until an answer names the call's phone, so ICE, TURN and DTLS complete during ringing.
+Preparing never touches the modem: ATA is sent only for an answer command, which the phone
+sends only when the user answers, and the audio helper starts only once the modem reports
+the call active, so the caller keeps hearing ringback. An answer from the preparing phone
+reuses the connection and goes straight to ATA; any other phone, or a failed preparation,
+negotiates after the answer as before. The phone sends answer and dial over its open
+signaling socket instead of probing LAN and P2P first, and fulfils the CallKit answer
+before the router confirms, so iOS activates audio while the modem picks up. The router
+polls the modem every 250 ms while a call is being set up (1 s otherwise) and wakes on
+media and modem events instead of its 100 ms tick. Each step is logged as
+`[calling-timeline] <call> +<ms> ms <step>`, from ringing or dialing to audio flowing.
+
 Each call and command has a stable UUID. The server persists a command before
 sending it. The agent persists its execution journal before touching the modem.
 The server includes the original 20-second expiry on every delivery. Retries keep
