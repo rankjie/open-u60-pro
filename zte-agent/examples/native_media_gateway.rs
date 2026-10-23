@@ -56,7 +56,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut signals) = mpsc::channel(64);
     let (failure, mut errors) = mpsc::channel(8);
     let id = Uuid::new_v4();
-    let peer = media::Media::new(id, vec![], tx.clone(), failure, Arc::new(tokio::sync::Notify::new())).await?;
+    let peer = media::Media::new(id, vec![], tx.clone(), failure, Arc::new(tokio::sync::Notify::new()), None).await?;
     let received = Arc::new(AtomicU64::new(0));
     let counter = received.clone();
     peer.peer.on_track(Box::new(move |track, _, _| {

@@ -89,6 +89,8 @@ pub struct Worker {
     modem_active: bool,
     /// The callee's phone ringing has been reported for this outgoing call.
     callee_ringing: bool,
+    /// Connections prepared by ringing phones, by phone, until one answers.
+    prepared: HashMap<Uuid, Media>,
     physical_id: Option<i64>,
     physical_direction: Option<String>,
     local_commands: mpsc::Receiver<super::LocalCommand>,
@@ -150,6 +152,7 @@ impl Worker {
             modem_seen: false,
             modem_active: false,
             callee_ringing: false,
+            prepared: HashMap::new(),
             physical_id: None,
             physical_direction: None,
             local_commands,
@@ -199,7 +202,10 @@ impl Worker {
                 },
                 error = self.failure_rx.recv() => {
                     let (generation, error) = error.ok_or("media_worker_stopped")?;
-                    if self.media.as_ref().is_some_and(|media| media.generation == generation) {
+                    if let Some(phone) = self.prepared.iter().find(|(_, media)| media.generation == generation).map(|(phone, _)| *phone) {
+                        eprintln!("[remote-calling] prepared media failed: {error}");
+                        if let Some(media) = self.prepared.remove(&phone) { media.close().await; }
+                    } else if self.media.as_ref().is_some_and(|media| media.generation == generation) {
                         if self.journal.call().is_some_and(|call| call.state == "ringing") {
                             // Only a prepared connection failed: answering negotiates a new one.
                             eprintln!("[remote-calling] prepared media failed: {error}");
@@ -268,19 +274,19 @@ impl Worker {
         if let Some(media) = self.media.take() {
             media.close().await;
         }
-        let mut media = Media::new(
-            id,
-            self.ice.clone(),
-            self.signals.clone(),
-            self.failures.clone(),
-            self.wake.clone(),
-        )
-        .await?;
-        media.phone = phone;
+        self.media = Some(self.offer_media(id, phone).await?);
+        Ok(())
+    }
+    async fn offer_media(&self, id: Uuid, phone: Option<Uuid>) -> Result<Media, String> {
+        let media = Media::new(id, self.ice.clone(), self.signals.clone(), self.failures.clone(), self.wake.clone(), phone).await?;
         media.offer(&self.signals).await?;
         self.mark("media offer sent");
-        self.media = Some(media);
-        Ok(())
+        Ok(media)
+    }
+    async fn close_prepared(&mut self) {
+        for (_, media) in self.prepared.drain() {
+            media.close().await;
+        }
     }
     async fn message(&mut self, value: Value) -> Result<(), String> {
         match value["type"].as_str().ok_or("invalid_server_message")? {
@@ -429,12 +435,22 @@ impl Worker {
                 }
             }
             "signal" => {
-                if let Some(media) = self.media.as_mut() {
-                    if value["callId"].as_str() == Some(media.call_id.to_string().as_str()) {
-                        if let Err(error) = media.signal(&value).await {
-                            self.cleanup = Some(error);
-                            self.status(Some(error));
-                        }
+                let phone = value["phoneId"].as_str().and_then(|id| Uuid::parse_str(id).ok());
+                let call = value["callId"].as_str();
+                if let Some(media) = self.media.as_mut().filter(|media| {
+                    call == Some(media.call_id.to_string().as_str()) && (phone.is_none() || phone == media.phone)
+                }) {
+                    if let Err(error) = media.signal(&value).await {
+                        self.cleanup = Some(error);
+                        self.status(Some(error));
+                    }
+                } else if let Some(phone) = phone.filter(|phone| {
+                    self.prepared.get(phone).is_some_and(|media| call == Some(media.call_id.to_string().as_str()))
+                }) {
+                    // A ringing phone's prepared connection failing leaves that phone to negotiate on answer.
+                    if let Err(error) = self.prepared.get_mut(&phone).expect("prepared media").signal(&value).await {
+                        eprintln!("[remote-calling] prepared media failed: {error}");
+                        if let Some(media) = self.prepared.remove(&phone) { media.close().await; }
                     }
                 }
             }
@@ -443,8 +459,15 @@ impl Worker {
                     if value["callId"].as_str() == Some(call.id.to_string().as_str()) {
                         // While ringing, a phone prepares audio so that answering only picks up.
                         let phone = value["phoneId"].as_str().and_then(|id| Uuid::parse_str(id).ok());
-                        if call.state == "ringing" { self.mark("media prepared for a ringing phone"); }
-                        if self.new_media(call.id, phone).await.is_err() {
+                        if let Some(phone) = phone.filter(|_| call.state == "ringing") {
+                            // Every ringing phone keeps its own, so whichever answers only picks up.
+                            self.mark("media prepared for a ringing phone");
+                            if let Some(media) = self.prepared.remove(&phone) { media.close().await; }
+                            match self.offer_media(call.id, Some(phone)).await {
+                                Ok(media) => { self.prepared.insert(phone, media); }
+                                Err(error) => eprintln!("[remote-calling] prepared media failed: {error}"),
+                            }
+                        } else if self.new_media(call.id, phone).await.is_err() {
                             self.cleanup = Some("media_prepare_failed");
                         } else if call.media_ready {
                             self.event(&call.state, false, None).await?;
@@ -553,6 +576,7 @@ impl Worker {
             if let Some(media) = self.media.take() {
                 media.close().await;
             }
+            self.close_prepared().await;
             if self.physical_direction.is_some() {
                 let state = self.state.clone();
                 let id = self.physical_id;
@@ -632,7 +656,12 @@ impl Worker {
                         self.record_phone(&command);
                         self.mark("answer received");
                         let answering = command.phone.as_ref().map(|phone| phone.id);
-                        let prepared = self.media.as_ref().is_some_and(|media| prepared_for(media.phone, answering));
+                        let (kept, others) = claim_prepared(&mut self.prepared, answering);
+                        for media in others { media.close().await; }
+                        let prepared = kept.is_some();
+                        if let Some(media) = kept {
+                            if let Some(previous) = self.media.replace(media) { previous.close().await; }
+                        }
                         if !prepared && self.new_media(command.call_id, answering).await.is_err() {
                             self.completed(&command, Err("media_prepare_failed"))
                                 .await?;
@@ -900,6 +929,7 @@ impl Worker {
         if let Some(media) = self.media.take() {
             media.close().await;
         }
+        self.close_prepared().await;
         if let Some(id)=recording_id {self.manager.recordings.stop(id);}
         self.physical_id = None;
         self.physical_direction = None;
@@ -931,6 +961,7 @@ impl Worker {
         if let Some(media) = self.media.take() {
             media.close().await;
         }
+        self.close_prepared().await;
         // Keep the owner alive until a submitted AT command has returned. Dropping
         // a spawn_blocking receiver does not cancel its modem side effect.
         let mut failure = None;
@@ -994,9 +1025,10 @@ impl Timeline {
     }
 }
 
-/// A connection prepared while ringing is kept only for the phone that prepared it.
-fn prepared_for(prepared: Option<Uuid>, answering: Option<Uuid>) -> bool {
-    prepared.is_some() && prepared == answering
+/// On answer the answering phone's prepared connection is kept; every other one is closed.
+fn claim_prepared<T>(prepared: &mut HashMap<Uuid, T>, answering: Option<Uuid>) -> (Option<T>, Vec<T>) {
+    let kept = answering.and_then(|phone| prepared.remove(&phone));
+    (kept, prepared.drain().map(|(_, media)| media).collect())
 }
 
 /// How soon the modem is asked about calls again: quickly while a call is being set up or
@@ -1290,13 +1322,19 @@ mod tests {
         }
     }
     #[test]
-    fn only_the_phone_that_prepared_audio_reuses_it_when_answering() {
-        let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
-        assert!(prepared_for(Some(first), Some(first)));
-        assert!(!prepared_for(Some(first), Some(second)));
-        assert!(!prepared_for(Some(first), None));
-        assert!(!prepared_for(None, None));
-        assert!(!prepared_for(None, Some(first)));
+    fn the_answering_phone_keeps_its_prepared_audio_and_the_others_are_closed() {
+        let (first, second, third) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let ring = || HashMap::from([(first, "first"), (second, "second")]);
+        let mut prepared = ring();
+        let (kept, closed) = claim_prepared(&mut prepared, Some(second));
+        assert_eq!((kept, closed), (Some("second"), vec!["first"]));
+        assert!(prepared.is_empty());
+        for answering in [Some(third), None] {
+            let mut prepared = ring();
+            let (kept, mut closed) = claim_prepared(&mut prepared, answering);
+            closed.sort();
+            assert_eq!((kept, closed), (None, vec!["first", "second"]));
+        }
     }
 
     #[test]

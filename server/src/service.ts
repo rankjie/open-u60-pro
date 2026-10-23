@@ -21,8 +21,8 @@ export interface ServiceOptions {
 export class CallingService {
   readonly server: Server<SocketData>;
   private sockets = new Map<string, ServerWebSocket<SocketData>>();
-  /** Ringing calls whose audio a phone prepared before answering: call ID → phone ID. */
-  private prepared = new Map<string, string>();
+  /** Ringing calls whose audio phones prepared before answering: call ID → phone IDs. */
+  private prepared = new Map<string, Set<string>>();
   private buckets = new Map<string, { count: number; until: number }>();
   private pushing = new Set<string>();
   private maintenance?: ReturnType<typeof setInterval>;
@@ -302,14 +302,23 @@ export class CallingService {
         }
         case "signal": {
           const callId = uuid(body.callId);
-          const call = this.store.authorizeCall(endpoint, callId, endpoint.role === "phone" && this.prepared.get(callId) === endpoint.id);
+          const preparing = this.prepared.get(callId);
+          const call = this.store.authorizeCall(endpoint, callId, endpoint.role === "phone" && !!preparing?.has(endpoint.id));
           if (call.state === "ended") throw new Fault(409, "call_ended");
           const message = signal(body);
           if (message.description && ((endpoint.role === "router") !== (message.description.type === "offer"))) throw new Fault(400, "invalid_sdp_direction");
-          // Before an answer names the call's phone, the router's offer goes to the phone preparing it.
-          const target = endpoint.role === "router" ? call.phone_id || this.prepared.get(call.id) : call.router_id;
+          // Every ringing phone may prepare its own connection, so the router names the phone.
+          // A router that does not falls back to the answering, then the latest preparing phone.
+          let target: string | undefined;
+          if (endpoint.role === "phone") target = call.router_id;
+          else if (body.phoneId === undefined) target = call.phone_id || [...(preparing ?? [])].at(-1);
+          else {
+            const phone = uuid(body.phoneId);
+            if (phone !== call.phone_id && !(call.state === "ringing" && preparing?.has(phone))) throw new Fault(409, "phone_not_preparing");
+            target = phone;
+          }
           if (!target || !this.sockets.has(target)) throw new Fault(503, "peer_offline");
-          this.send(target, message); return;
+          this.send(target, endpoint.role === "phone" ? { ...message, phoneId: endpoint.id } : message); return;
         }
         case "media_request": {
           if (endpoint.role !== "phone") throw new Fault(403, "phone_required");
@@ -320,7 +329,7 @@ export class CallingService {
           if (call.state === "ended") throw new Fault(409, "call_ended");
           if (prepare && (call.direction !== "incoming" || call.state !== "ringing")) throw new Fault(409, "call_not_ringing");
           if (!this.sockets.has(call.router_id)) throw new Fault(503, "router_offline");
-          if (prepare) this.prepared.set(call.id, endpoint.id);
+          if (prepare) this.prepared.set(call.id, (this.prepared.get(call.id) ?? new Set()).add(endpoint.id));
           this.refreshICE(call, endpoint.id);
           this.send(call.router_id, { type: "media_request", callId: call.id, phoneId: endpoint.id }); return;
         }

@@ -125,6 +125,7 @@ impl Media {
         signals: mpsc::Sender<Value>,
         failure: mpsc::Sender<Failure>,
         wake: Arc<tokio::sync::Notify>,
+        phone: Option<Uuid>,
     ) -> Result<Self, &'static str> {
         let generation = Uuid::new_v4();
         let peer = peer(ice_servers).await?;
@@ -161,9 +162,9 @@ impl Media {
             Box::pin(async move {
                 if let Some(candidate) = candidate {
                     if let Ok(candidate) = candidate.to_json() {
-                        let _ = signals
-                            .send(json!({"type":"signal","callId":call_id,"candidate":candidate}))
-                            .await;
+                        let mut value = json!({"type":"signal","callId":call_id,"candidate":candidate});
+                        if let Some(phone) = phone { value["phoneId"] = json!(phone); }
+                        let _ = signals.send(value).await;
                     }
                 }
             })
@@ -230,7 +231,7 @@ impl Media {
         Ok(Self {
             generation,
             call_id,
-            phone: None,
+            phone,
             peer,
             track,
             connected,
@@ -257,10 +258,9 @@ impl Media {
             .set_local_description(offer.clone())
             .await
             .map_err(|_| "offer_set")?;
-        signals
-            .send(json!({"type":"signal","callId":self.call_id,"description":offer}))
-            .await
-            .map_err(|_| "signaling_closed")
+        let mut value = json!({"type":"signal","callId":self.call_id,"description":offer});
+        if let Some(phone) = self.phone { value["phoneId"] = json!(phone); }
+        signals.send(value).await.map_err(|_| "signaling_closed")
     }
     pub async fn signal(&mut self, value: &Value) -> Result<(), &'static str> {
         if let Some(description) = value.get("description") {
@@ -596,7 +596,7 @@ mod tests {
         use webrtc::rtp::{packet::Packet, header::Header};
         let (signals, _signals) = mpsc::channel(64);
         let (failure, mut errors) = mpsc::channel(8);
-        let mut media = Media::new(Uuid::new_v4(), vec![], signals, failure, Arc::new(tokio::sync::Notify::new()))
+        let mut media = Media::new(Uuid::new_v4(), vec![], signals, failure, Arc::new(tokio::sync::Notify::new()), None)
             .await
             .unwrap();
         let remote = peer(vec![]).await.unwrap();
@@ -678,6 +678,24 @@ mod tests {
         let crossings = second.windows(2).filter(|pair| (pair[0] < 0) != (pair[1] < 0)).count();
         assert!((845..=855).contains(&crossings), "{crossings} crossings");
     }
+    #[tokio::test]
+    async fn every_signal_names_the_phone_it_is_for() {
+        let (signals, mut sent) = mpsc::channel(64);
+        let (failure, _errors) = mpsc::channel(8);
+        let phone = Uuid::new_v4();
+        let media = Media::new(Uuid::new_v4(), vec![], signals.clone(), failure, Arc::new(tokio::sync::Notify::new()), Some(phone))
+            .await
+            .unwrap();
+        media.offer(&signals).await.unwrap();
+        let (mut offer, mut candidate) = (false, false);
+        while let Ok(Some(value)) = tokio::time::timeout(Duration::from_secs(2), sent.recv()).await {
+            assert_eq!(value["phoneId"], json!(phone), "{value}");
+            offer |= value.get("description").is_some();
+            candidate |= value.get("candidate").is_some();
+        }
+        assert!(offer && candidate);
+        media.close().await;
+    }
     #[test]
     fn only_audible_early_audio_is_forwarded() {
         // A modem path that is not yet carrying a call returns zeros as fast as it is read.
@@ -693,7 +711,7 @@ mod tests {
     async fn ringback_reaches_the_phone_until_audio_starts() {
         let (signals, _signals) = mpsc::channel(64);
         let (failure, _errors) = mpsc::channel(8);
-        let mut media = Media::new(Uuid::new_v4(), vec![], signals, failure, Arc::new(tokio::sync::Notify::new()))
+        let mut media = Media::new(Uuid::new_v4(), vec![], signals, failure, Arc::new(tokio::sync::Notify::new()), None)
             .await
             .unwrap();
         let remote = peer(vec![]).await.unwrap();

@@ -61,7 +61,7 @@ async fn peer(
     failed: &mpsc::Sender<media::Failure>,
     rx: Arc<AtomicU64>,
 ) -> Result<media::Media, &'static str> {
-    let value = media::Media::new(id, servers.to_vec(), tx.clone(), failed.clone(), Arc::new(tokio::sync::Notify::new()))
+    let value = media::Media::new(id, servers.to_vec(), tx.clone(), failed.clone(), Arc::new(tokio::sync::Notify::new()), None)
         .await
         .map_err(|code| {
             eprintln!("Native fixture media creation: {code}");
