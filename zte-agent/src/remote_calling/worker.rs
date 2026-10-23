@@ -773,6 +773,9 @@ impl Worker {
                     self.event("answering", false, None).await?;
                 }
                 if outcome.is_ok() && command.action == "dial" {
+                    if let Some(media) = self.media.as_mut() {
+                        if let Err(error) = media.start_early() { eprintln!("[calling-media] {} no audio before pickup: {error}", command.call_id); }
+                    }
                     self.call_started = Instant::now();
                     self.physical_direction = Some("mo".into());
                 }
@@ -847,6 +850,9 @@ impl Worker {
                 self.physical_id = Some(id);
                 self.physical_direction = Some(direction.into());
                 self.modem_seen = true;
+                if state != "dialing" && state != "alerting" {
+                    if let Some(media) = self.media.as_mut() { media.stop_early().await; }
+                }
                 if state == "active" && !self.modem_active { self.mark("modem reports the call active"); }
                 self.modem_active = state == "active";
                 match state {

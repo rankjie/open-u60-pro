@@ -37,6 +37,9 @@ pub struct Media {
     inbound: Option<mpsc::Receiver<Vec<u8>>>,
     audio: Option<JoinHandle<()>>,
     ringback: Option<JoinHandle<()>>,
+    early: Option<JoinHandle<()>>,
+    /// When the network's own audio last reached the phone before pickup.
+    early_heard: Arc<std::sync::Mutex<Option<Instant>>>,
     tasks: Vec<JoinHandle<()>>,
     audio_ready: watch::Receiver<bool>,
     ready_sender: watch::Sender<bool>,
@@ -53,6 +56,16 @@ fn ringback_frame(frame: u64) -> [u8; 160] {
         let level = if on { (2.0 * std::f64::consts::PI * 425.0 * n / 8000.0).sin() * 8000.0 } else { 0.0 };
         codec::encode(level as i16)
     })
+}
+
+/// A 20 ms capture chunk as PCMU, unless it is silent: a modem path that carries no call
+/// returns zeros as fast as it is read.
+fn early_frame(pcm: &[u8]) -> Option<[u8; 160]> {
+    let samples = pcm.as_chunks::<2>().0;
+    if pcm.len() != 320 || samples.iter().all(|sample| *sample == [0, 0]) {
+        return None;
+    }
+    Some(std::array::from_fn(|i| codec::encode(i16::from_le_bytes(samples[i]))))
 }
 
 pub fn capability() -> RTCRtpCodecCapability {
@@ -224,6 +237,8 @@ impl Media {
             inbound: Some(inbound),
             audio: None,
             ringback: None,
+            early: None,
+            early_heard: Arc::new(std::sync::Mutex::new(None)),
             tasks: vec![rtcp],
             audio_ready,
             ready_sender,
@@ -296,17 +311,63 @@ impl Media {
         if self.audio.is_some() || self.ringback.is_some() {
             return;
         }
-        let track = self.audio_track();
+        let (track, heard) = (self.audio_track(), self.early_heard.clone());
         self.ringback = Some(tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(20));
             for frame in 0u64.. {
                 tick.tick().await;
+                if heard.lock().unwrap().is_some_and(|at| at.elapsed() < Duration::from_millis(200)) {
+                    continue;
+                }
                 let sample = Sample { data: ringback_frame(frame).to_vec().into(), duration: Duration::from_millis(20), ..Default::default() };
                 if track.write_sample(&sample).await.is_err() {
                     return;
                 }
             }
         }));
+    }
+    /// Before an outgoing call is answered the modem may carry the network's own audio, such
+    /// as an announcement that the number does not exist. A separate helper forwards it until
+    /// the call's helper takes over at pickup; ordinary ringing gives none.
+    pub fn start_early(&mut self) -> Result<(), &'static str> {
+        if self.audio.is_some() || self.early.is_some() {
+            return Ok(());
+        }
+        let mut bridge = AudioBridge::start()?;
+        let (track, heard, call_id) = (self.audio_track(), self.early_heard.clone(), self.call_id);
+        self.early = Some(tokio::spawn(async move {
+            let silence = audio::frame(3, &[0; 320]).expect("silence frame");
+            let mut packet = [0; 8201];
+            let mut check = tokio::time::interval(Duration::from_millis(250));
+            let (mut second, mut sent, mut first) = (Instant::now(), 0u32, true);
+            loop {
+                tokio::select! {
+                    count = bridge.socket.recv(&mut packet) => {
+                        let Ok(count) = count else { return };
+                        let Ok((2, pcm)) = audio::parse(&packet[..count]) else { continue };
+                        let _ = bridge.socket.send(&silence).await;
+                        if second.elapsed() >= Duration::from_secs(1) { (second, sent) = (Instant::now(), 0); }
+                        // Real audio comes once per 20 ms; beyond that the path carries no call.
+                        let Some(frame) = early_frame(pcm) else { continue };
+                        if sent >= 60 { continue; }
+                        sent += 1;
+                        *heard.lock().unwrap() = Some(Instant::now());
+                        if first { first = false; eprintln!("[calling-media] {call_id} network audio before pickup"); }
+                        let sample = Sample { data: frame.to_vec().into(), duration: Duration::from_millis(20), ..Default::default() };
+                        if track.write_sample(&sample).await.is_err() { return; }
+                    }
+                    _ = check.tick() => if bridge.check().is_err() { return },
+                }
+            }
+        }));
+        Ok(())
+    }
+    /// Returns once the early helper is gone, so the call's own helper never runs beside it.
+    pub async fn stop_early(&mut self) {
+        if let Some(task) = self.early.take() {
+            task.abort();
+            let _ = task.await;
+        }
     }
     pub fn stop_ringback(&mut self) {
         if let Some(task) = self.ringback.take() {
@@ -316,6 +377,9 @@ impl Media {
     pub fn start_audio(&mut self, recordings: &Arc<super::recordings::Recordings>) -> Result<(), &'static str> {
         if self.audio.is_some() {
             return Ok(());
+        }
+        if self.early.is_some() {
+            return Err("early_audio_running");
         }
         self.stop_ringback();
         let mut bridge = AudioBridge::start()?;
@@ -396,6 +460,7 @@ impl Media {
     }
     pub async fn close(mut self) {
         self.stop_ringback();
+        self.stop_early().await;
         if let Some(task) = self.audio.take() {
             task.abort();
             let _ = task.await;
@@ -484,6 +549,9 @@ async fn route(peer: &RTCPeerConnection) -> String {
 impl Drop for Media {
     fn drop(&mut self) {
         self.stop_ringback();
+        if let Some(task) = self.early.take() {
+            task.abort();
+        }
         if let Some(task) = self.audio.take() {
             task.abort();
         }
@@ -607,6 +675,17 @@ mod tests {
         let crossings = second.windows(2).filter(|pair| (pair[0] < 0) != (pair[1] < 0)).count();
         assert!((845..=855).contains(&crossings), "{crossings} crossings");
     }
+    #[test]
+    fn only_audible_early_audio_is_forwarded() {
+        // A modem path that is not yet carrying a call returns zeros as fast as it is read.
+        assert_eq!(early_frame(&[0; 320]), None);
+        let mut announcement = [0u8; 320];
+        announcement[100..102].copy_from_slice(&1200i16.to_le_bytes());
+        let frame = early_frame(&announcement).unwrap();
+        assert_eq!(frame[50], codec::encode(1200));
+        assert_eq!(frame[0], codec::encode(0));
+        assert_eq!(early_frame(&[1; 318]), None, "only whole 20 ms frames are forwarded");
+    }
     #[tokio::test]
     async fn ringback_reaches_the_phone_until_audio_starts() {
         let (signals, _signals) = mpsc::channel(64);
@@ -642,6 +721,17 @@ mod tests {
         media.start_ringback();
         let payload = tokio::time::timeout(Duration::from_secs(5), tone.recv()).await.unwrap().unwrap();
         assert_eq!(payload, ringback_frame(0).to_vec());
+        // The network's own audio (an announcement) silences the generated tone while it plays.
+        let early = media.early_heard.clone();
+        let speaking = tokio::spawn(async move {
+            for _ in 0..30 { *early.lock().unwrap() = Some(Instant::now()); tokio::time::sleep(Duration::from_millis(20)).await; }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        while tokio::time::timeout(Duration::from_millis(50), tone.recv()).await.is_ok() {}
+        assert!(tokio::time::timeout(Duration::from_millis(300), tone.recv()).await.is_err(), "ringback played over the network's audio");
+        speaking.await.unwrap();
+        let resumed = tokio::time::timeout(Duration::from_secs(2), tone.recv()).await.unwrap().unwrap();
+        assert_eq!(resumed.len(), 160, "ringback resumes once the network's audio stops");
         media.stop_ringback();
         while tokio::time::timeout(Duration::from_millis(200), tone.recv()).await.is_ok() {}
         assert!(tokio::time::timeout(Duration::from_millis(300), tone.recv()).await.is_err(), "ringback kept playing");
