@@ -594,6 +594,20 @@ describe("incoming-call delivery and recovery", () => {
     expect(response.status).toBe(200);
     expect(warmed).toEqual(["production"]);
   });
+  test("a restarted service reopens APNs for the environments its phones registered", () => {
+    const f = fixture();
+    f.store.pushToken(f.phone, { token: "ab".repeat(32), environment: "sandbox" });
+    const disabled = f.store.pair({ code: f.store.pairing(f.router).code, requestId: randomUUID(), phoneToken: secret() });
+    f.store.pushToken(disabled, { token: "cd".repeat(32), environment: "production" });
+    f.store.run("UPDATE phones SET push_disabled=1 WHERE endpoint_id=?", disabled.id);
+    f.service.stop();
+    const warmed: string[] = [];
+    const push: PushProvider = { close() {}, warm(environment) { warmed.push(environment); },
+      async sendSMS() { throw new Error("Unexpected SMS push"); }, async send() { throw new Error("Unexpected push"); } };
+    const restarted = new CallingService({ store: f.store, port: 0, maintenance: false, push });
+    restarted.stop();
+    expect(warmed).toEqual(["sandbox"]);
+  });
   test("provider JWTs use ES256, the correct team/key IDs, and refresh after a clock rollback", () => {
     const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
     const apns = new APNs("SYNTHETIC1", "SYNTHETIC2", "test.openu60", privateKey.export({ type: "pkcs8", format: "pem" }).toString());

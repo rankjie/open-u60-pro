@@ -35,6 +35,8 @@ export class CallingService {
     const store = options.store;
     // The phone deduplicates an APNs retry by the stable CallKit call UUID.
     store.run("UPDATE push_outbox SET status='pending' WHERE status='inflight'");
+    for (const row of store.all<{ push_environment: "sandbox" | "production" }>(
+      "SELECT DISTINCT push_environment FROM phones WHERE push_token IS NOT NULL AND push_disabled=0")) options.push?.warm?.(row.push_environment);
     this.sms = new SMSNotifications(store, options.push);
     this.connections = new DeviceConnect(store, (id, value) => this.send(id, value));
     this.peers = new PeerRendezvous(store, id => this.sockets.has(id), (id, value) => this.send(id, value), () => {
