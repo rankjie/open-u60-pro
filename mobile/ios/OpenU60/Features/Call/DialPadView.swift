@@ -32,52 +32,57 @@ private struct DialKeyButton: View {
     let size: CGFloat
     let onPlus: (() -> Void)?
     let onDigit: (String) -> Void
-    @State private var insertedPlus = false
+    @State private var hold: Task<Void, Never>?
+    @State private var held = false
 
     var body: some View {
-        Button {
-            if !insertedPlus { onDigit(key.digit) }
-        } label: {
-            Group {
-                if key.digit == "*" {
-                    Image(systemName: "asterisk").font(.system(size: size * 0.325, weight: .regular))
-                } else if key.digit == "#" {
-                    Text("#").font(.system(size: size * 0.50, weight: .regular)).offset(y: 1)
-                } else {
-                    VStack(spacing: -2) {
-                        Text(key.digit)
-                            .font(.system(size: size * 0.475, weight: .regular))
-                        Text(key.sub.isEmpty ? " " : key.sub)
-                            .font(.system(size: max(9, size * 0.125), weight: .semibold))
-                            .tracking(1.8)
-                    }
+        Group {
+            if key.digit == "*" {
+                Image(systemName: "asterisk").font(.system(size: size * 0.325, weight: .regular))
+            } else if key.digit == "#" {
+                Text("#").font(.system(size: size * 0.50, weight: .regular)).offset(y: 1)
+            } else {
+                VStack(spacing: -2) {
+                    Text(key.digit)
+                        .font(.system(size: size * 0.475, weight: .regular))
+                    Text(key.sub.isEmpty ? " " : key.sub)
+                        .font(.system(size: max(9, size * 0.125), weight: .semibold))
+                        .tracking(1.8)
                 }
             }
-            .foregroundStyle(.primary)
-            .frame(width: size, height: size)
-            .background {
-                if #available(iOS 26.0, *) {
-                    Circle().fill(.clear).glassEffect(.regular.interactive(), in: Circle())
-                } else {
-                    Circle().fill(Color(.systemGray5))
-                }
-            }
-            .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
+        .frame(width: size, height: size)
+        .background {
+            if #available(iOS 26.0, *) {
+                Circle().fill(.clear).glassEffect(.regular.interactive(), in: Circle())
+            } else {
+                Circle().fill(Color(.systemGray5))
+            }
+        }
+        .contentShape(Circle())
+        // A Button swallows a long press on its own label, so the key tracks the touch itself:
+        // holding 0 for half a second enters "+" while the finger is still down, as in Phone.
+        .gesture(DragGesture(minimumDistance: 0)
+            .onChanged { _ in
+                guard hold == nil else { return }
+                held = false
+                hold = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(500))
+                    guard !Task.isCancelled, let onPlus else { return }
+                    held = true
+                    onPlus()
+                }
+            }
+            .onEnded { _ in
+                hold?.cancel(); hold = nil
+                if !held { onDigit(key.digit) }
+            })
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
         .accessibilityLabel(key.digit)
         .accessibilityIdentifier("dial-key-\(key.digit)")
-        .onLongPressGesture(minimumDuration: 0.5, pressing: { pressing in
-            if pressing { insertedPlus = false }
-        }) {
-            if let onPlus {
-                insertedPlus = true
-                onPlus()
-            } else {
-                onDigit(key.digit)
-                insertedPlus = true
-            }
-        }
+        .accessibilityAction { onDigit(key.digit) }
     }
 }
 

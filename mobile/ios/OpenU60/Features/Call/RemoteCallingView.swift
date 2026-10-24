@@ -177,6 +177,7 @@ struct RemoteCallingView: View {
 
             DialPadView(keySize: keySize, onPlus: {
                 if number.isEmpty { number = "+"; inputError = nil }
+                else if number.count < (number.hasPrefix("+") ? 31 : 30) { number.append("0"); inputError = nil }
             }) { digit in
                 if number.count < (number.hasPrefix("+") ? 31 : 30) { number.append(digit); inputError = nil }
             }
