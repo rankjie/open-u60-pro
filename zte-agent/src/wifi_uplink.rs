@@ -15,7 +15,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 const DIRECTORY: &str = "/data/openu60-wifi";
 const NETWORK: &str = "openu60_wifi";
-const PROBE: &str = "http://connectivitycheck.gstatic.com/generate_204";
+// Apple's success page is reachable from mainland China as well as elsewhere, unlike gstatic.
+const PROBE: &str = "https://www.apple.com/library/test/success.html";
 const UI_SOCKET: &str = "/data/openu60-wifi/ui.sock";
 
 pub fn ui_status_cli() -> Result<(), String> {
@@ -319,6 +320,7 @@ enum Action {
     Portal,
 }
 pub struct WifiUplink {
+    panda: Mutex<Option<Arc<crate::panda::PandaRouter>>>,
     connection: Mutex<Option<Arc<crate::remote_calling::RemoteCalling>>>,
     shared: Mutex<Snapshot>,
     tx: mpsc::Sender<Action>,
@@ -346,6 +348,7 @@ impl WifiUplink {
         };
         let (tx, rx) = mpsc::channel();
         Self {
+            panda: Mutex::new(None),
             connection: Mutex::new(None),
             shared: Mutex::new(Snapshot {
                 record,
@@ -368,6 +371,10 @@ impl WifiUplink {
     }
     pub fn attach_connection(&self, manager: Arc<crate::remote_calling::RemoteCalling>) {
         *self.connection.lock().unwrap() = Some(manager);
+    }
+
+    pub fn attach_panda(&self, panda: Arc<crate::panda::PandaRouter>) {
+        *self.panda.lock().unwrap() = Some(panda);
     }
     fn save(&self, record: &Record) -> Result<(), String> {
         private_write(
@@ -559,16 +566,19 @@ impl WifiUplink {
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        let active = {
+                        let (active, every) = {
                             let s = service.shared.lock().unwrap();
-                            s.record.config.mode != Mode::Hotspot
-                                && s.record.phase != "failed"
-                                && !s.busy
+                            (
+                                s.record.config.mode != Mode::Hotspot
+                                    && s.record.phase != "failed"
+                                    && !s.busy,
+                                probe_interval(&s.connectivity),
+                            )
                         };
                         if active {
                             service.repair_interface();
                             service.refresh_link();
-                            if last_probe.elapsed() >= Duration::from_secs(30) {
+                            if last_probe.elapsed() >= every {
                                 service.check_portal();
                                 service.synchronize_clock();
                                 last_probe = Instant::now();
@@ -672,6 +682,11 @@ impl WifiUplink {
             Err(_) => return failure(400, "Invalid local Wi-Fi parameters"),
         };
         match request.action.as_str() {
+            "panda-status" | "panda-action" => match self.panda.lock().unwrap().as_ref() {
+                Some(panda) if request.action == "panda-status" => panda.native_status(),
+                Some(panda) => panda.native_action(&body),
+                None => failure(503, "PandaFan is unavailable"),
+            },
             "connection" => match self.connection.lock().unwrap().as_ref() {
                 Some(manager) => (200, manager.connection_info()),
                 None => failure(503, "Remote access is unavailable"),
@@ -1922,8 +1937,9 @@ fn decode_ssid(value: &str) -> String {
 fn portal_result(
     status: u16,
     location: Option<&str>,
+    body: &str,
 ) -> Result<(&'static str, Option<String>), String> {
-    if status == 204 {
+    if status == 200 && body.contains("<BODY>Success</BODY>") {
         return Ok(("online", None));
     }
     if let Some(location) = location {
@@ -1942,9 +1958,14 @@ fn portal_result(
         return Ok(("captive", Some(url.to_string())));
     }
     Ok((
-        if status == 200 { "captive" } else { "limited" },
+        if (200..300).contains(&status) { "captive" } else { "limited" },
         Some(PROBE.into()),
     ))
+}
+/// A working uplink is rechecked rarely; one that is offline or behind a portal is rechecked
+/// often so a completed login shows up quickly.
+fn probe_interval(connectivity: &str) -> Duration {
+    Duration::from_secs(if connectivity == "online" { 600 } else { 30 })
 }
 fn probe_portal(iface: &str) -> Result<(&'static str, Option<String>), String> {
     let builder = reqwest::blocking::Client::builder()
@@ -1962,13 +1983,18 @@ fn probe_portal(iface: &str) -> Result<(&'static str, Option<String>), String> {
         .get(PROBE)
         .send()
         .map_err(|_| "Connectivity probe failed")?;
-    portal_result(
-        response.status().as_u16(),
-        response
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|v| v.to_str().ok()),
-    )
+    let status = response.status().as_u16();
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let mut body = String::new();
+    response
+        .take(4096)
+        .read_to_string(&mut body)
+        .map_err(|_| "Connectivity probe failed")?;
+    portal_result(status, location.as_deref(), &body)
 }
 
 #[cfg(test)]
@@ -2162,18 +2188,33 @@ mod tests {
     }
     #[test]
     fn portal_handles_redirects_and_full_login_pages() {
-        assert_eq!(portal_result(204, None).unwrap(), ("online", None));
+        let success = "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>";
+        assert_eq!(portal_result(200, None, success).unwrap(), ("online", None));
         assert_eq!(
-            portal_result(302, Some("https://login.example/auth")).unwrap(),
+            portal_result(302, Some("https://login.example/auth"), "").unwrap(),
             ("captive", Some("https://login.example/auth".into()))
         );
-        assert_eq!(portal_result(200, None).unwrap().0, "captive");
+        assert_eq!(
+            portal_result(302, Some("/login?next=1"), "").unwrap(),
+            ("captive", Some("https://www.apple.com/login?next=1".into()))
+        );
+        // A login page served in place of the success page is a portal, not the internet.
+        assert_eq!(portal_result(200, None, "<html>Please sign in</html>").unwrap().0, "captive");
+        assert_eq!(portal_result(204, None, "").unwrap().0, "captive");
+        assert_eq!(portal_result(503, None, success).unwrap().0, "limited");
         for location in [
             "file:///etc/passwd",
             "javascript:alert(1)",
             "https://user:pass@login.example/",
         ] {
-            assert!(portal_result(302, Some(location)).is_err());
+            assert!(portal_result(302, Some(location), "").is_err());
+        }
+    }
+    #[test]
+    fn a_working_uplink_is_probed_rarely() {
+        assert_eq!(probe_interval("online"), Duration::from_secs(600));
+        for state in ["captive", "limited", "offline", ""] {
+            assert_eq!(probe_interval(state), Duration::from_secs(30));
         }
     }
     #[test]

@@ -30,14 +30,14 @@ All other daemons appear to run fine — making the root cause very hard to diag
 zte_topsw_mc, zte_router, zte_topsw_data, zte_topsw_nwinfo,
 zte_topsw_mdm, zte_topsw_sleep_faw, zte_topsw_apn, zte_topsw_wms,
 zte_topsw_key, zte_topsw_led, zte_topsw_tr098db, zte_dm,
-zte_topsw_fota_result, zte_topsw_devui, zte_topsw_wlan, zte_smart_manage
+zte_topsw_fota_result, zte_topsw_devui, zte_topsw_wlan
 ```
 
 ### Safe to disable via init.d (NOT in daemon.conf):
 ```
 zte_topsw_diag, zte_topsw_samba, zte_topsw_nfc, zte_topsw_get_brand,
 zte_topsw_jwxk_query, zte_topsw_tr069_sub, zte_mqtt_sdk_st,
-zte_topsw_dua, zte-topsw-tunnel
+zte_topsw_dua, zte-topsw-tunnel, zte_smart_manage, scp_agent
 ```
 
 ### How to properly disable a daemon.conf daemon:
