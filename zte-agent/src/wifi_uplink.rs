@@ -16,7 +16,8 @@ use std::time::{Duration, Instant, SystemTime};
 const DIRECTORY: &str = "/data/openu60-wifi";
 const NETWORK: &str = "openu60_wifi";
 // Apple's success page is reachable from mainland China as well as elsewhere, unlike gstatic.
-const PROBE: &str = "https://www.apple.com/library/test/success.html";
+// Plain HTTP so a captive portal can redirect it to the login page.
+const PROBE: &str = "http://www.apple.com/library/test/success.html";
 const UI_SOCKET: &str = "/data/openu60-wifi/ui.sock";
 
 pub fn ui_status_cli() -> Result<(), String> {
@@ -1947,6 +1948,9 @@ fn portal_result(
         let url = base
             .join(location)
             .map_err(|_| "Invalid captive portal URL")?;
+        if url.scheme() == "https" && url.host_str() == base.host_str() && url.path() == base.path() {
+            return Ok(("online", None));
+        }
         if !["http", "https"].contains(&url.scheme())
             || !url.username().is_empty()
             || url.password().is_some()
@@ -2196,7 +2200,18 @@ mod tests {
         );
         assert_eq!(
             portal_result(302, Some("/login?next=1"), "").unwrap(),
-            ("captive", Some("https://www.apple.com/login?next=1".into()))
+            ("captive", Some("http://www.apple.com/login?next=1".into()))
+        );
+        // Apple upgrading the same page to HTTPS is Apple answering, not a portal.
+        for status in [301, 302, 307, 308] {
+            assert_eq!(
+                portal_result(status, Some("https://www.apple.com/library/test/success.html"), "").unwrap(),
+                ("online", None)
+            );
+        }
+        assert_eq!(
+            portal_result(302, Some("https://www.apple.com.portal.example/library/test/success.html"), "").unwrap().0,
+            "captive"
         );
         // A login page served in place of the success page is a portal, not the internet.
         assert_eq!(portal_result(200, None, "<html>Please sign in</html>").unwrap().0, "captive");

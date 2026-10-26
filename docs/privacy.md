@@ -18,7 +18,7 @@ upload host), `zte_topsw_mdm` and `kpi_gen` (local only), NTP, and the GNSS assi
 configuration (injection off).
 
 Ours: PandaFan reaches its API (`www.apidarouter.com`), and the Wi-Fi uplink checks
-`https://www.apple.com/library/test/success.html` every 10 minutes while online (every
+`http://www.apple.com/library/test/success.html` every 10 minutes while online (every
 30 seconds while offline or behind a portal).
 
 ## What `scripts/install-privacy.sh` does
